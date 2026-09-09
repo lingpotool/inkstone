@@ -1,0 +1,55 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.egg-info/
+.eggs/
+build/
+dist/
+sdist/
+wheels/
+.installed.cfg
+*.manifest
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- 测试与质量 ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+
+# ---- 黄金图测试的临时产物 ----
+tests/golden/**/*.actual.png
+tests/golden/**/*.diff.png
+tests/golden/**/failures/
+
+# ---- 文档构建 ----
+docs/_build/
+site/
+
+# ---- 编辑器 / IDE ----
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ---- 操作系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 本地产物 ----
+*.log
+.private/

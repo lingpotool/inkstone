@@ -1,0 +1,95 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inkstone"
+dynamic = ["version"]
+description = "专业的跨平台 Python 原生 UI 系统：纯 Python 编写，自绘渲染，Windows / macOS / Linux 一等公民"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["gui", "ui", "desktop", "cross-platform", "widget", "python"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: MacOS X",
+    "Environment :: X11 Applications",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: User Interfaces",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+# 核心包零依赖；平台与渲染能力按需安装，保证最小化部署可行。
+sdl2 = ["PySDL2>=0.9.16"]
+skia = ["skia-python>=132.0"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pre-commit>=3.8",
+]
+
+[project.urls]
+Homepage = "https://github.com/REPLACE_ME/inkstone"
+Documentation = "https://github.com/REPLACE_ME/inkstone/tree/main/docs"
+Roadmap = "https://github.com/REPLACE_ME/inkstone/blob/main/ROADMAP.md"
+Issues = "https://github.com/REPLACE_ME/inkstone/issues"
+
+[project.scripts]
+inkstone = "inkstone.cli:main"
+
+[tool.hatch.version]
+path = "src/inkstone/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inkstone"]
+
+[tool.hatch.build.targets.sdist]
+include = ["/src", "/docs", "/tests", "/examples", "/README.md", "/LICENSE", "/ROADMAP.md"]
+exclude = ["/prototype"]
+
+# ---------------- 代码质量 ----------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unreachable = true
+files = ["src"]
+[[tool.mypy.overrides]]
+module = ["skia.*", "sdl2.*", "glfw.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "golden: 黄金图（截图）对比测试，需要光栅后端",
+    "platform: 需要真实窗口/输入的平台相关测试",
+    "slow: 耗时较长的测试",
+]
+
+[tool.coverage.run]
+source = ["src/inkstone"]
+branch = true

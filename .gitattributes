@@ -1,0 +1,27 @@
+# 统一换行：仓库内一律 LF，检出时按平台自动转换，避免三平台 CI 出现幽灵 diff
+* text=auto eol=lf
+
+# Windows 脚本必须保持 CRLF，否则无法执行
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制资源不做任何转换（黄金图基线尤其重要）
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.exe binary
+
+# 让 GitHub 正确识别语言构成
+docs/** linguist-documentation
+prototype/** linguist-documentation
