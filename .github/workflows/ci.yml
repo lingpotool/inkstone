@@ -87,7 +87,15 @@ jobs:
   # ---------------------------------------------------------------- 覆盖率
   coverage:
     name: coverage · ≥85%
-    runs-on: ubuntu-latest
+    # **在 Windows 上测覆盖率**，因为平台独占代码只能在自己的平台上跑。
+    # `backend/gdi_fonts.py` 是 Windows 专有的真字体引擎，在 Linux 上
+    # 只能跳过（`gdi_font_engine()` 直接返回 None），于是那 800 行
+    # 全被算成"未覆盖"，覆盖率从 89% 掉到 83%。
+    #
+    # 与其把它们 omit 掉（那等于对自己最核心的一组代码闭眼），
+    # 不如在能跑它们的平台上测。将来有了 macOS/Linux 字体引擎，
+    # 同样的道理——**哪个平台的代码，就在哪个平台量**。
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -98,11 +106,11 @@ jobs:
         run: python -m pip install -e ".[dev]"
       # 排除 slow：性能断言的预算在覆盖率插桩下必然失真，
       # 把它和覆盖率混在一起会得到一个"时红时绿"的假信号。
-      # 性能由下面的 perf 任务在无插桩环境下单独把关。
+      # 性能由 perf 任务在无插桩环境下单独把关。
       - name: 覆盖率（ROADMAP Phase 1 要求 ≥ 85%）
-        run: |
-          python -m pytest tests -q -m "not slow" \
-            --cov=src/inkstone --cov-report=term-missing --cov-fail-under=85
+        # 写成一行：Windows runner 默认用 pwsh，行连接符与 bash 不同，
+        # 少一层 shell 细节就少一个会烂的地方。
+        run: python -m pytest tests -q -m "not slow" --cov=src/inkstone --cov-report=term-missing --cov-fail-under=85
 
   # ---------------------------------------------------------------- 性能
   # 无插桩，才能真正测出布局与排版的耗时。

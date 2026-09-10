@@ -106,13 +106,17 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 |---|---|---|
 | `lint` | ruff format --check + ruff check + mypy | 风格与类型常被绕过，单独可见 |
 | `test` | 三平台（py3.12）+ Ubuntu py3.10，`-m "not slow"` | 正确性不该取决于 runner 当时有多忙 |
-| `coverage` | `-m "not slow"` + `--cov-fail-under=85` | ROADMAP 要求 ≥ 85% |
+| `coverage` | `-m "not slow"` + `--cov-fail-under=85`，**在 Windows 上跑** | 平台独占代码只能在自己的平台上量 |
 | `perf` | `-m slow`，**无插桩** | 覆盖率插桩会让性能断言随机变红，两者必须分开 |
 | `architecture` | `test_architecture.py` | 分层被破坏要在 CI 上有指名道姓的红点 |
 
-**踩过的坑（值得记住）**：最初 `test` 任务跑全量测试（含 `slow`），
-结果 py3.10 的共享 runner 上性能断言以 2.10ms 对 2.0ms 挂了。
-墙上时钟断言天生会抖——正确性任务必须排除它。
+**踩过的坑（值得记住）**：
+1. 最初 `test` 任务跑全量测试（含 `slow`），结果 py3.10 的共享 runner 上
+   性能断言以 2.10ms 对 2.0ms 挂了。墙上时钟断言天生会抖——正确性任务必须排除它。
+2. 覆盖率任务原本在 Ubuntu 上跑，但 `backend/gdi_fonts.py` 是 Windows 专有的
+   真字体引擎，在 Linux 上只能整段跳过，于是 800 行全被算成"未覆盖"
+   （89% → 83%）。**与其 omit 掉（等于对自己最核心的代码闭眼），
+   不如在能跑它的平台上量。** 将来有 macOS/Linux 字体引擎时同理。
 
 黄金图的 CI 行为值得说清：**三平台逐字节相同，已经在 CI 上验证过了**
 （`77fed3a` 首次推送即 8 个任务全绿）。无头度量表是纯数据、

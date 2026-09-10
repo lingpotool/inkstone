@@ -35,7 +35,6 @@ check: lint type test       ## 提交前必跑：lint + 类型 + 测试
 cov:                        ## 覆盖率门禁（排除 slow：插桩会让性能断言失真）
 	$(RUN) -m pytest tests -q -m "not slow" \
 		--cov=src/inkstone --cov-report=term-missing --cov-fail-under=85
-
 perf:                       ## 性能预算（无插桩才准）
 	$(RUN) -m pytest tests -q -m "slow"
 
