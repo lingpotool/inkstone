@@ -23,6 +23,7 @@ Phase 1 · 地基进行中。真实代码只集中在 **布局引擎**：
 | `layout/stack.py` | ✅ Stack / Positioned / Align |
 | `layout/scroll.py` | ✅ ScrollView（向子级派发无限主轴约束） |
 | `core/`（key / widget / element / render_object / binding） | ✅ 三棵树 + 帧调度 |
+| `backend/`（base / headless / sdl2） | ✅ 平台抽象层：归一化事件 + 无头后端 + SDL2 |
 | `gfx/color.py` | ✅ Color（hex 解析、插值、WCAG 对比度） |
 | `style/`（tokens / theme / resolve / variants） | ✅ 三层令牌 + 明暗主题 + 变体解析 |
 | `widgets/`（basic / layout / form） | ✅ Box / Card / Row / Column / Flexible / Button / Input |
@@ -30,9 +31,12 @@ Phase 1 · 地基进行中。真实代码只集中在 **布局引擎**：
 | `devtools/screenshot.py` | ✅ 确定性截图 + 黄金图基线（5 张） |
 | 其余 58 个模块（gfx GL+Skia / text / events / primitives …） | ⬜ 占位桩 |
 
-282 个无头单测全绿，**黄金图逐字节比对**也跑通。登录表单
+342 个无头单测全绿，**黄金图逐字节比对**也跑通。登录表单
 （Card + 两个 Input + Row 里一个 ghost 取消 + 一个 fill 登录按钮）
 能完整画成 PNG 并在每次跑测试时与基线逐字节相等。
+
+按 ROADMAP 顺序，Phase 1 剩下：③ 文本（字体度量与 CJK 回退链）→
+⑦ Text 组件 → ⑧ CI 配置。文本是 Text 组件与"中文输入"验收项的前置。
 
 **占位桩长这样**：一段说明用途的 docstring + `__all__: list[str] = []`。
 看到这个形态就别指望里面有实现，也别在它上面继续叠代码——先实现它。

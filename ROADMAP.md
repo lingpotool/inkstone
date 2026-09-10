@@ -36,8 +36,12 @@
 ### 交付
 
 1. **平台抽象层**：`backend/base.py` 协议 + SDL2 实现 + headless 实现
-   - 窗口生命周期、DPI 报告、光标、剪贴板
-   - 事件泵与事件归一化
+   - **进度（已实现）**：`backend/base.py`（归一化事件 + Backend 协议）、
+     `backend/headless.py`（无头后端，完整测试）、`backend/sdl2.py`（ctypes 绑定）。
+     40 个测试：窗口生命周期、注入式事件、**注入式时钟**、DPI 变化广播、
+     键名归一化（纯函数，无 SDL2 也能测）。
+   - 覆盖范围说清楚：SDL2 的 `create_window` / `pump_events` 需要真窗口与输入设备，
+     CI 跑不了，代码里已标注"未在 CI 覆盖"；能在无环境测的部分都拆成纯函数测了。
 2. **渲染管线**：显示列表 + 自研 GL 光栅后端（先不引入 Skia，减少变量）
    - 矩形 / 圆角矩形 / 描边 / 文本 / 裁剪
 3. **文本**：字体加载与度量 + 单行/多行排版 + **CJK 字体回退链**
@@ -59,8 +63,8 @@
      `style/tokens.py`（12 级色板、8pt 间距、圆角、字号、控件高度、阴影 e0–e4、
      动效时长与缓动、语义令牌 25 个）、`style/theme.py`（明暗两版 + 取值 API）已实现。
      **明暗两版的 WCAG 2.2 AA 对比度已作为断言进测试**——颜色是我调的，对比度是算的。
-   - 未完成：组件令牌层、变体解析（`variants.py` / `resolve.py`）、
-     密度档位、高对比主题、prefers-reduced-motion。
+   - 变体解析已完成（`variants.py` / `resolve.py`）。
+   - 未完成：密度档位、高对比主题、prefers-reduced-motion。
 7. **最小组件集**：Box / Text / Button / Input / Row / Column / Card
    - **进度（除 Text 外已实现）**：Box / Card / Row / Column / Flexible / Button / Input
      已完成，配套 `style/variants.py` 的 Button 变体配方（6 变体 × 5 尺寸 × 8 状态）
