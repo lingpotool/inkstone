@@ -3,19 +3,22 @@
 它是整个渲染体系里的"事实源"：
 
     同样的显示列表 → 逐字节相同的像素。
-    不读时钟、不用随机数、不走任何平台路径。
 
 黄金图测试、CI、以及将来 GL 后端上线后的对比基准，都拿它当裁判。
 
-两条刻意的取舍：
+抗锯齿怎么做的，以及为什么它仍然确定：
 
-1. **不做抗锯齿。** 抗锯齿的实现方式太多了，不同算法会得到不同像素。
-   硬边是丑了点，但它是**确定性的**——先保证"逐字节可比对"，
-   抗锯齿以后作为一个可开可关的选项加回来（开了就不再追求逐字节一致）。
-2. **不画阴影。** 模糊阴影需要卷积滤镜，属于 v1 的事。
-   卡片现在有边框保层级，阴影令牌照常在，只是光栅端暂时忽略。
+    每个像素计算它到形状边缘的**有符号距离**（SDF），
+    边缘 1px 宽内按距离做线性覆盖。这是纯浮点数学——
+    不采样、不用随机数、不读时钟、不走任何平台路径。
+    IEEE 754 双精度 + 正确舍入的 sqrt 在所有主流平台上
+    给出完全相同的比特，所以结果**依然逐字节确定**。
+    之前"为了确定性而关掉抗锯齿"是把两件事错误地划了等号。
 
-状态：已实现。
+另一条取舍：**不画阴影**。模糊阴影需要卷积滤镜，属 v1。
+卡片现在有边框保层级，阴影令牌照常在，光栅端暂时忽略。
+
+状态：已实现（SDF 抗锯齿）。
 """
 
 from __future__ import annotations
@@ -66,21 +69,32 @@ class SoftwareRasterizer(RasterBackend):
             return
 
         radius = min(radius, rect.width / 2.0, rect.height / 2.0)
+        half_w, half_h = rect.width / 2.0, rect.height / 2.0
+        center_x, center_y = rect.left + half_w, rect.top + half_h
+
         x0, y0 = _clamp_to_canvas(rect.left, rect.top, clip, w, h)
         x1, y1 = _clamp_to_canvas(rect.right, rect.bottom, clip, w, h)
 
         for y in range(y0, y1):
+            # 把不随 x 变化的部分提到行外
+            qy = abs(y + 0.5 - center_y) - half_h + radius
             for x in range(x0, x1):
-                if radius > 0.0 and not _inside_rounded(x + 0.5, y + 0.5, rect, radius):
+                qx = abs(x + 0.5 - center_x) - half_w + radius
+                coverage = _edge_coverage(_rounded_sdf(qx, qy, radius))
+                if coverage <= 0.0:
                     continue
-                _blend_pixel(buf, w, x, y, color)
+                if coverage >= 1.0:
+                    _blend_pixel(buf, w, x, y, color)
+                else:
+                    _blend_pixel(buf, w, x, y, color.with_alpha(color.a * coverage))
+
+    # ------------------------------------------------------------ 描边
 
     def _stroke(self, buf: bytearray, w: int, h: int, op: StrokeRectOp) -> None:
-        """描边 = 圆环：外圈圆角矩形 **减去** 内圈圆角矩形。
+        """描边 = 圆环：外圈覆盖 **减去** 内圈覆盖。
 
-        曾经用"四条矩形条拼边框"，结果圆角处会漏：条的两端被圆角裁掉，
-        填充又是圆的，于是**边框与圆角之间裂开露出底色**。
-        圆环法让描边严格贴合圆角轮廓，四角不会有任何缝隙。
+        外圈和内圈各自走 SDF 抗锯齿，圆环把描边严格贴合在圆角轮廓上——
+        四角既无缝隙（早期"四条矩形条"的 bug），边缘也平滑。
         """
         rect, width, color = op.rect, op.width, op.color
         if color.a == 0.0 or width <= 0.0 or rect.width <= 0.0 or rect.height <= 0.0:
@@ -91,23 +105,69 @@ class SoftwareRasterizer(RasterBackend):
         )
         inner_w, inner_h = rect.width - 2 * width, rect.height - 2 * width
         has_inner = inner_w > 0.0 and inner_h > 0.0
-        inner = Rect(rect.left + width, rect.top + width, max(inner_w, 0.0), max(inner_h, 0.0))
         inner_radius = max(0.0, outer_radius - width)
+
+        outer_half_w, outer_half_h = rect.width / 2.0, rect.height / 2.0
+        center_x, center_y = rect.left + outer_half_w, rect.top + outer_half_h
+        # 内圈与外圈同心（等宽内缩），只是半长小了 width
+        inner_half_w, inner_half_h = max(inner_w, 0.0) / 2.0, max(inner_h, 0.0) / 2.0
 
         x0, y0 = _clamp_to_canvas(rect.left, rect.top, op.clip, w, h)
         x1, y1 = _clamp_to_canvas(rect.right, rect.bottom, op.clip, w, h)
 
         for y in range(y0, y1):
+            py = y + 0.5
+            qy_outer = abs(py - center_y) - outer_half_h + outer_radius
+            qy_inner = abs(py - center_y) - inner_half_h + inner_radius
             for x in range(x0, x1):
-                px, py = x + 0.5, y + 0.5
-                if not _inside_rounded(px, py, rect, outer_radius):
+                px = x + 0.5
+                qx_outer = abs(px - center_x) - outer_half_w + outer_radius
+                cov_outer = _edge_coverage(_rounded_sdf(qx_outer, qy_outer, outer_radius))
+                if cov_outer <= 0.0:
                     continue
-                if has_inner and _inside_rounded(px, py, inner, inner_radius):
+
+                cov_inner = 0.0
+                if has_inner:
+                    qx_inner = abs(px - center_x) - inner_half_w + inner_radius
+                    cov_inner = _edge_coverage(_rounded_sdf(qx_inner, qy_inner, inner_radius))
+
+                ring = cov_outer - cov_inner
+                if ring <= 0.0:
                     continue
-                _blend_pixel(buf, w, x, y, color)
+                if ring >= 1.0:
+                    _blend_pixel(buf, w, x, y, color)
+                else:
+                    _blend_pixel(buf, w, x, y, color.with_alpha(color.a * ring))
 
 
 # ---------------------------------------------------------------- 几何辅助
+
+# 抗锯齿过渡带宽（像素）。边缘两侧各 0.5px 内做线性覆盖。
+_AA_WIDTH = 0.5
+
+
+def _rounded_sdf(qx: float, qy: float, radius: float) -> float:
+    """圆角矩形的有符号距离。`qx/qy = abs(p−center) − half + radius`。
+
+    负数在形状内，正数在外。这是 Inigo Quilez 的标准公式，
+    内部像素走无开方的快路径。
+    """
+    outside = 0.0
+    if qx > 0.0 or qy > 0.0:
+        ox = max(qx, 0.0)
+        oy = max(qy, 0.0)
+        outside = (ox * ox + oy * oy) ** 0.5
+    inside = min(max(qx, qy), 0.0)
+    return float(outside + inside - radius)
+
+
+def _edge_coverage(distance: float) -> float:
+    """有符号距离 → 覆盖率 0..1。边缘 1px 内线性过渡。"""
+    if distance <= -_AA_WIDTH:
+        return 1.0
+    if distance >= _AA_WIDTH:
+        return 0.0
+    return _AA_WIDTH - distance
 
 
 def _clamp_to_canvas(x: float, y: float, clip: Rect | None, w: int, h: int) -> tuple[int, int]:
@@ -119,13 +179,6 @@ def _clamp_to_canvas(x: float, y: float, clip: Rect | None, w: int, h: int) -> t
 
 def _clamp_int(value: float, low: float, high: float, limit: int) -> int:
     return max(0, min(limit, int(max(low, min(high, value)))))
-
-
-def _inside_rounded(px: float, py: float, rect: Rect, radius: float) -> bool:
-    """点是否在圆角矩形内。用像素中心采样，保证确定性。"""
-    cx = min(max(px, rect.left + radius), rect.right - radius)
-    cy = min(max(py, rect.top + radius), rect.bottom - radius)
-    return (px - cx) ** 2 + (py - cy) ** 2 <= radius * radius
 
 
 # ---------------------------------------------------------------- 像素混合

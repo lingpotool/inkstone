@@ -123,28 +123,52 @@ class TestRoundedCornerRing:
         assert fb.pixel(0, 0)[:3] == (255, 0, 255)
         assert fb.pixel(1, 1)[:3] == (255, 0, 255)
 
-    def test_every_pixel_matches_the_rounded_ring_spec(self):
-        """最强的那条：逐像素对照"外圈圆角矩形 − 内圈圆角矩形"的解析解。
+    def test_deep_regions_are_exact_and_edges_are_smooth(self):
+        """最强的那条：深区逐像素精确，边缘 1px 过渡带允许混合色。
 
-        外圈 (0,0,40,40) r=10，内圈 (2,2,36,36) r=8——两个圆心重合，
-        所以判据简化成"到 (10,10) 的距离落在 8 与 10 之间即为边框"。
-        任何缝隙、任何溢出都会被这一条抓到。
+        外圈 (0,0,40,40) r=10，内圈 (2,2,36,36) r=8，两圆心重合。
+        离边缘 ≥1px 的区域颜色必须是精确的；|距离| < 1 的过渡带
+        做 SDF 抗锯齿，允许混合。
         """
         fb = self.frame()
+        saw_smooth_edge = False
         for y in range(40):
             for x in range(40):
                 px, py = x + 0.5, y + 0.5
-                cx, cy = min(max(px, 10.0), 30.0), min(max(py, 10.0), 30.0)
-                dist_sq = (px - cx) ** 2 + (py - cy) ** 2
-                if dist_sq <= 64.0:
-                    expected = FILL
-                elif dist_sq <= 100.0:
-                    expected = BORDER
+                d_outer = _dist(px, py, Rect(0, 0, 40, 40), 10.0)
+                d_inner = _dist(px, py, Rect(2, 2, 36, 36), 8.0)
+                rgb = fb.pixel(x, y)[:3]
+
+                if d_outer <= -1.0 and d_inner >= 1.0:
+                    assert rgb == (BORDER.r, BORDER.g, BORDER.b), f"环深区 ({x},{y}) 不是边框色"
+                elif d_inner <= -1.0:
+                    assert rgb == (FILL.r, FILL.g, FILL.b), f"填充深区 ({x},{y}) 不是填充色"
+                elif d_outer >= 1.0:
+                    assert rgb == (BG.r, BG.g, BG.b), f"形状外 ({x},{y}) 有东西外溢"
                 else:
-                    expected = BG
-                assert fb.pixel(x, y)[:3] == (expected.r, expected.g, expected.b), (
-                    f"({x},{y}) 期望 {expected.to_hex()}，实际不符"
-                )
+                    # 过渡带：应当出现真正的混合色，而不是三选一的硬边
+                    if rgb not in _PURE:
+                        saw_smooth_edge = True
+        assert saw_smooth_edge, "没找到任何抗锯齿过渡像素——边缘还是硬的"
+
+
+_PURE = {
+    (BG.r, BG.g, BG.b),
+    (FILL.r, FILL.g, FILL.b),
+    (BORDER.r, BORDER.g, BORDER.b),
+}
+
+
+def _dist(px: float, py: float, rect: Rect, radius: float) -> float:
+    """测试侧的独立 SDF 实现（与光栅器无关，起交叉验证作用）。"""
+    cx = (rect.left + rect.right) / 2
+    cy = (rect.top + rect.bottom) / 2
+    qx = abs(px - cx) - rect.width / 2 + radius
+    qy = abs(py - cy) - rect.height / 2 + radius
+    ox, oy = max(qx, 0.0), max(qy, 0.0)
+    outside = (ox * ox + oy * oy) ** 0.5
+    inside = min(max(qx, qy), 0.0)
+    return outside + inside - radius
 
     def test_interior_is_untouched_by_the_ring(self):
         fb = self.frame()
