@@ -40,10 +40,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/REPLACE_ME/inkstone"
-Documentation = "https://github.com/REPLACE_ME/inkstone/tree/main/docs"
-Roadmap = "https://github.com/REPLACE_ME/inkstone/blob/main/ROADMAP.md"
-Issues = "https://github.com/REPLACE_ME/inkstone/issues"
+Homepage = "https://github.com/lingpotool/inkstone"
+Documentation = "https://github.com/lingpotool/inkstone/tree/main/docs"
+Roadmap = "https://github.com/lingpotool/inkstone/blob/main/ROADMAP.md"
+Issues = "https://github.com/lingpotool/inkstone/issues"
 
 [project.scripts]
 inkstone = "inkstone.cli:main"
@@ -67,7 +67,15 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
-ignore = ["E501"]
+ignore = [
+    "E501",   # 行长由 formatter 与人工判断共同负责，不做机械限制
+    # 本项目是"中文一等公民"：注释、文档串、错误提示里大量使用中文标点
+    # （，。（）「」）。RUF001/002/003 会把它们当成"易混淆的 Unicode 字符"，
+    # 对中文项目属于误报，故整体关闭。
+    "RUF001",
+    "RUF002",
+    "RUF003",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B011"]

@@ -1,0 +1,126 @@
+# AGENT.md
+
+给在这个仓库里干活的 AI / 新贡献者看的。读一遍再动手，能省掉大部分返工。
+
+## 这是什么
+
+**inkstone** —— 专业的跨平台 Python 原生 UI 系统。纯 Python 编写、自绘渲染、
+Windows / macOS / Linux 一等公民、中文一等公民。
+
+一句话目标：**让"用 Python 描述界面"成为一件专业、可靠、能发布到三个平台的事。**
+
+## 当前状态（动手前先看这里）
+
+Phase 1 · 地基进行中。真实代码只集中在 **布局引擎**：
+
+| 模块 | 状态 |
+|---|---|
+| `layout/types.py` | ✅ 几何原语（不可变） |
+| `layout/protocol.py` | ✅ 轴 / 对齐 / Sizing / LayoutError |
+| `layout/box.py` | ✅ RenderBox 盒子模型 |
+| `layout/flex.py` | ✅ Row / Column |
+| `layout/stack.py` | ✅ Stack / Positioned / Align |
+| `layout/grid.py`、`layout/scroll.py` | ⬜ 仍是 8 行占位桩 |
+| 其余 80 个模块（gfx / text / core / style / widgets …） | ⬜ 占位桩 |
+
+**占位桩长这样**：一段说明用途的 docstring + `__all__: list[str] = []`。
+看到这个形态就别指望里面有实现，也别在它上面继续叠代码——先实现它。
+
+## 铁律
+
+这五条不是风格建议，是会被 review 打回的硬约束。
+
+1. **分层单向依赖，禁止反向。**
+   `L0 平台 → L1 输入/a11y → L2 渲染 → L3 文本 → L4 布局 → L5 组件树 → L6 样式 → L7 组件 → L8 应用`。
+   下层不许 import 上层。`layout` 不许 import `core`。
+
+2. **组件里不许出现字面量。** 颜色 / 字号 / 间距 / 圆角 / 阴影 / 动效时长，
+   一律来自 `style/tokens.py`。审查标准是全文搜 `#[0-9a-fA-F]{6}` 与硬编码字号间距为 **0**。
+   要新值？先加令牌，再用令牌。
+
+3. **确定性优先于一切。** 同样的输入必须得到逐像素相同的输出。
+   渲染不读墙上时钟（时钟由后端注入）、不用随机数、不依赖字典遍历序之外的任何顺序。
+   这是"可无头截图自检"和"AI 能稳定生成界面"的前提。
+
+4. **中文是一等公民，不是适配项。** IME 组合态、CJK 字体回退链、标点换行禁则、
+   涨红跌绿，都要从第一天按中文需求设计。注释与文档用中文写。
+
+5. **布局错了要报错，不许静默。** "无限约束遇到 fill"这类情况抛 `LayoutError`，
+   带上节点路径与修复建议。内容溢出要标记出来给检查器看，不许悄悄裁切。
+
+## 环境
+
+仓库里没有全局依赖，**一律用项目虚拟环境**：
+
+```bash
+./.venv/Scripts/python.exe -m pytest tests -q      # Windows
+./.venv/Scripts/python.exe -m ruff check src tests
+./.venv/Scripts/python.exe -m mypy
+```
+
+没有 venv 时重建：
+
+```bash
+python -m venv .venv && ./.venv/Scripts/python.exe -m pip install -e ".[dev]"
+```
+
+系统 Python 里**没有** pytest，直接用 `python -m pytest` 会失败。
+
+## 提交前必跑
+
+```bash
+make check   # = ruff check + ruff format --check + mypy(strict) + pytest
+```
+
+四条全绿才能提。mypy 是 **strict 模式**，所有函数必须有完整注解。
+
+### 关于 ruff 的一条重要配置
+
+`pyproject.toml` 里永久忽略了 **RUF001 / RUF002 / RUF003**。
+这三条会把中文标点（，。（）「」）判成"易混淆的 Unicode 字符"——
+对中文项目纯属误报。**不要"顺手"把它们打开**，改完会瞬间冒出 600+ 个假错误。
+
+## 已确立的实现约定
+
+这些是踩过坑之后定下来的，改动前先想清楚：
+
+- **盒模型的 `width` 是 border-box。** `width=fixed(160)` 且 `padding=12` 时总宽就是
+  160、内容区 136。把 fixed 解释成内容宽度会让 padding 把盒子撑大——没人想要这个。
+- **baseline 对齐必须整组计算。** 参考线是组内最大的 baseline。
+  逐个子级单独算会让每个都拿自己当参考线，结果恒为 0，表现为"写了 baseline 但界面毫无变化"。
+- **`flex` 子级默认 `fit=TIGHT`。** 说"给它 flex 权重"，意图几乎总是"吃掉分到的份额"。
+  要 LOOSE（可小于份额）请显式传。
+- **`Sizing.fill()` 只在非 flex 父级下生效。** 在 Flex 主轴上想撑满，用
+  `row.add(child, flex=1)`，不是给子级设 fill。
+- **浮点余数全给最后一个 flex 子级**，保证重复布局逐位一致。像素吸附是光栅层的事。
+- **Stack 的定位子级不参与决定尺寸。** 否则角标会把卡片撑大。
+- **Row 与 Column 共用一份实现。** 所有几何先换算到 (main, cross) 抽象轴，
+  最后一步才翻译回 (x, y)。写两遍一定会出现"Row 有 bug、Column 没有"。
+
+## 测试怎么写
+
+- 布局引擎必须 **100% 无窗口可测**——不开窗口、不碰显卡，跑出全部几何。
+- 关键行为要有测试钉住：无限约束报错、重复布局逐位一致、溢出可见、性能预算。
+- 性能预算：1000 节点全量布局 < 5ms（测试里放宽到 2ms 留 CI 余量）。
+
+## 文档地图
+
+设计文档 14 篇在 `docs/`，比代码更值得先读：
+
+- `00` 愿景 · `01` 架构总览（含文档地图）· `02` 平台后端 · `03` 渲染管线
+- `04` 文本与字体 · `05` **布局系统** · `06` 组件树状态事件 · `07` 样式与主题
+- `08` 组件清单 · `09` 无障碍 · `10` 工程体系 · `11` 风险与取舍
+- `12` 架构审查（诚实回答"能不能交给 AI 做成企业级"）· `13` **设计系统规格书**
+- `ROADMAP.md` 分阶段 DoD
+
+## 明确不做（1.x 范围外）
+
+移动端、浏览器后端、游戏引擎级渲染、与 Qt/GTK 互操作、主题市场与付费组件。
+写在这是为了避免"顺手做一下"把项目拖垮。
+
+## 已知待办
+
+- `.gitattributes` 声明 `eol=lf`，但工作区多数 `.py` 实际是 CRLF。
+  三平台 CI 上会产生幽灵 diff。修法：`git add --renormalize .`（会产生大 diff，单独提交）。
+- `layout/grid.py`、`layout/scroll.py` 仍是桩，拉低了覆盖率分母。
+- Flex 还不支持 `wrap` 换行（docs/05 §4 有这条）。

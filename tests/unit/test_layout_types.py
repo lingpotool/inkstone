@@ -9,7 +9,6 @@ from inkstone.layout import (
     INF,
     BoxConstraints,
     EdgeInsets,
-    Offset,
     Rect,
     Size,
 )
@@ -30,7 +29,8 @@ class TestSize:
 
     def test_immutable(self):
         s = Size(10, 10)
-        with pytest.raises(Exception):
+        # frozen dataclass 抛的是 FrozenInstanceError，它是 AttributeError 的子类
+        with pytest.raises(AttributeError):
             s.width = 20  # type: ignore[misc]
 
 
@@ -132,4 +132,4 @@ class TestBoxConstraints:
         assert c.flipped() == BoxConstraints(10, 20, 0, 100)
 
     def test_infinite_is_represented_as_float_inf(self):
-        assert INF == float("inf")
+        assert float("inf") == INF

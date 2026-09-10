@@ -7,11 +7,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from math import inf
-from typing import Sequence
 
-__all__ = ["INF", "Offset", "Size", "Rect", "EdgeInsets", "BoxConstraints"]
+__all__ = ["INF", "BoxConstraints", "EdgeInsets", "Offset", "Rect", "Size"]
 
 INF = float(inf)
 
@@ -31,16 +31,16 @@ class Offset:
     dx: float = 0.0
     dy: float = 0.0
 
-    def __add__(self, other: "Offset") -> "Offset":
+    def __add__(self, other: Offset) -> Offset:
         return Offset(self.dx + other.dx, self.dy + other.dy)
 
-    def __sub__(self, other: "Offset") -> "Offset":
+    def __sub__(self, other: Offset) -> Offset:
         return Offset(self.dx - other.dx, self.dy - other.dy)
 
-    def __neg__(self) -> "Offset":
+    def __neg__(self) -> Offset:
         return Offset(-self.dx, -self.dy)
 
-    def scale(self, factor: float) -> "Offset":
+    def scale(self, factor: float) -> Offset:
         return Offset(self.dx * factor, self.dy * factor)
 
 
@@ -65,19 +65,19 @@ class Size:
             return 0.0
         return self.width / self.height
 
-    def contains(self, other: "Size") -> bool:
+    def contains(self, other: Size) -> bool:
         return self.width >= other.width and self.height >= other.height
 
-    def clamp(self, low: "Size", high: "Size") -> "Size":
+    def clamp(self, low: Size, high: Size) -> Size:
         return Size(
             _clamp(self.width, low.width, high.width),
             _clamp(self.height, low.height, high.height),
         )
 
-    def __add__(self, other: "Size") -> "Size":
+    def __add__(self, other: Size) -> Size:
         return Size(self.width + other.width, self.height + other.height)
 
-    def __sub__(self, other: "Size") -> "Size":
+    def __sub__(self, other: Size) -> Size:
         return Size(self.width - other.width, self.height - other.height)
 
 
@@ -91,11 +91,11 @@ class Rect:
     height: float = 0.0
 
     @classmethod
-    def from_ltrb(cls, left: float, top: float, right: float, bottom: float) -> "Rect":
+    def from_ltrb(cls, left: float, top: float, right: float, bottom: float) -> Rect:
         return cls(left, top, right - left, bottom - top)
 
     @classmethod
-    def from_offset_size(cls, offset: "Offset", size: "Size") -> "Rect":
+    def from_offset_size(cls, offset: Offset, size: Size) -> Rect:
         return cls(offset.dx, offset.dy, size.width, size.height)
 
     @property
@@ -107,11 +107,11 @@ class Rect:
         return self.top + self.height
 
     @property
-    def size(self) -> "Size":
+    def size(self) -> Size:
         return Size(self.width, self.height)
 
     @property
-    def top_left(self) -> "Offset":
+    def top_left(self) -> Offset:
         return Offset(self.left, self.top)
 
     @property
@@ -121,7 +121,7 @@ class Rect:
     def contains(self, x: float, y: float) -> bool:
         return self.left <= x <= self.right and self.top <= y <= self.bottom
 
-    def intersects(self, other: "Rect") -> bool:
+    def intersects(self, other: Rect) -> bool:
         return (
             self.left < other.right
             and other.left < self.right
@@ -129,7 +129,7 @@ class Rect:
             and other.top < self.bottom
         )
 
-    def intersect(self, other: "Rect") -> "Rect":
+    def intersect(self, other: Rect) -> Rect:
         return Rect.from_ltrb(
             max(self.left, other.left),
             max(self.top, other.top),
@@ -137,13 +137,13 @@ class Rect:
             min(self.bottom, other.bottom),
         )
 
-    def shift(self, dx: float, dy: float) -> "Rect":
+    def shift(self, dx: float, dy: float) -> Rect:
         return Rect(self.left + dx, self.top + dy, self.width, self.height)
 
-    def inflate(self, dx: float, dy: float) -> "Rect":
+    def inflate(self, dx: float, dy: float) -> Rect:
         return Rect(self.left - dx, self.top - dy, self.width + 2 * dx, self.height + 2 * dy)
 
-    def deflate(self, dx: float, dy: float) -> "Rect":
+    def deflate(self, dx: float, dy: float) -> Rect:
         return self.inflate(-dx, -dy)
 
 
@@ -157,11 +157,11 @@ class EdgeInsets:
     bottom: float = 0.0
 
     @classmethod
-    def all(cls, value: float) -> "EdgeInsets":
+    def all(cls, value: float) -> EdgeInsets:
         return cls(value, value, value, value)
 
     @classmethod
-    def symmetric(cls, horizontal: float = 0.0, vertical: float = 0.0) -> "EdgeInsets":
+    def symmetric(cls, horizontal: float = 0.0, vertical: float = 0.0) -> EdgeInsets:
         return cls(horizontal, vertical, horizontal, vertical)
 
     @classmethod
@@ -171,11 +171,11 @@ class EdgeInsets:
         top: float = 0.0,
         right: float = 0.0,
         bottom: float = 0.0,
-    ) -> "EdgeInsets":
+    ) -> EdgeInsets:
         return cls(left, top, right, bottom)
 
     @classmethod
-    def from_list(cls, values: Sequence[float]) -> "EdgeInsets":
+    def from_list(cls, values: Sequence[float]) -> EdgeInsets:
         """接受 1 / 2 / 4 个值：[全部] / [上下, 左右] / [上, 右, 下, 左]。"""
         if len(values) == 1:
             return cls.all(values[0])
@@ -197,16 +197,16 @@ class EdgeInsets:
     def is_non_negative(self) -> bool:
         return self.left >= 0 and self.top >= 0 and self.right >= 0 and self.bottom >= 0
 
-    def inflate_size(self, size: "Size") -> "Size":
+    def inflate_size(self, size: Size) -> Size:
         return Size(size.width + self.horizontal, size.height + self.vertical)
 
-    def deflate_size(self, size: "Size") -> "Size":
+    def deflate_size(self, size: Size) -> Size:
         return Size(
             max(0.0, size.width - self.horizontal),
             max(0.0, size.height - self.vertical),
         )
 
-    def deflate_rect(self, rect: "Rect") -> "Rect":
+    def deflate_rect(self, rect: Rect) -> Rect:
         return Rect(
             rect.left + self.left,
             rect.top + self.top,
@@ -214,7 +214,7 @@ class EdgeInsets:
             max(0.0, rect.height - self.vertical),
         )
 
-    def inflate_rect(self, rect: "Rect") -> "Rect":
+    def inflate_rect(self, rect: Rect) -> Rect:
         return Rect(
             rect.left - self.left,
             rect.top - self.top,
@@ -222,10 +222,12 @@ class EdgeInsets:
             rect.height + self.vertical,
         )
 
-    def clamp_non_negative(self) -> "EdgeInsets":
+    def clamp_non_negative(self) -> EdgeInsets:
         return EdgeInsets(
-            max(0.0, self.left), max(0.0, self.top),
-            max(0.0, self.right), max(0.0, self.bottom),
+            max(0.0, self.left),
+            max(0.0, self.top),
+            max(0.0, self.right),
+            max(0.0, self.bottom),
         )
 
 
@@ -251,27 +253,29 @@ class BoxConstraints:
     # ---------- 构造 ----------
 
     @classmethod
-    def tight(cls, size: "Size") -> "BoxConstraints":
+    def tight(cls, size: Size) -> BoxConstraints:
         return cls(size.width, size.width, size.height, size.height)
 
     @classmethod
-    def tight_for(
-        cls, width: float | None = None, height: float | None = None
-    ) -> "BoxConstraints":
+    def tight_for(cls, width: float | None = None, height: float | None = None) -> BoxConstraints:
         return cls(
-            width or 0.0, width if width is not None else INF,
-            height or 0.0, height if height is not None else INF,
+            width or 0.0,
+            width if width is not None else INF,
+            height or 0.0,
+            height if height is not None else INF,
         )
 
     @classmethod
-    def loose(cls, size: "Size") -> "BoxConstraints":
+    def loose(cls, size: Size) -> BoxConstraints:
         return cls(0.0, size.width, 0.0, size.height)
 
     @classmethod
-    def expand(cls, width: float | None = None, height: float | None = None) -> "BoxConstraints":
+    def expand(cls, width: float | None = None, height: float | None = None) -> BoxConstraints:
         return cls(
-            width if width is not None else INF, width if width is not None else INF,
-            height if height is not None else INF, height if height is not None else INF,
+            width if width is not None else INF,
+            width if width is not None else INF,
+            height if height is not None else INF,
+            height if height is not None else INF,
         )
 
     # ---------- 查询 ----------
@@ -297,19 +301,19 @@ class BoxConstraints:
         return self.min_height >= INF
 
     @property
-    def biggest(self) -> "Size":
+    def biggest(self) -> Size:
         return Size(
             INF if self.has_infinite_width else self.max_width,
             INF if self.has_infinite_height else self.max_height,
         )
 
     @property
-    def smallest(self) -> "Size":
+    def smallest(self) -> Size:
         return Size(self.min_width, self.min_height)
 
     # ---------- 运算 ----------
 
-    def constrain(self, size: "Size") -> "Size":
+    def constrain(self, size: Size) -> Size:
         """把一个期望尺寸夹到合法区间内，宽高互不影响。"""
         return Size(
             _clamp(size.width, self.min_width, self.max_width),
@@ -322,7 +326,7 @@ class BoxConstraints:
     def constrain_height(self, height: float | None = None) -> float:
         return _clamp(height if height is not None else INF, self.min_height, self.max_height)
 
-    def tighten(self, width: float | None = None, height: float | None = None) -> "BoxConstraints":
+    def tighten(self, width: float | None = None, height: float | None = None) -> BoxConstraints:
         return BoxConstraints(
             width if width is not None else self.min_width,
             width if width is not None else self.max_width,
@@ -330,10 +334,10 @@ class BoxConstraints:
             height if height is not None else self.max_height,
         )
 
-    def loosen(self) -> "BoxConstraints":
+    def loosen(self) -> BoxConstraints:
         return BoxConstraints(0.0, self.max_width, 0.0, self.max_height)
 
-    def enforce(self, other: "BoxConstraints") -> "BoxConstraints":
+    def enforce(self, other: BoxConstraints) -> BoxConstraints:
         """与另一组约束取交集，结果仍然合法。"""
         return BoxConstraints(
             max(self.min_width, other.min_width),
@@ -342,7 +346,7 @@ class BoxConstraints:
             min(self.max_height, other.max_height),
         )
 
-    def deflate(self, insets: "EdgeInsets") -> "BoxConstraints":
+    def deflate(self, insets: EdgeInsets) -> BoxConstraints:
         """扣掉内边距后，留给内容区的约束。"""
         if not insets.is_non_negative:
             raise ValueError("deflate 不接受负的 EdgeInsets")
@@ -355,7 +359,10 @@ class BoxConstraints:
             max_height=remaining_height,
         )
 
-    def flipped(self) -> "BoxConstraints":
+    def flipped(self) -> BoxConstraints:
         return BoxConstraints(
-            self.min_height, self.max_height, self.min_width, self.max_width,
+            self.min_height,
+            self.max_height,
+            self.min_width,
+            self.max_width,
         )
