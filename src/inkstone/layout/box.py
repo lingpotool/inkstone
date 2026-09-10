@@ -61,6 +61,7 @@ class RenderBox:
         self._baseline: float | None = None
         self._overflow: float = 0.0
         self._needs_layout: bool = True
+        self._needs_paint: bool = True
 
     # ------------------------------------------------------------ 树
 
@@ -210,6 +211,48 @@ class RenderBox:
         """记录溢出量。宁可标记出来给检查器看，也不静默裁切。"""
         if amount > self._overflow:
             self._overflow = amount
+
+    # ------------------------------------------------------------ 绘制脏标记
+
+    # 为什么绘制脏标记也在 RenderBox 上，而不单独开一个类：
+    # 布局与绘制是**同一个节点**的两件事（Flutter 亦如此）。拆成两个类只会带来
+    # "每个容器都要再写一个组合类"的排列爆炸，却换不到任何实际收益。
+    # 这一层只提供标记与遍历，`paint` 本身是空钩子，真正的绘制由 gfx 层实现。
+
+    @property
+    def needs_paint(self) -> bool:
+        return self._needs_paint
+
+    def mark_needs_paint(self) -> None:
+        """标脏并向上冒泡。
+
+        冒泡让根节点能 O(1) 判断"这棵树有没有要重绘的"，
+        从而整棵跳过干净的子树——1000 节点的界面里，多数帧只脏几个节点。
+        """
+        if self._needs_paint:
+            return
+        self._needs_paint = True
+        if self._parent is not None:
+            self._parent.mark_needs_paint()
+
+    def clear_needs_paint(self) -> None:
+        self._needs_paint = False
+
+    def paint(self, context: object) -> None:
+        """绘制自身。默认什么都不画；由 gfx 层或具体节点覆写。
+
+        `context` 的具体类型由 gfx 层定义，这一层不解释它——
+        布局引擎不该知道画布长什么样。
+        """
+
+    def paint_tree(self, context: object) -> None:
+        """绘制整棵脏子树，干净子树整棵跳过。"""
+        if not self._needs_paint:
+            return
+        self.paint(context)
+        self._needs_paint = False
+        for child in self.children:
+            child.paint_tree(context)
 
     # ------------------------------------------------------------ 调试
 

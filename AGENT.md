@@ -22,10 +22,11 @@ Phase 1 · 地基进行中。真实代码只集中在 **布局引擎**：
 | `layout/grid.py` | ✅ Grid（fixed / fr / auto 轨道 + span） |
 | `layout/stack.py` | ✅ Stack / Positioned / Align |
 | `layout/scroll.py` | ✅ ScrollView（向子级派发无限主轴约束） |
-| 其余 78 个模块（gfx / text / core / style / widgets …） | ⬜ 占位桩 |
+| `core/`（key / widget / element / render_object / binding） | ✅ 三棵树 + 帧调度 |
+| 其余 73 个模块（gfx / text / style / widgets …） | ⬜ 占位桩 |
 
-布局引擎覆盖率 92%，164 个无头单测。下一步是 `core` 的三棵树
-（Widget / Element / RenderObject）与帧调度。
+布局引擎 + core 覆盖率 94%，210 个无头单测。下一步是 `style/tokens`、
+`gfx`，以及 ROADMAP Phase 1 item 7 的最小组件集（Box/Text/Button/Input/Row/Column/Card）。
 
 **占位桩长这样**：一段说明用途的 docstring + `__all__: list[str] = []`。
 看到这个形态就别指望里面有实现，也别在它上面继续叠代码——先实现它。
@@ -105,6 +106,14 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
   否则下一帧走缓存，表现是"滚了但界面不动"。
 - **Grid 超出容器时报溢出，不按比例压缩轨道。** 把 200px 的列悄悄压成 150px
   是极难排查的 bug。同理，跨多格的子级不参与 auto 轨道定尺寸（宽度算到哪一列没有唯一答案）。
+- **绘制脏标记挂在 `layout.RenderBox` 上，不在 `core.RenderObject` 上。**
+  布局与绘制是同一个节点的两件事（Flutter 亦如此）。拆成两个类会导致每个布局容器
+  都要再配一个组合类。`core.RenderObject` 只是"自定义渲染对象该继承的基类"。
+- **多子级同步必须两轮匹配：先按下标，再按 Key 兜底。** 只按下标匹配的话，
+  列表一重排状态就跟着槽位跑，输入框里的字会串到别的行——这正是"必须给稳定 Key"的原因。
+- **在 layout / paint 阶段改状态会抛 `FrameError`。** 那是时序 bug 高发区，
+  改了但本帧已经错过，表现为"界面下一帧才动"。框架选择响亮地失败。
+- **命名用 snake_case**（`set_state` 不是 `setState`）。这是纯 Python 库，不是 Flutter 移植。
 
 ## 测试怎么写
 

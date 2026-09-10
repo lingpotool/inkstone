@@ -48,6 +48,12 @@
      1001 节点全量布局 0.89ms（预算 5ms）。
      尚缺：Flex 的 wrap 换行（docs/05 §4）、Grid 的对齐、以及与 core 的 RenderObject 对接。
 5. **组件树**：Widget / Element / RenderObject 三层 + 脏标记 + 帧调度
+   - **进度（已实现）**：`core/` 下 key / widget / element / render_object / binding
+     五个模块已完成：三棵树、按"类型 + Key"复用（两轮匹配：下标 → Key）、
+     StatefulWidget 生命周期、BuildOwner 帧调度（批处理 + 阶段守卫）。
+     24 个测试覆盖：100 次 set_state 只重建一次、Key 正确的重排状态零丢失、
+     layout 阶段改状态抛 FrameError。
+   - 未实现：signals（docs/06 §3 状态双轨）、semantics 阶段（Phase 3 无障碍）。
 6. **样式**：设计系统三层令牌（含阴影/动效令牌，规格见 `docs/13`）+ 明暗主题 + 组件变体解析
 7. **最小组件集**：Box / Text / Button / Input / Row / Column / Card
 8. **测试基建**：布局单测 + 黄金图测试（三平台基线）+ CI
