@@ -185,13 +185,34 @@ class _LOGFONTW(ctypes.Structure):
     ]
 
 
+def _is_windows() -> bool:
+    """是否运行在 Windows 上。
+
+    刻意包成一个函数，而不是到处写 `sys.platform != "win32"`：
+
+        mypy 会根据 `sys.platform` 的**字面量**做平台收窄。在 Linux 上跑
+        `mypy` 时，`if sys.platform != "win32": return None` 之后的整段代码
+        会被判成"不可达"（我们开了 `warn_unreachable`），于是这个文件
+        在 Linux 的 CI 上红一片——而它明明是 Windows 专有模块，逻辑没问题。
+
+        包成函数调用后 mypy 无法收窄，行为回到"两个平台都正常检查"。
+        用 `cast` 或改配置也能绕过，但都不如这个直白。
+    """
+    return sys.platform == "win32"
+
+
 def _load_gdi() -> tuple[Any, Any] | None:
     """加载 gdi32 / user32。非 Windows 或加载失败时返回 None（由调用方降级）。"""
-    if sys.platform != "win32":
+    if not _is_windows():
         return None
     try:
-        gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        # `WinDLL` 与 `WINFUNCTYPE` 一样只在 Windows 的 typeshed 里有定义，
+        # 用 getattr 取才能在别的平台上通过类型检查（运行时走不到这一行）。
+        # 下面那条 noqa 是必须的：ruff 的 B009 会把常量 getattr 改写成
+        # 属性访问，而在 Linux 上那会变成"模块没有这个属性"，类型检查直接红。
+        win_dll: Any = getattr(ctypes, "WinDLL")  # noqa: B009
+        gdi32 = win_dll("gdi32", use_last_error=True)
+        user32 = win_dll("user32", use_last_error=True)
     except OSError:
         return None
 
@@ -425,7 +446,11 @@ class GdiFontEngine:
                 ("elfScript", wintypes.WCHAR * 32),
             ]
 
-        _ENUMFONTPROC = ctypes.WINFUNCTYPE(
+        # `WINFUNCTYPE` 只在 Windows 的 typeshed 里定义，用 getattr 取
+        # 可以让这个模块在 Linux 上也能通过类型检查（运行时走不到这一行）。
+        # 同上：这里的 noqa 不能删，删了 ruff 的自动改写会破坏跨平台类型检查。
+        winfunctype: Any = getattr(ctypes, "WINFUNCTYPE")  # noqa: B009
+        _ENUMFONTPROC = winfunctype(
             ctypes.c_int,
             ctypes.POINTER(_ENUMLOGFONTEXW),
             ctypes.c_void_p,
@@ -819,7 +844,7 @@ def gdi_font_engine() -> GdiFontEngine | None:
     调用方（devtools / 未来的 App）用这个工厂做"有真字体就用真字体，
     没有就退回确定性表"的降级，而不是自己判断平台。
     """
-    if sys.platform != "win32":
+    if not _is_windows():
         return None
     try:
         return GdiFontEngine()

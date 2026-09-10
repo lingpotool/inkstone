@@ -1,4 +1,4 @@
-.PHONY: help install test lint fmt type check golden cov perf arch bench clean
+.PHONY: help install test lint fmt type type-all check golden cov perf arch bench clean
 
 PYTHON ?= python
 RUN := $(PYTHON)
@@ -29,6 +29,11 @@ fmt:                        ## 自动格式化
 
 type:                       ## 类型检查（严格模式）
 	$(RUN) -m mypy
+
+type-all:                   ## 类型检查 × 三平台（平台专有代码也能过一遍）
+	$(RUN) -m mypy
+	$(RUN) -m mypy --platform win32
+	$(RUN) -m mypy --platform darwin
 
 check: lint type test       ## 提交前必跑：lint + 类型 + 测试
 

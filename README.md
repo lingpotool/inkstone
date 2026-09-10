@@ -2,14 +2,18 @@
 
 **专业的跨平台 Python 原生 UI 系统** —— 纯 Python 编写，自绘渲染，Windows / macOS / Linux 一等公民。
 
-> 当前状态：**Phase 1 · 地基进行中**（`0.1.0.dev0`）。
-> 设计文档 14 篇已就绪；**布局引擎已实现**（协议 / 盒子模型 / Flex / Grid / Stack / Scroll），
-> **组件树与帧调度已实现**（Widget / Element / RenderBox 三层 + BuildOwner），
-> **设计令牌与明暗主题已实现**（三层令牌，明暗两版 WCAG 2.2 AA 对比度由测试保证），
-> **最小组件集已实现**（Box / Card / Row / Column / Flexible / Button / Input + 变体解析），
-> **gfx 显示列表 + 软件光栅 + 黄金图测试已实现**（5 张基线逐字节比对）。
-> 282 个无头单测全绿，1001 节点全量布局 0.89ms。
-> 渲染（GL/Skia）、文本仍未动工。详见 [ROADMAP.md](ROADMAP.md)。
+> 当前状态：**Phase 1 · 地基基本就绪**（`0.1.0.dev0`）。
+> 设计文档 14 篇已就绪；
+> **布局引擎**（协议 / 盒子模型 / Flex / Grid / Stack / Scroll）、
+> **组件树与帧调度**（Widget / Element / RenderBox 三层 + BuildOwner）、
+> **设计令牌与明暗主题**（WCAG 2.2 AA 对比度由测试保证）、
+> **文本栈**（字体度量 / CJK 回退链 / 整形 / 断行含标点禁则 / 段落排版）、
+> **渲染管线**（显示列表 + 软件光栅 + 文本 + 黄金图）、
+> **最小组件集**（Box / Card / Text / Row / Column / Flexible / Button / Input）
+> 均已实现。**中文渲染成真正的汉字**（Windows 走系统字体）。
+> 567 个无头单测全绿，三平台 CI（含 py3.10 最低版本）全绿，
+> 覆盖率 89%，1001 节点全量布局 0.9ms。
+> 尚未实现：自研 GL 后端、中文输入（事件系统与编辑模型）、DPI 缩放。详见 [ROADMAP.md](ROADMAP.md)。
 
 ---
 
@@ -40,9 +44,9 @@
 ```
 inkstone/
 ├── src/inkstone/              ← 真正的库（src 布局）
-│   ├── backend/             平台抽象层：SDL2 / GLFW / headless
-│   ├── gfx/                 渲染管线：显示列表 + 光栅后端（Skia / GL）
-│   ├── text/                文本与字体：整形 / 断行 / 回退 / 排版
+│   ├── backend/             平台抽象层：SDL2 / GLFW / headless + 字体引擎（GDI）
+│   ├── gfx/                 渲染管线：显示列表 + 光栅后端（软件光栅 / 规划中的 GL、Skia）
+│   ├── text/                文本与字体：整形 / 断行 / 回退 / 排版（已实现）
 │   ├── layout/              布局引擎：约束向下、尺寸向上
 │   ├── core/                组件树与状态：Widget / Element / RenderObject
 │   ├── events/              输入：指针 / 键盘 / 焦点 / IME / 命令
@@ -52,12 +56,23 @@ inkstone/
 │   ├── spec/                声明式协议层（给 AI 用）
 │   └── devtools/            检查器 / 热重载 / 确定性截图
 ├── tests/                   单元 / 黄金图 / 集成
-├── examples/                示例（当前是目标 API 预览）
+├── examples/                示例（可运行，进 CI 冒烟测试）
 ├── docs/                    设计文档（见下）
 ├── prototype/               Phase 0 探针：约 1100 行可运行原型（已冻结，不参与打包）
 ├── ROADMAP.md               分阶段交付计划与验收标准
 └── CONTRIBUTING.md          贡献规范
 ```
+
+## 先看一眼它能做什么
+
+```bash
+python examples/hello.py                 # 渲染成 hello.png（用系统真字体）
+python examples/hello.py --dark          # 暗色主题
+python examples/hello.py --deterministic # 内置确定性字形（跨平台逐字节一致）
+```
+
+示例里没有一处硬编码宽度——按钮宽度由标签文字**自己量出来**。
+这不是演示技巧，而是"文字宽度只度量、不估算"这条纪律的直接结果。
 
 ---
 

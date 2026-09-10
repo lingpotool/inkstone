@@ -33,8 +33,16 @@ jobs:
         run: python -m ruff format --check src tests examples
       - name: ruff check
         run: python -m ruff check src tests examples
+      # 类型检查跑**三个平台**：mypy 会按 host 平台收窄 `sys.platform`，
+      # 并用对应平台的 typeshed（比如 `ctypes.WinDLL` 只在 Windows 上有定义）。
+      # 只在本机跑，Windows 专有代码在 Linux CI 上就会红成一片——
+      # 这个坑已经踩过一次，从此每次 lint 都三平台过一遍（mypy 很快）。
       - name: mypy（strict）
         run: python -m mypy
+      - name: mypy · 按 Windows 平台
+        run: python -m mypy --platform win32
+      - name: mypy · 按 macOS 平台
+        run: python -m mypy --platform darwin
 
   # ---------------------------------------------------------------- 三平台测试
   # 黄金图是**逐字节**比对的，理论上三平台应完全一致：
