@@ -29,19 +29,40 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol, Union
 
+from .fonts import (
+    FontFace,
+    FontMetricsError,
+    FontSlant,
+    FontSpec,
+    FontWeight,
+    GlyphPlacement,
+    GlyphRun,
+    MetricsProvider,
+    TextMetrics,
+)
+
 __all__ = [
     "Backend",
     "BackendError",
     "Cursor",
     "Event",
     "FocusEvent",
+    "FontFace",
+    "FontMetricsError",
+    "FontSlant",
+    "FontSpec",
+    "FontWeight",
+    "GlyphPlacement",
+    "GlyphRun",
     "ImeEvent",
     "ImeKind",
     "KeyEvent",
     "KeyKind",
+    "MetricsProvider",
     "Modifiers",
     "PointerEvent",
     "PointerKind",
+    "TextMetrics",
     "WindowEvent",
     "WindowKind",
     "WindowSpec",
@@ -192,8 +213,14 @@ class WindowSpec:
 # ---------------------------------------------------------------- 协议
 
 
-class Backend(Protocol):
-    """平台后端。实现者：`HeadlessBackend`（测试）、`SDL2Backend`（生产）。"""
+class Backend(MetricsProvider, Protocol):
+    """平台后端。实现者：`HeadlessBackend`（测试）、`SDL2Backend`（生产）。
+
+    它同时是 **MetricsProvider**（字体度量）。这不是顺手加的方法——
+    而是 docs/04 §3「测量与绘制同源」在类型系统里的落地：
+
+        渲染后端与度量后端是**同一个对象**，两套度量在结构上就无法出现。
+    """
 
     @property
     def name(self) -> str:
@@ -238,3 +265,21 @@ class Backend(Protocol):
 
     def request_redraw(self, window_id: int) -> None:
         """请求下一帧重绘。"""
+
+    # -------------------------------------------------------- 字体度量
+    #
+    # 以下四个方法来自 MetricsProvider。它们是全库唯一的文本度量入口，
+    # `text/` 与 `gfx/` 都必须经由它们取数字，不许各自估算或另开一路系统调用。
+    # 实现细节见 `backend/fonts.py` 的模块文档。
+
+    def resolve_font(self, spec: FontSpec) -> FontFace:
+        """把字体规格解析成具体字体（回退到系统默认）。"""
+
+    def has_family(self, family: str) -> bool:
+        """系统里是否存在该字体族。"""
+
+    def measure_text(self, text: str, spec: FontSpec) -> TextMetrics:
+        """测量单行文本——**全库唯一的文本度量入口**。"""
+
+    def shape_line(self, text: str, spec: FontSpec) -> GlyphRun:
+        """把一行文本整形为字形位置序列。"""

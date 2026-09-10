@@ -99,6 +99,23 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 
 这些是踩过坑之后定下来的，改动前先想清楚：
 
+- **文本度量住在 L0 后端，`text/` 不许碰平台 API。** 度量是"平台相关"的事
+  （DirectWrite / CoreText / fontconfig 各一套），按铁律 1「平台差异不出 L0」
+  它必须待在后端。`Backend` 协议因此**继承 `MetricsProvider`**
+  （`backend/fonts.py`）——"渲染后端"与"度量后端"是**同一个对象**，
+  于是 docs/04 §3 的"测量与绘制同源"从纪律变成了结构上的必然。
+  `text/` 里出现 `ctypes` / `windll` / 字体路径 / `sys.platform` 分支 = 打回。
+- **度量同源，但"源"在测试与生产是两回事。** 生产源必须与渲染后端一致；
+  测试源（`backend/headless_fonts.py` 的度量表）必须**跨平台一致**，
+  否则黄金图在三平台没法同字节。这不算"两套度量"——它们是同一个
+  `Backend.measure_text` 入口的两种实现，永远不会有第三个调用点。
+- **文本一切按字素簇操作，不按码点。** 断行、命中测试、选区、省略号截断
+  都必须先过 `grapheme_clusters()`。按码点切的后果是删一个字符删掉半张 emoji 脸、
+  光标停到 "é" 中间。
+- **无限约束遇到 fill 不许静默**（铁律 5）。文本度量到无限宽度同理：
+  单行测量允许无限宽（`text` 不换行时就是无限宽），但**段落排版**
+  拿到无限可用宽度时必须走"不换行"路径，不能死循环。
+
 - **盒模型的 `width` 是 border-box。** `width=fixed(160)` 且 `padding=12` 时总宽就是
   160、内容区 136。把 fixed 解释成内容宽度会让 padding 把盒子撑大——没人想要这个。
 - **baseline 对齐必须整组计算。** 参考线是组内最大的 baseline。
@@ -167,6 +184,16 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 
 移动端、浏览器后端、游戏引擎级渲染、与 Qt/GTK 互操作、主题市场与付费组件。
 写在这是为了避免"顺手做一下"把项目拖垮。
+
+## 架构决策记录（ADR）
+
+项目级的选型决定记在这里，避免同一个问题被反复讨论。
+
+| 编号 | 决定 | 理由与影响 |
+|---|---|---|
+| ADR-0001 | 平台后端选 SDL2 | 完整 IME + 原生 Wayland，headless 用于测试（docs/01） |
+| ADR-0005 | 整形与断行复用成熟实现，不自己造 | HarfBuzz 级整形规则上千条，自写=两年换更差版本（docs/04 §2） |
+| ADR-0006 | **文本度量下沉到 L0 后端** | 度量是平台相关能力，放 L0 才不违反"平台差异不出 L0"；`Backend` 继承 `MetricsProvider` 让度量与绘制同源成为结构必然。`text/` 只面向协议说话，可 100% 无窗口测试。真字体整形（HarfBuzz / DirectWrite）后续在后端内替换实现，上层零改动 |
 
 ## 已知待办
 

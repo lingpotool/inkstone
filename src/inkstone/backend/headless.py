@@ -29,14 +29,27 @@ from .base import (
     WindowKind,
     WindowSpec,
 )
+from .fonts import FontFace, FontSpec, GlyphRun, TextMetrics
+from .headless_fonts import FontTable, HeadlessMetrics
 
 __all__ = ["HeadlessBackend"]
 
 
 class HeadlessBackend:
-    """无头后端：假窗口、注入式事件、可控时钟。"""
+    """无头后端：假窗口、注入式事件、可控时钟、确定性字体度量。
 
-    def __init__(self, *, start_time_ms: float = 0.0) -> None:
+    字体度量用混入而非继承，是为了让**纯文本层测试**可以只拿
+    `HeadlessMetrics()` 而不用造一个后端（它不需要窗口和时钟）。
+    这里做的是把两件正交的能力拼在一起。
+    """
+
+    def __init__(
+        self,
+        *,
+        start_time_ms: float = 0.0,
+        font_table: FontTable | None = None,
+        system_fonts: bool = False,
+    ) -> None:
         self._time_ms = start_time_ms
         self._pending: list[Event] = []
         self._windows: dict[int, WindowSpec] = {}
@@ -46,6 +59,8 @@ class HeadlessBackend:
         self._clipboard = ""
         self._initialized = False
         self._redraw_requests = 0
+        # 字体度量：确定性表驱动，跨平台一致，黄金图才能逐字节比对
+        self._metrics = HeadlessMetrics(font_table, system=system_fonts)
         # 最近一次光栅结果留在内存里，测试可以直接取像素做断言
         self.last_frame: DisplayList | None = None
         self.last_pixels: bytes | None = None
@@ -189,6 +204,28 @@ class HeadlessBackend:
     @property
     def redraw_requests(self) -> int:
         return self._redraw_requests
+
+    # ------------------------------------------------------------ 字体度量
+    #
+    # 直接委派给内部 HeadlessMetrics。度量是**全库唯一入口**：
+    # text/ 断行与 gfx/ 绘制都走这里，两套度量在无头后端上无法出现。
+
+    @property
+    def font_metrics(self) -> HeadlessMetrics:
+        """暴露度量对象，测试可查缓存统计或直接放禁则测试集。"""
+        return self._metrics
+
+    def has_family(self, family: str) -> bool:
+        return self._metrics.has_family(family)
+
+    def resolve_font(self, spec: FontSpec) -> FontFace:
+        return self._metrics.resolve_font(spec)
+
+    def measure_text(self, text: str, spec: FontSpec) -> TextMetrics:
+        return self._metrics.measure_text(text, spec)
+
+    def shape_line(self, text: str, spec: FontSpec) -> GlyphRun:
+        return self._metrics.shape_line(text, spec)
 
     # ------------------------------------------------------------ 渲染占位
 
