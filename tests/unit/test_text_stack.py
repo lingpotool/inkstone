@@ -701,6 +701,7 @@ class TestLongMixedContent:
         for _ in range(runs):
             layout_paragraph(text, STYLE, resolver, shaper, max_width=300.0)
         elapsed_ms = (time.perf_counter() - start) / runs * 1000
+        print(f"\n[perf] 1000 字排版：{elapsed_ms:.2f}ms（预算 50ms）")
         assert elapsed_ms < 50.0, f"1000 字排版耗时 {elapsed_ms:.2f}ms，超出预算"
 
 

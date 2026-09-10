@@ -105,10 +105,14 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 | 任务 | 内容 | 为什么单独成任务 |
 |---|---|---|
 | `lint` | ruff format --check + ruff check + mypy | 风格与类型常被绕过，单独可见 |
-| `test` | 三平台（py3.12）+ Ubuntu py3.10，跑全部测试含黄金图 | 黄金图逐字节比对，任何平台不一致都要立刻知道 |
+| `test` | 三平台（py3.12）+ Ubuntu py3.10，`-m "not slow"` | 正确性不该取决于 runner 当时有多忙 |
 | `coverage` | `-m "not slow"` + `--cov-fail-under=85` | ROADMAP 要求 ≥ 85% |
 | `perf` | `-m slow`，**无插桩** | 覆盖率插桩会让性能断言随机变红，两者必须分开 |
 | `architecture` | `test_architecture.py` | 分层被破坏要在 CI 上有指名道姓的红点 |
+
+**踩过的坑（值得记住）**：最初 `test` 任务跑全量测试（含 `slow`），
+结果 py3.10 的共享 runner 上性能断言以 2.10ms 对 2.0ms 挂了。
+墙上时钟断言天生会抖——正确性任务必须排除它。
 
 黄金图的 CI 行为值得说清：**三平台逐字节相同，已经在 CI 上验证过了**
 （`77fed3a` 首次推送即 8 个任务全绿）。无头度量表是纯数据、
@@ -199,7 +203,13 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 
 - 布局引擎必须 **100% 无窗口可测**——不开窗口、不碰显卡，跑出全部几何。
 - 关键行为要有测试钉住：无限约束报错、重复布局逐位一致、溢出可见、性能预算。
-- 性能预算：1000 节点全量布局 < 5ms（测试里放宽到 2ms 留 CI 余量）。
+- 性能预算：1000 节点全量布局 < 5ms（docs/05 §8 的原值）。
+  **断言的就是文档里那个数，不额外收紧**——墙上时钟断言在共享 CI runner
+  上天生会抖，紧阈值会变成"偶尔红一次"，而一个偶尔红的门禁比没有更糟
+  （大家会学会忽略 CI）。实测：本机 0.9ms，CI runner 约 2.1ms，余量足够。
+  要更严的本地门禁：`INKSTONE_PERF_BUDGET_MS=2 pytest -m slow`。
+- **性能断言只跑在 `perf` 任务里**，正确性任务用 `-m "not slow"` 排除它。
+  否则正确性会莫名其妙地取决于 runner 当时有多忙。
 - **架构约束也是测试**（`test_architecture.py`）：分层单向依赖、`text/` 无平台 API、
   组件零硬编码颜色。新增反向依赖会让 CI 红；登记表（`KNOWN_EXCEPTIONS`）
   里出现过期条目也会红——所以例外不会腐化成垃圾桶。

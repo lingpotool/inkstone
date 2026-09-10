@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 
 import pytest
@@ -24,9 +25,18 @@ from inkstone.layout import (
     collect_descendants,
 )
 
-# 预算放宽到 2ms：CI 机器慢、且这里测的是"数量级"而不是绝对值。
-# 真正的预算（5ms）写在 docs/05；留 2.5 倍余量是为了避免偶发抖动造成假红。
-FULL_LAYOUT_BUDGET_MS = 2.0
+# 断言的是**文档里写的那个预算**（docs/05 §8：1000 节点全量布局 < 5ms），
+# 不是更紧的"理想值"。
+#
+# 为什么不用更紧的阈值（曾经用过 2ms，结果在 CI 的 py3.10 共享 runner 上
+# 实测 2.10ms 挂了）：**墙上时钟断言在共享 runner 上天生会抖**。
+# 一个"偶尔红一次"的性能门禁比没有更糟——它会让所有人学会忽略 CI。
+# 用文档预算并把数值打出来，能抓住的是数量级回归（误写成 O(n²) 之类），
+# 那才是这个测试真正要防的东西。
+#
+# 需要更严的本地门禁时用环境变量：
+#     INKSTONE_PERF_BUDGET_MS=2 pytest -m slow
+FULL_LAYOUT_BUDGET_MS = float(os.environ.get("INKSTONE_PERF_BUDGET_MS", "5.0"))
 
 
 def build_tree(rows: int = 250, per_row: int = 3) -> RenderColumn:
@@ -64,8 +74,13 @@ def test_full_layout_of_1000_nodes_stays_within_budget():
         root.layout(CONSTRAINTS)
     elapsed_ms = (time.perf_counter() - start) / runs * 1000
 
+    # 把实测值打出来：CI 日志里能看到"离预算还有多远"，
+    # 而不是只在超了的时候才知道——趋势比门槛更有价值。
+    print(f"\n[perf] 1001 节点全量布局：{elapsed_ms:.2f}ms（预算 {FULL_LAYOUT_BUDGET_MS}ms）")
+
     assert elapsed_ms < FULL_LAYOUT_BUDGET_MS, (
         f"1001 节点全量布局耗时 {elapsed_ms:.2f}ms，超出 {FULL_LAYOUT_BUDGET_MS}ms 预算"
+        f"（docs/05 §8 的指标是 5ms；可用 INKSTONE_PERF_BUDGET_MS 调整）"
     )
 
 
