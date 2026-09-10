@@ -19,9 +19,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from .protocol import (
+    INF,
     Axis,
     LayoutError,
     Sizing,
+    constraints_from,
+    main_of,
     resolve_sizing,
 )
 from .types import BoxConstraints, EdgeInsets, Offset, Rect, Size
@@ -159,6 +162,19 @@ class RenderBox:
                 suggestion="检查是否忘了把节点加进父级",
             )
         return child.layout(constraints)
+
+    def measure_unbounded(self, axis: Axis, cross_extent: float = INF) -> float:
+        """沿 `axis` 试算"最大内容尺寸"（Grid 的 auto 轨道靠它定尺寸）。
+
+        做法是用无上界约束真实地布局一次，然后**把节点重新标脏**——
+        因为这次结果只是测量值，不是最终几何，最终那一趟会重新布局它。
+
+        代价是被测量的节点多走一次布局。Grid 只在 auto 轨道上用它，且只对
+        "恰好占 1 格"的子级测量，所以开销可控。
+        """
+        size = self.layout(constraints_from(axis, 0.0, INF, 0.0, cross_extent))
+        self.mark_needs_layout()
+        return main_of(size, axis)
 
     def place_child(self, child: RenderBox, offset: Offset) -> None:
         """给子级定位置。位置相对本节点的**内容区**左上角。"""

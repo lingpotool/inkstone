@@ -6,7 +6,9 @@
     protocol   轴、对齐、尺寸模式、带路径的 LayoutError
     box        盒子模型 RenderBox（约束 / padding / 脏标记 / 溢出 / 基线）
     flex       Row / Column 共用的弹性算法
+    grid       Grid（fixed / fr / auto 三态轨道 + span）
     stack      Stack / Positioned / Align
+    scroll     ScrollView（向子级派发无限主轴约束）
 
 一句话记住用法：
 
@@ -27,6 +29,7 @@ from .flex import (
     distribute_cross,
     distribute_main,
 )
+from .grid import GridItem, RenderGrid, TrackKind, TrackSize
 from .protocol import (
     ALIGN_BOTTOM_CENTER,
     ALIGN_BOTTOM_LEFT,
@@ -56,6 +59,7 @@ from .protocol import (
     resolve_sizing,
     size_from,
 )
+from .scroll import RenderScroll, ScrollDirection
 from .stack import PositionedSpec, RenderAlign, RenderStack, StackItem
 from .types import (
     INF,
@@ -76,38 +80,39 @@ __all__ = [
     "ALIGN_TOP_CENTER",
     "ALIGN_TOP_LEFT",
     "ALIGN_TOP_RIGHT",
-    # 几何原语
     "INF",
     "Alignment",
-    # 协议
     "Axis",
     "BoxConstraints",
     "CrossAxisAlignment",
     "EdgeInsets",
     "FlexFit",
-    # Flex
     "FlexItem",
+    "GridItem",
     "LayoutError",
     "MainAxisAlignment",
     "MainAxisSize",
     "Offset",
-    # Stack
     "PositionedSpec",
     "Rect",
     "RenderAlign",
-    # 盒子模型
     "RenderBox",
     "RenderColumn",
     "RenderContainer",
     "RenderFlex",
+    "RenderGrid",
     "RenderRow",
+    "RenderScroll",
     "RenderSized",
     "RenderStack",
+    "ScrollDirection",
     "Size",
     "Sizing",
     "SizingKind",
     "StackFit",
     "StackItem",
+    "TrackKind",
+    "TrackSize",
     "align_offset",
     "collect_descendants",
     "constraints_from",

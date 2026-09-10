@@ -43,9 +43,10 @@
 3. **文本**：字体加载与度量 + 单行/多行排版 + **CJK 字体回退链**
 4. **布局引擎**：`BoxConstraints` 协议 + 盒子模型 + Flex（Row/Column）+ Stack
    - 采用"约束向下、尺寸向上"，替换 Phase 0 的简化实现
-   - **进度（进行中）**：`protocol.py` / `box.py` / `flex.py` / `stack.py` 已实现并通过
-     121 个无头单测；覆盖率 91%，1001 节点全量布局 0.89ms（预算 5ms）。
-     尚缺：Grid、Scroll、wrap 换行、以及与 core 的 RenderObject 对接。
+   - **进度（基本完成）**：`protocol.py` / `box.py` / `flex.py` / `grid.py` /
+     `stack.py` / `scroll.py` 已实现，164 个无头单测全绿，覆盖率 92%，
+     1001 节点全量布局 0.89ms（预算 5ms）。
+     尚缺：Flex 的 wrap 换行（docs/05 §4）、Grid 的对齐、以及与 core 的 RenderObject 对接。
 5. **组件树**：Widget / Element / RenderObject 三层 + 脏标记 + 帧调度
 6. **样式**：设计系统三层令牌（含阴影/动效令牌，规格见 `docs/13`）+ 明暗主题 + 组件变体解析
 7. **最小组件集**：Box / Text / Button / Input / Row / Column / Card

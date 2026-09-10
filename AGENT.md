@@ -19,9 +19,13 @@ Phase 1 · 地基进行中。真实代码只集中在 **布局引擎**：
 | `layout/protocol.py` | ✅ 轴 / 对齐 / Sizing / LayoutError |
 | `layout/box.py` | ✅ RenderBox 盒子模型 |
 | `layout/flex.py` | ✅ Row / Column |
+| `layout/grid.py` | ✅ Grid（fixed / fr / auto 轨道 + span） |
 | `layout/stack.py` | ✅ Stack / Positioned / Align |
-| `layout/grid.py`、`layout/scroll.py` | ⬜ 仍是 8 行占位桩 |
-| 其余 80 个模块（gfx / text / core / style / widgets …） | ⬜ 占位桩 |
+| `layout/scroll.py` | ✅ ScrollView（向子级派发无限主轴约束） |
+| 其余 78 个模块（gfx / text / core / style / widgets …） | ⬜ 占位桩 |
+
+布局引擎覆盖率 92%，164 个无头单测。下一步是 `core` 的三棵树
+（Widget / Element / RenderObject）与帧调度。
 
 **占位桩长这样**：一段说明用途的 docstring + `__all__: list[str] = []`。
 看到这个形态就别指望里面有实现，也别在它上面继续叠代码——先实现它。
@@ -96,6 +100,11 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 - **Stack 的定位子级不参与决定尺寸。** 否则角标会把卡片撑大。
 - **Row 与 Column 共用一份实现。** 所有几何先换算到 (main, cross) 抽象轴，
   最后一步才翻译回 (x, y)。写两遍一定会出现"Row 有 bug、Column 没有"。
+- **Scroll 给子级无限主轴约束，且"滚动造成的溢出"不算 overflow。**
+  内容比视口长是设计意图，报了会把检查器淹没。另外：**滚动偏移变了必须 `mark_needs_layout()`**，
+  否则下一帧走缓存，表现是"滚了但界面不动"。
+- **Grid 超出容器时报溢出，不按比例压缩轨道。** 把 200px 的列悄悄压成 150px
+  是极难排查的 bug。同理，跨多格的子级不参与 auto 轨道定尺寸（宽度算到哪一列没有唯一答案）。
 
 ## 测试怎么写
 
@@ -122,5 +131,5 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 
 - `.gitattributes` 声明 `eol=lf`，但工作区多数 `.py` 实际是 CRLF。
   三平台 CI 上会产生幽灵 diff。修法：`git add --renormalize .`（会产生大 diff，单独提交）。
-- `layout/grid.py`、`layout/scroll.py` 仍是桩，拉低了覆盖率分母。
 - Flex 还不支持 `wrap` 换行（docs/05 §4 有这条）。
+- Scroll 只做了单/双向偏移。滚动条、锚点保持、过滚动按 ROADMAP 属于 Phase 2。
