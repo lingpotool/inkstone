@@ -51,10 +51,40 @@ def render_to_framebuffer(
     constraints: BoxConstraints,
     *,
     background: bool = True,
+    glyph_provider: object | None = None,
 ) -> FrameBuffer:
-    """跑完一帧，返回像素缓冲区。"""
+    """跑完一帧，返回像素缓冲区。
+
+    `glyph_provider` 默认**跟着这棵树的度量来源走**：如果 `TextEngine`
+    背后的度量对象同时能提供字形（比如 `GdiFontEngine`），就用它。
+    这样"度量"与"字形"必然出自同一份字体——字距与字形不可能对不上。
+
+    为什么不能各自独立挑：度量用确定性表、字形用系统字体的话，
+    排版按 14px 排、字形按 13.2px 画，中英混排时会出现
+    "有的字挤在一起、有的字之间留缝"，而且只在真机上才看得见。
+    """
     display_list = render_to_display_list(owner, constraints, background=background)
-    return SoftwareRasterizer().rasterize(display_list)
+    provider = glyph_provider if glyph_provider is not None else _provider_from(owner)
+    if provider is None:
+        return SoftwareRasterizer().rasterize(display_list)
+    return SoftwareRasterizer(glyph_provider=provider).rasterize(display_list)  # type: ignore[arg-type]
+
+
+def _provider_from(owner: BuildOwner) -> object | None:
+    """从组件树的文本引擎里取出字形提供方（没有则返回 None → 用内置字形）。
+
+    优先问 `glyph_provider`：那是后端**显式**声明的"我能画这些字形"，
+    比能力嗅探（有没有 `mask_for`）可靠——后者分不清"真能画"
+    和"转发给了一个画不了的东西"。
+    """
+    engine = owner.text_engine
+    if engine is None:
+        return None
+    metrics: object | None = getattr(engine, "metrics", None)
+    if metrics is None:
+        return None
+    provider: object | None = getattr(metrics, "glyph_provider", None)
+    return provider
 
 
 def render_to_png(
@@ -62,9 +92,12 @@ def render_to_png(
     constraints: BoxConstraints,
     *,
     background: bool = True,
+    glyph_provider: object | None = None,
 ) -> bytes:
     """跑完一帧，返回 PNG 字节。"""
-    frame = render_to_framebuffer(owner, constraints, background=background)
+    frame = render_to_framebuffer(
+        owner, constraints, background=background, glyph_provider=glyph_provider
+    )
     return encode_png(frame.width, frame.height, bytes(frame.data))
 
 

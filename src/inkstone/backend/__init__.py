@@ -45,6 +45,7 @@ from .base import (
     WindowKind,
     WindowSpec,
 )
+from .gdi_fonts import GdiFontEngine, gdi_font_engine
 from .headless import HeadlessBackend
 from .headless_fonts import FontTable, HeadlessMetrics, default_font_table
 from .sdl2 import SDL2Backend, normalize_key_name, sdl2_library_name
@@ -61,6 +62,7 @@ __all__ = [
     "FontSpec",
     "FontTable",
     "FontWeight",
+    "GdiFontEngine",
     "GlyphPlacement",
     "GlyphRun",
     "HeadlessBackend",
@@ -79,6 +81,7 @@ __all__ = [
     "WindowKind",
     "WindowSpec",
     "default_font_table",
+    "gdi_font_engine",
     "normalize_key_name",
     "sdl2_library_name",
 ]

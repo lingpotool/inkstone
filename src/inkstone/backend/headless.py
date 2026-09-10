@@ -29,10 +29,34 @@ from .base import (
     WindowKind,
     WindowSpec,
 )
-from .fonts import FontFace, FontSpec, GlyphRun, TextMetrics
+from .fonts import FontFace, FontSpec, GlyphRun, MetricsProvider, TextMetrics
 from .headless_fonts import FontTable, HeadlessMetrics
 
 __all__ = ["HeadlessBackend"]
+
+
+def _resolve_metrics(
+    font_table: FontTable | None,
+    system_fonts: bool,
+    font_engine: MetricsProvider | None,
+) -> MetricsProvider:
+    """按优先级挑一个度量提供方。
+
+    显式注入 > 系统真字体（若可用）> 确定性表。
+
+    "系统真字体不可用就静默退回确定性表"是有意为之：CI 上没有 GDI，
+    单元测试仍要能跑；而**渲染出真中文**只在真机上才会发生，
+    这正是我们要的（黄金图用确定性源，真机预览用系统源）。
+    """
+    if font_engine is not None:
+        return font_engine
+    if system_fonts:
+        from .gdi_fonts import gdi_font_engine
+
+        engine = gdi_font_engine()
+        if engine is not None:
+            return engine
+    return HeadlessMetrics(font_table)
 
 
 class HeadlessBackend:
@@ -49,6 +73,7 @@ class HeadlessBackend:
         start_time_ms: float = 0.0,
         font_table: FontTable | None = None,
         system_fonts: bool = False,
+        font_engine: MetricsProvider | None = None,
     ) -> None:
         self._time_ms = start_time_ms
         self._pending: list[Event] = []
@@ -59,8 +84,10 @@ class HeadlessBackend:
         self._clipboard = ""
         self._initialized = False
         self._redraw_requests = 0
-        # 字体度量：确定性表驱动，跨平台一致，黄金图才能逐字节比对
-        self._metrics = HeadlessMetrics(font_table, system=system_fonts)
+        # 字体度量：默认走确定性表（跨平台一致，黄金图才能逐字节比对）。
+        # `font_engine` 允许注入任意 MetricsProvider；`system_fonts=True`
+        # 是"尽量用系统真字体"的糖，拿不到引擎时静默退回确定性表。
+        self._metrics: MetricsProvider = _resolve_metrics(font_table, system_fonts, font_engine)
         # 最近一次光栅结果留在内存里，测试可以直接取像素做断言
         self.last_frame: DisplayList | None = None
         self.last_pixels: bytes | None = None
@@ -211,8 +238,14 @@ class HeadlessBackend:
     # text/ 断行与 gfx/ 绘制都走这里，两套度量在无头后端上无法出现。
 
     @property
-    def font_metrics(self) -> HeadlessMetrics:
-        """暴露度量对象，测试可查缓存统计或直接放禁则测试集。"""
+    def font_metrics(self) -> MetricsProvider:
+        """当前的度量提供方。
+
+        可能是确定性的 `HeadlessMetrics`，也可能是系统真字体引擎
+        （`GdiFontEngine`）。**它同时也可能是字形提供方**——
+        如果它实现了 `mask_for`，光栅层就应当用它取字形，
+        这样度量与字形必然同源。`devtools` 就是这么自动配对的。
+        """
         return self._metrics
 
     def has_family(self, family: str) -> bool:
@@ -226,6 +259,27 @@ class HeadlessBackend:
 
     def shape_line(self, text: str, spec: FontSpec) -> GlyphRun:
         return self._metrics.shape_line(text, spec)
+
+    @property
+    def glyph_provider(self) -> object | None:
+        """能提供字形的对象；确定性度量表提供不了，返回 None。
+
+        这个方法存在是为了让上层能**自动配对**度量与字形：
+        `devtools` 拿到它就直接喂给光栅器，于是"度量用的字体"
+        与"字形用的字体"不可能是两个。返回 None 时上层用内置确定性字形。
+
+        为什么不让 `HeadlessBackend` 自己实现 `mask_for` 来伪装成字形提供方：
+        那样 `hasattr(backend, "mask_for")` 永远为真，上层就分不清
+        "这个后端能画真字形"还是"它只是转发给了一个画不了的东西"。
+        显式返回 None 比隐式的能力嗅探可靠。
+        """
+        if hasattr(self._metrics, "mask_for"):
+            return self._metrics
+        return None
+
+    def font_stats(self) -> dict[str, int]:
+        """度量缓存统计。"""
+        return self._metrics.stats()
 
     # ------------------------------------------------------------ 渲染占位
 

@@ -1,7 +1,7 @@
 # HANDOFF —— 交接文档
 
 > 写给下一个接手的对话。读完这份 + `AGENT.md` + `ROADMAP.md`，就能直接开工。
-> 交接时间：2026-09-10 · HEAD `77fed3a` · **527 个测试全绿** · 覆盖率 89%
+> 交接时间：2026-09-10 · **567 个测试全绿** · 覆盖率 89% · 中文已渲染真字形
 
 ---
 
@@ -30,12 +30,13 @@ Windows / macOS / Linux 一等公民、中文一等公民。
 |---|---|
 | `layout/` | 协议/盒子/Flex/Grid/Stack/Scroll，164 测试，覆盖 92% |
 | `core/` | 三棵树 + 帧调度 + `text_engine` 环境服务 |
-| `backend/` | 归一化事件 + 无头后端 + SDL2 + **字体度量契约（`MetricsProvider`）** |
+| `backend/` | 归一化事件 + 无头后端 + SDL2 + **字体度量契约** + **Windows 真字体引擎（GDI）** |
 | `style/` | 三层令牌 + 明暗主题 + 变体解析 |
 | `text/` | **完整文本栈**：度量 / CJK 回退链 / 整形 / 断行（含禁则）/ 段落排版 |
 | `widgets/` | Box / Card / **Text** / Row / Column / Flexible / Button / Input |
 | `gfx/` | 显示列表（含 `TextRunOp`）+ 录制器 + 软件光栅（含文本）+ PNG |
-| `devtools/` | 确定性截图 + 7 张黄金图 |
+| `devtools/` | 确定性截图 + 7 张黄金图 + **字形源自动配对** |
+| `examples/` | `hello.py` 可运行（`--dark` / `--deterministic`），有冒烟测试 |
 | CI | 三平台 + 覆盖率 + 性能 + 架构，五个任务 |
 
 ### 本次会话的 4 个提交（时间序）
@@ -92,9 +93,12 @@ d3baffd feat(text,widgets,gfx): 文本接入渲染管线，Text 组件落地
 关键约束：**布局永远在逻辑像素里算**，物理像素 = 逻辑 × dpi_scale，
 换算只在光栅/呈现那一层做。文字要在物理分辨率上光栅化才不模糊。
 
-### ③ 真字形渲染（决定"CJK 能不能看"）
+### ③ 真字形的另外两个平台
 
-见下面「五、已知问题」第 1 条。
+Windows 已经好了（中文是真汉字）。macOS 走 CoreText、Linux 走 FreeType
+（或 fontconfig + 一个纯 Python 的 TTF 光栅器）。接口是现成的：
+实现 `MetricsProvider` + `GlyphProvider`，照 `backend/gdi_fonts.py` 抄结构。
+**注意别只实现字形不实现度量**——那会让字距与字形对不上。
 
 ### ④ 样板 App
 
@@ -108,7 +112,7 @@ Phase 1 的成功标准是"能用它写出一个真实的小工具"。
 
 ```bash
 cd /e/inkstone
-./.venv/Scripts/python.exe -m pytest tests -q          # 527 个必须全绿
+./.venv/Scripts/python.exe -m pytest tests -q          # 567 个必须全绿
 ./.venv/Scripts/python.exe -m ruff format --check src tests
 ./.venv/Scripts/python.exe -m ruff check src tests     # 必须 All checks passed
 ./.venv/Scripts/python.exe -m mypy                     # strict，必须零错误
@@ -125,30 +129,29 @@ cd /e/inkstone
 
 ## 五、已知问题（诚实清单）
 
-1. **软件光栅的 CJK 是占位块，不是真字形**（ADR-0007）。
-   ASCII 用内置 5×7 真位图，**可读**；中文/日文/韩文只有一个按 advance
-   定宽的方块——它准确表达了"这个字占多宽、画在哪"，所以**布局是对的**，
-   但看不出是什么字。
-   - 影响：黄金图里中文不可读；用户看到的界面里中文是方块。
-   - 出路：平台后端提供真字形（Windows `GetGlyphOutline` / macOS CoreText /
-     Linux FreeType），经 `GlyphProvider` 注入即可，光栅与组件一行不改。
-   - **这是最值得优先解决的一个**：项目自称"中文一等公民"，
-     而现在的渲染看着像豆腐块。Phase 0 的原型反而用 pyglet 渲染过真中文。
-
-2. **`_fill` / `_stroke` 的裁剪边界有 1px 越界**：`_column_range` / `_row_range`
+1. **真字形目前只有 Windows 一份**（`GdiFontEngine`）。中文已经渲染成**真正的
+   汉字**，不再是方块。macOS（CoreText）与 Linux（FreeType）还需各写一份，
+   接口（`MetricsProvider` + `GlyphProvider`）已固定，照 `gdi_fonts.py`
+   的结构写即可，上层零改动。
+2. **彩色 emoji 会退化成单色轮廓**：GDI 的灰度抗锯齿路径画不了 COLR/CBDT
+   彩色字体。宽度与位置是对的（排版不受影响），但要真彩色需要
+   Direct2D/DirectWrite。
+3. **字号是整数像素**：GDI 的 `lfHeight` 只有整数，字号带小数时会被取整。
+   要和 ↓ 的 DPI 缩放一起做才精确。
+4. **`_fill` / `_stroke` 的裁剪边界有 1px 越界**：`_column_range` / `_row_range`
    用 `int(right) + 1` 当上界，裁剪边恰好落在整数像素上时会多放一列/一行。
    文本路径已用 `ceil` 修正；形状路径未改（会波及既有黄金图，需单独提交）。
 
-3. **架构上有 4 处已登记的反向依赖**（`test_architecture.py` 的 `KNOWN_EXCEPTIONS`）：
+5. **架构上有 4 处已登记的反向依赖**（`test_architecture.py` 的 `KNOWN_EXCEPTIONS`）：
    gfx/text → layout（几何原语属共享内核）、backend → gfx、core → style。
    登记表不允许留失效条目，消除了就要删掉。
 
-4. Flex 还不支持 `wrap` 换行（`docs/05 §4`）。滚动条、锚点保持属 Phase 2。
+6. Flex 还不支持 `wrap` 换行（`docs/05 §4`）。滚动条、锚点保持属 Phase 2。
 
-5. `.gitattributes` 声明 `eol=lf` 但工作区多为 CRLF，三平台 CI 会产生幽灵 diff。
+7. `.gitattributes` 声明 `eol=lf` 但工作区多为 CRLF，三平台 CI 会产生幽灵 diff。
    修法：`git add --renormalize .`（大 diff，单独提交）。
 
-6. **待用户拍板**：`docs/13 §8` 写"… → 状态 → 实例覆盖"，
+8. **待用户拍板**：`docs/13 §8` 写"… → 状态 → 实例覆盖"，
    `style/resolve.py` 把**交互态放在最后**（否则实例 `bg=red` 会悄悄关掉 hover）。
    改回来只需对调两行。`AGENT.md` 待办里也记了。
 
@@ -188,14 +191,16 @@ cd /e/inkstone
 ## 八、开工姿势（建议）
 
 1. 读 `AGENT.md`（**重点看 ADR 表**）→ `ROADMAP.md` → 本文档
-2. 跑一遍验证命令确认起点全绿（527 passed / mypy 干净 / 覆盖 89%）
-3. 若继续 Phase 1：优先 **③真字形渲染**（用户的观感痛点），
-   再做 ①中文输入 → ②DPI → ④样板 App
-4. 每完成一块：全量检查全绿 → commit（中文说明为什么）→ push
+2. 跑一遍验证命令确认起点全绿（567 passed / mypy 干净 / 覆盖 89%）
+3. 跑一次 `python examples/hello.py` —— 亲眼看看现在的界面长什么样，
+   这是最快建立"这个库到什么程度了"直觉的方式
+4. 若继续 Phase 1，顺序建议：**①中文输入**（`events/` + 编辑模型）→
+   **②DPI 缩放** → **③macOS/Linux 字体引擎** → **④样板 App**
+5. 每完成一块：全量检查全绿 → commit（中文说明为什么）→ push
 
 地基是结实的：三棵树、令牌、文本栈、确定性渲染、无头测试链路、
-CI 全通了。三平台 CI 首次推送就全绿，黄金图逐字节一致。
-剩下的主要是"让中文真正显示出来"和"把交互接上"。
+CI 全通了。三平台 CI 首次推送就全绿，黄金图逐字节一致，
+中文已经渲染成真汉字。剩下的主要是"把交互接上"和"补齐另两个平台"。
 
 ---
 

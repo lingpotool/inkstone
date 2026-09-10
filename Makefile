@@ -20,12 +20,12 @@ golden:                     ## 更新黄金图基线（改过渲染相关代码�
 	INKSTONE_UPDATE_GOLDEN=1 $(RUN) -m pytest tests/unit/test_golden_form.py tests/unit/test_text_render.py -q
 
 lint:                       ## 静态检查
-	$(RUN) -m ruff check src tests
-	$(RUN) -m ruff format --check src tests
+	$(RUN) -m ruff check src tests examples
+	$(RUN) -m ruff format --check src tests examples
 
 fmt:                        ## 自动格式化
-	$(RUN) -m ruff check --fix src tests
-	$(RUN) -m ruff format src tests
+	$(RUN) -m ruff check --fix src tests examples
+	$(RUN) -m ruff format src tests examples
 
 type:                       ## 类型检查（严格模式）
 	$(RUN) -m mypy

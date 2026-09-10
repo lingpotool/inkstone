@@ -46,9 +46,11 @@
    - 矩形 / 圆角矩形 / 描边 / **文本** / 裁剪
    - **进度（部分完成）**：显示列表（含 `TextRunOp`）、录制器、软件光栅
      （矩形 / 圆角 / 描边 / 抗锯齿 / **文本** / 裁剪）、PNG 编码已实现。
-     文本字形走 `GlyphProvider`：默认是内置确定性字形（ASCII 真位图 +
-     非拉丁占位块），**真字形待平台后端**（ADR-0007）。
-     尚缺：自研 GL 光栅后端、阴影、渐变。
+     字形有两套来源，都是"度量与字形同源"（ADR-0007 / ADR-0009）：
+     **确定性字形**（跨平台逐比特一致，CI 与黄金图用）与
+     **系统真字体**（`GdiFontEngine`，中文渲染成真汉字，真机与 App 用）。
+     `devtools` 自动配对字形源与度量源，配错会立刻可见。
+     尚缺：自研 GL 光栅后端、阴影、渐变、macOS/Linux 字体引擎、彩色 emoji。
 3. **文本**：字体加载与度量 + 单行/多行排版 + **CJK 字体回退链**
    - **进度（已完成）**：`backend/fonts.py`（度量契约，全库唯一入口）、
      `backend/headless_fonts.py`（确定性度量表 + 字素簇）、`text/font.py`
@@ -81,16 +83,17 @@
    - 变体解析已完成（`variants.py` / `resolve.py`）。
    - 未完成：密度档位、高对比主题、prefers-reduced-motion。
 7. **最小组件集**：Box / Text / Button / Input / Row / Column / Card
-   - **进度（除 Button/Input 的文字外已实现）**：Box / Card / **Text** /
-     Row / Column / Flexible / Button / Input 已完成，配套
-     `style/variants.py` 的 Button 变体配方（6 变体 × 5 尺寸 × 8 状态）
-     与 `style/resolve.py` 的五层确定性解析。一个真实登录表单能完整建出
-     三棵树并算出正确几何（含 Flexible 撑满剩余宽度）。
-   - **Text 已实现**：尺寸完全来自真实字体度量（`text_engine`），
-     支持换行 / 对齐 / max_lines / 省略号，`paint` 产出 `TextRunOp`。
-     支持字重、字色（默认取主题 `text` 令牌）。
-   - 待补：**Button 按标签收缩宽度、Input 显示值/占位符**——依赖已就绪，
-     属 Phase 1 收尾工作。
+   - **进度（已完成）**：Box / Card / **Text** / Row / Column / Flexible /
+     Button / Input 全部实现，配套 `style/variants.py` 的 Button 变体配方
+     （6 变体 × 5 尺寸 × 8 状态）与 `style/resolve.py` 的五层确定性解析。
+     一个真实登录表单能完整建出三棵树并算出正确几何（含 Flexible 撑满剩余宽度）。
+   - **Text**：尺寸完全来自真实字体度量（`text_engine`），支持换行 / 对齐 /
+     `max_lines` / 省略号 / 字重，`paint` 产出 `TextRunOp`。
+   - **Button / Input 会渲染文字**：按钮按标签度量 + 内边距**自己算宽度**
+     （不再需要调用方写 `width=80` 之类的估值），输入框显示值/占位符，
+     占位符用占位符色。
+   - **examples/hello.py 可运行**（`--dark` / `--deterministic`），
+     并有冒烟测试保证它不腐烂。
    - 顺带修掉两个三棵树层的 bug：slot（flex 权重）穿过组件层会丢、
      重排序找不到组件型子级的 RenderObject。
 8. **测试基建**：布局单测 + 黄金图测试（三平台基线）+ CI

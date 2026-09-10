@@ -23,25 +23,31 @@ Phase 1 · 地基。真实代码覆盖布局、组件树、样式、渲染、**�
 | `layout/stack.py` | ✅ Stack / Positioned / Align |
 | `layout/scroll.py` | ✅ ScrollView（向子级派发无限主轴约束） |
 | `core/`（key / widget / element / render_object / binding） | ✅ 三棵树 + 帧调度 + `text_engine` 环境服务 |
-| `backend/`（base / headless / sdl2 / **fonts** / **headless_fonts**） | ✅ 平台抽象层 + **字体度量契约**（`MetricsProvider`） |
+| `backend/`（base / headless / sdl2 / **fonts** / **headless_fonts** / **gdi_fonts**） | ✅ 平台抽象层 + **字体度量契约**（`MetricsProvider`）+ **Windows 真字体引擎** |
 | `gfx/color.py` | ✅ Color（hex 解析、插值、WCAG 对比度） |
 | `style/`（tokens / theme / resolve / variants） | ✅ 三层令牌 + 明暗主题 + 变体解析 |
 | `text/`（font / fallback / shaping / linebreak / paragraph / engine） | ✅ 字体度量、CJK 回退链、整形、断行（含禁则）、段落排版 |
 | `widgets/`（basic / layout / form） | ✅ Box / Card / **Text** / Row / Column / Flexible / Button / Input |
 | `gfx/`（display_list / paint / **glyphs** / raster.base / raster.software） | ✅ 显示列表（含 **`TextRunOp`**）+ 录制器 + 软件光栅（含文本）+ PNG |
-| `devtools/screenshot.py` | ✅ 确定性截图 + 黄金图基线（7 张，含 2 张文本） |
+| `devtools/screenshot.py` | ✅ 确定性截图 + 黄金图基线（7 张）+ **字形源自动配对** |
+| `examples/hello.py` | ✅ 可运行示例（`--dark` / `--deterministic`），进 CI 冒烟测试 |
 | 其余模块（gfx GL+Skia / events / primitives …） | ⬜ 占位桩 |
 
-517 个无头单测全绿，**黄金图逐字节比对**也跑通。
+567 个无头单测全绿，**黄金图逐字节比对**也跑通。
 
-按 ROADMAP 顺序，Phase 1 剩下：⑧ CI 配置。③ 文本栈与 ⑦ Text 组件已完成；
-"中文输入"验收项有了地基（受控输入与光标几何已具备，IME 组合态属 Phase 2）。
+按 ROADMAP 顺序，Phase 1 剩下：② 自研 GL 后端、中文输入（`events/`）、
+DPI 缩放、样板 App。渲染与文本这几块已经能出**看起来像正经软件**的界面。
 
-**文本栈当前的诚实边界**：软件光栅的字形来自内置确定性字形（ASCII 真位图 +
-非拉丁占位块），**不是真字形**。这是刻意的——它是验证后端，服务黄金图与
-无头 CI，要的是跨平台逐比特一致。真字形由平台后端提供（Phase 1 item 2 的
-GL 后端 / Phase 2），接口（`GlyphProvider`）已留好，替换时上层零改动。
-详见 ADR-0007。
+**字体有两种来源，各司其职（ADR-0007 / ADR-0009）**：
+
+- **确定性字形**（默认）：内置 5×7 位图 + 非拉丁占位块，无字体文件，
+  跨平台逐比特一致 → 黄金图与 CI 用这条。
+- **系统真字体**（`HeadlessBackend(system_fonts=True)` 或注入
+  `GdiFontEngine`）：中文渲染成**真正的汉字** → 真机预览与 App 用这条。
+
+两者都是"度量与字形同源"，区别只在源头。`devtools` 会**自动配对**：
+组件树用哪个度量源，光栅就用哪个字形源，配错了会立刻看出来（字形叠字）。
+示例：`python examples/hello.py`（真字体）／`--deterministic`（确定性）。
 
 **占位桩长这样**：一段说明用途的 docstring + `__all__: list[str] = []`。
 看到这个形态就别指望里面有实现，也别在它上面继续叠代码——先实现它。
@@ -224,23 +230,24 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 | ADR-0001 | 平台后端选 SDL2 | 完整 IME + 原生 Wayland，headless 用于测试（docs/01） |
 | ADR-0005 | 整形与断行复用成熟实现，不自己造 | HarfBuzz 级整形规则上千条，自写=两年换更差版本（docs/04 §2） |
 | ADR-0006 | **文本度量下沉到 L0 后端** | 度量是平台相关能力，放 L0 才不违反"平台差异不出 L0"；`Backend` 继承 `MetricsProvider` 让度量与绘制同源成为结构必然。`text/` 只面向协议说话，可 100% 无窗口测试 |
-| ADR-0007 | **软件光栅用内置确定性字形，真字形交给平台后端** | 验证后端要的是"跨平台逐比特一致"与"布局可验证"，不是字形美观。ASCII 用内置 5×7 真位图（可读、整数倍放大保持锋利），非拉丁用按 advance 定宽的占位块。真字形由平台后端提供（GL/FreeType），经 `GlyphProvider` 替换，上层零改动。**字形宽度必须画进 `advance` 里**——按字号自由决定宽度会让相邻字形重叠 |
+| ADR-0007 | **软件光栅默认用内置确定性字形** | 验证后端要的是"跨平台逐比特一致"与"布局可验证"，不是字形美观。ASCII 用内置 5×7 真位图，非拉丁用按 advance 定宽的占位块。**字形宽度必须画进 `advance` 里**——按字号自由决定宽度会让相邻字形重叠 |
+| ADR-0009 | **真字形由 L0 平台引擎提供，度量与字形同一个对象** | `GdiFontEngine`（Windows）同时实现 `MetricsProvider` 与 `GlyphProvider`，共用一份 HFONT 缓存 → 字距与字形不可能分家。`devtools` 通过 `glyph_provider` 属性**自动配对**，杜绝"度量用一套、字形用另一套"（那会让字形叠字，且只在真机上可见）。度量归一化：逐簇 `GetCharABCWidthsFloatW` + 整串 `GetTextExtentPoint32W` 校正，避免整数累加漂移 |
+| ADR-0010 | **Win32 文本 API 的长度按 UTF-16 码元算，不按码点** | `len(str)` 数的是码点，W 系 API 数的是码元。emoji 是代理对（1 码点 = 2 码元），传 `len()` 会让 GDI 只量/只画半个代理对——宽度变成一个荒唐的小数、字形变成空方框，**而且不报错**。统一走 `_utf16_len()` |
 | ADR-0008 | **`text_run` 指令只吃字形不吃字符串** | docs/03 的约定落地：整形与断行在 L3 完成，渲染层只接收"哪些字形、画在哪"。换行规则、回退链、字素簇的知识不渗进渲染层。光栅层**按 `glyph.x` 画，不自己累加 advance**——否则字距调整/两端对齐/标点悬挂的决策会被静默丢掉 |
 
 ## 已知待办
 
-- **软件光栅的 CJK 是占位块，不是真字形**（ADR-0007）。ASCII 已可读，
-  中文只表达"这个字占多宽、画在哪"，用于验证布局。真字形需要平台后端
-  （Windows GDI/DirectWrite 的 `GetGlyphOutline`、macOS CoreText、
-  Linux FreeType），实现后经 `GlyphProvider` 注入即可，上层零改动。
-  这是 Phase 1 item 2（渲染管线）的后续工作。
-- **`_fill` / `_stroke` 的裁剪边界有一处 1px 越界**：`_column_range` /
-  `_row_range` 用 `int(right) + 1` 作为上界，当裁剪边恰好落在整数像素上时
-  会多放一列/一行进来。文本路径已用 `ceil` 修正；形状路径未改
-  （改动会波及既有黄金图，需要单独一次提交 + 肉眼比对）。
-- **`Button` / `Input` 仍未渲染文字**：它们现在撑满可用宽度。文本栈已就绪，
-  接下来应让 Button 按标签收缩、Input 用 Text 显示值/占位符——这是 Phase 1
-  收尾的一部分。
+- **真字形目前只有 Windows 一份**（`GdiFontEngine`）。macOS（CoreText）与
+  Linux（FreeType）需要各自实现，接口（`MetricsProvider` + `GlyphProvider`）
+  已经固定，照着 `gdi_fonts.py` 的结构写即可，上层零改动。
+- **颜色 emoji 会退化成单色轮廓**：GDI 的灰度抗锯齿路径画不了 COLR/CBDT
+  彩色字体，emoji 出来是黑白剪影。要真彩色需要 Direct2D/DirectWrite，
+  属后续工作。宽度与位置是对的，不影响排版。
+- **字号是整数像素**：GDI 的 `lfHeight` 只有整数，所以字号带小数时会被取整。
+  想让 1.25 倍缩放等场景精确，得配合 DPI 那套（见 ROADMAP DoD）一起做。
+- **`_fill` / `_stroke` 的裁剪边界有 1px 越界**：`_column_range` / `_row_range`
+  用 `int(right) + 1` 当上界，裁剪边恰好落在整数像素上时会多放一列/一行。
+  文本路径已用 `ceil` 修正；形状路径未改（会波及既有黄金图，需单独提交）。
 - **架构上有 4 处已登记的反向依赖**（`test_architecture.py` 的
   `KNOWN_EXCEPTIONS`）：gfx/text → layout（几何原语，属共享内核）、
   backend → gfx、core → style。登记表不允许留失效条目，消除了就要删掉。
