@@ -31,6 +31,7 @@ from ..core.element import _SLOT_UNCHANGED, Element
 from ..core.key import Key
 from ..gfx.color import Color
 from ..layout import BoxConstraints, RenderBox, Size
+from ..layout.types import Rect
 from ..style import (
     ButtonStyle,
     ButtonVariant,
@@ -68,6 +69,34 @@ class _ControlRenderObject(RenderBox):
         if width is None:
             width = constraints.max_width if constraints.has_bounded_width else 0.0
         return constraints.constrain(Size(width, self.height_value))
+
+    def paint(self, context: object) -> None:
+        rect = Rect(0.0, 0.0, self.size.width, self.size.height)
+        radius = self.radius
+
+        round_rect = getattr(context, "round_rect", None)
+        stroke = getattr(context, "stroke_rect", None)
+
+        bg = self.bg
+        if bg is not None and bg.a > 0.0 and round_rect is not None:
+            round_rect(rect, radius, bg)
+
+        border = self.border
+        if self.border_width > 0.0 and border is not None and border.a > 0.0 and stroke is not None:
+            stroke(rect, self.border_width, border, radius)
+
+        # 焦点环：2px 环 + 2px 偏移，向外长不裁切（docs/13 §5）
+        ring = self.focus_ring
+        if self.focus_ring_width > 0.0 and ring is not None and ring.a > 0.0 and stroke is not None:
+            from ..style import FOCUS_RING_OFFSET
+
+            ring_rect = Rect(
+                -FOCUS_RING_OFFSET,
+                -FOCUS_RING_OFFSET,
+                self.size.width + 2 * FOCUS_RING_OFFSET,
+                self.size.height + 2 * FOCUS_RING_OFFSET,
+            )
+            stroke(ring_rect, self.focus_ring_width, ring, radius + FOCUS_RING_OFFSET)
 
 
 class _ControlBox(RenderObjectWidget):

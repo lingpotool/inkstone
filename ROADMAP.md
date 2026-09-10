@@ -70,6 +70,11 @@
    - 顺带修掉两个三棵树层的 bug：slot（flex 权重）穿过组件层会丢、
      重排序找不到组件型子级的 RenderObject。
 8. **测试基建**：布局单测 + 黄金图测试（三平台基线）+ CI
+   - **进度（部分完成）**：282 个无头单测全绿；5 张黄金图（登录表单明暗、
+     Button / Card / Input 单独）已建立并逐字节比对。
+     devtools 强制 `force_repaint` 让黄金图每帧都是完整画面，
+     不污染生产帧的"跳干净子树"优化。
+   - 待补：CI 配置、gl_backend / skia_backend、Text 渲染。
 
 ### 验收标准（DoD）
 

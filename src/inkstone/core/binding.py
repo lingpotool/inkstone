@@ -174,12 +174,23 @@ class BuildOwner:
         self,
         constraints: BoxConstraints,
         context: PaintContext | None = None,
+        *,
+        force_repaint: bool = False,
     ) -> Size | None:
-        """跑完整的一帧。"""
+        """跑完整的一帧。
+
+        `force_repaint=True` 时强制把渲染树全部标脏——动画场景下默认会跳过
+        没动的子树（省 99% 工作量），黄金图测试与截图工具要的是"每帧完整画面"，
+        所以 devtools 用这个标志。
+        """
         self.frame_count += 1
         self.flush_build()
         size = self.flush_layout(constraints)
         if context is not None:
+            if force_repaint:
+                root = self.root_render_object
+                if root is not None:
+                    _force_paint_all(root)
             self.flush_paint(context)
         return size
 
@@ -193,3 +204,14 @@ class BuildOwner:
             yield
         finally:
             self._phase = previous
+
+
+def _force_paint_all(root: RenderBox) -> None:
+    """把整棵渲染子树标脏。`mark_needs_paint` 只标自身与冒泡到根，
+    但"整树重画"需要把每个节点都标记——否则已清过的子级会被 paint_tree 跳过。
+    """
+    pending: list[RenderBox] = [root]
+    while pending:
+        node = pending.pop()
+        node._needs_paint = True
+        pending.extend(node.children)

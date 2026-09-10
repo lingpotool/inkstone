@@ -6,9 +6,10 @@
 > 设计文档 14 篇已就绪；**布局引擎已实现**（协议 / 盒子模型 / Flex / Grid / Stack / Scroll），
 > **组件树与帧调度已实现**（Widget / Element / RenderBox 三层 + BuildOwner），
 > **设计令牌与明暗主题已实现**（三层令牌，明暗两版 WCAG 2.2 AA 对比度由测试保证），
-> **最小组件集已实现**（Box / Card / Row / Column / Flexible / Button / Input + 变体解析）。
-> 273 个无头单测全绿，1001 节点全量布局 0.89ms。
-> 渲染、文本仍未动工。详见 [ROADMAP.md](ROADMAP.md)。
+> **最小组件集已实现**（Box / Card / Row / Column / Flexible / Button / Input + 变体解析），
+> **gfx 显示列表 + 软件光栅 + 黄金图测试已实现**（5 张基线逐字节比对）。
+> 282 个无头单测全绿，1001 节点全量布局 0.89ms。
+> 渲染（GL/Skia）、文本仍未动工。详见 [ROADMAP.md](ROADMAP.md)。
 
 ---
 

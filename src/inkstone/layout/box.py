@@ -246,9 +246,29 @@ class RenderBox:
         """
 
     def paint_tree(self, context: object) -> None:
-        """绘制整棵脏子树，干净子树整棵跳过。"""
+        """绘制整棵脏子树，干净子树整棵跳过。
+
+        如果 context 支持 save/translate/restore（如 gfx 的 DisplayListRecorder），
+        在画子级前把坐标系平移到本节点的 offset——这样组件只需要在局部坐标系里画。
+        老式的纯 object context 不受影响（没有这些方法就跳过平移）。
+        """
         if not self._needs_paint:
             return
+
+        save = getattr(context, "save", None)
+        translate = getattr(context, "translate", None)
+        restore = getattr(context, "restore", None)
+
+        if save is not None and translate is not None and restore is not None:
+            save()
+            translate(self._offset.dx, self._offset.dy)
+            self._paint_and_descend(context)
+            restore()
+            return
+
+        self._paint_and_descend(context)
+
+    def _paint_and_descend(self, context: object) -> None:
         self.paint(context)
         self._needs_paint = False
         for child in self.children:

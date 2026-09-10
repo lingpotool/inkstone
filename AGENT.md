@@ -26,11 +26,13 @@ Phase 1 · 地基进行中。真实代码只集中在 **布局引擎**：
 | `gfx/color.py` | ✅ Color（hex 解析、插值、WCAG 对比度） |
 | `style/`（tokens / theme / resolve / variants） | ✅ 三层令牌 + 明暗主题 + 变体解析 |
 | `widgets/`（basic / layout / form） | ✅ Box / Card / Row / Column / Flexible / Button / Input |
-| 其余 65 个模块（gfx 渲染 / text / events / primitives …） | ⬜ 占位桩 |
+| `gfx/`（display_list / paint / raster.base / raster.software） | ✅ 显示列表 + 录制器 + 软件光栅 + PNG |
+| `devtools/screenshot.py` | ✅ 确定性截图 + 黄金图基线（5 张） |
+| 其余 58 个模块（gfx GL+Skia / text / events / primitives …） | ⬜ 占位桩 |
 
-273 个无头单测全绿。一个真实登录表单（Card + 两个 Input + Row 里一个
-ghost 取消 + 一个 fill 登录按钮）能完整建出三棵树并算出正确几何。
-下一步是 gfx 显示列表 + headless 光栅（让界面真正被画出来），然后 Text。
+282 个无头单测全绿，**黄金图逐字节比对**也跑通。登录表单
+（Card + 两个 Input + Row 里一个 ghost 取消 + 一个 fill 登录按钮）
+能完整画成 PNG 并在每次跑测试时与基线逐字节相等。
 
 **占位桩长这样**：一段说明用途的 docstring + `__all__: list[str] = []`。
 看到这个形态就别指望里面有实现，也别在它上面继续叠代码——先实现它。
@@ -127,6 +129,9 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
   明暗两版天然过 AA。
 - **文字宽度不许估算。** Text 组件在 `text/` 的字体度量落地前不实现，
   更不能写"每字 14px"这种近似——中英混排和字号变化时会悄悄算错。
+- **黄金图与生产帧的脏跟踪是矛盾的**。生产里"没脏就跳过整棵子树"省 99% 工作量，
+  黄金图要的是"每帧完整画面"。devtools 用 `begin_frame(..., force_repaint=True)`
+  强制走全树，标志会被记录但默认关掉——动画场景的优化不丢。
 
 ## 测试怎么写
 

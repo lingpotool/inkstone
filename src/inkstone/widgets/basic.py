@@ -29,7 +29,7 @@ from ..core.element import _SLOT_UNCHANGED, Element
 from ..core.key import Key
 from ..gfx.color import Color
 from ..layout import BoxConstraints, RenderBox, Size
-from ..layout.types import EdgeInsets, Offset
+from ..layout.types import EdgeInsets, Offset, Rect
 
 __all__ = ["Box", "Card"]
 
@@ -53,6 +53,19 @@ class _BoxRenderObject(RenderBox):
             height = constraints.max_height if constraints.has_bounded_height else 0.0
         return constraints.constrain(Size(width, height))
 
+    def paint(self, context: object) -> None:
+        color = self.color
+        if color is None or color.a == 0.0:
+            return
+        rect = Rect(0.0, 0.0, self.size.width, self.size.height)
+        radius = self.radius or 0.0
+        round_rect = getattr(context, "round_rect", None)
+        fill_rect = getattr(context, "fill_rect", None)
+        if radius > 0.0 and round_rect is not None:
+            round_rect(rect, radius, color)
+        elif fill_rect is not None:
+            fill_rect(rect, color)
+
 
 class _CardRenderObject(RenderBox):
     """Card 的渲染对象：尺寸由子级（连 padding）决定。"""
@@ -61,6 +74,9 @@ class _CardRenderObject(RenderBox):
         super().__init__(padding=padding)
         self._child: RenderBox | None = None
         self.elevation: str = "e1"
+        self.surface_color: Color | None = None
+        self.border_color: Color | None = None
+        self.radius: float | None = None
 
     @property
     def child(self) -> RenderBox | None:
@@ -85,6 +101,18 @@ class _CardRenderObject(RenderBox):
             content = self.layout_child(self._child, inner)
             self.place_child(self._child, Offset(self.padding.left, self.padding.top))
         return constraints.constrain(self.wrap(content))
+
+    def paint(self, context: object) -> None:
+        rect = Rect(0.0, 0.0, self.size.width, self.size.height)
+        radius = self.radius or 10.0
+
+        round_rect = getattr(context, "round_rect", None)
+        if self.surface_color is not None and self.surface_color.a > 0.0 and round_rect is not None:
+            round_rect(rect, radius, self.surface_color)
+
+        stroke = getattr(context, "stroke_rect", None)
+        if self.border_color is not None and self.border_color.a > 0.0 and stroke is not None:
+            stroke(rect, 1.0, self.border_color, radius)
 
 
 class Box(RenderObjectWidget):
@@ -203,8 +231,15 @@ class _CardElement(RenderObjectElement):
         if render_object is None:
             return
         assert isinstance(render_object, _CardRenderObject)
-        inset = widget.padding if widget.padding is not None else self.theme.space("lg")
+        theme = self.theme
+        inset = widget.padding if widget.padding is not None else theme.space("lg")
         render_object.padding = EdgeInsets.all(inset)
+        # 外观也来自主题：表面 + 细边框保层级（阴影 e1 的光栅实现属 v1，
+        # 令牌照旧在，只是光栅端暂时忽略）
+        render_object.surface_color = theme.color("surface")
+        render_object.border_color = theme.color("border")
+        render_object.radius = theme.radius("md")
+        render_object.mark_needs_paint()
 
     def _sync_child(self) -> None:
         widget = self.widget

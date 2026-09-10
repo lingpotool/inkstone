@@ -17,7 +17,7 @@ theme.contrast_issues()              # WCAG AA 检查，CI 里必须为空
 """
 
 from ..gfx.color import Color
-from .resolve import ComponentState, resolve
+from .resolve import FOCUS_RING_OFFSET, FOCUS_RING_WIDTH, ComponentState, resolve
 from .theme import Theme, ThemeMode, TokenError, default_theme
 from .tokens import (
     DARK_SEMANTIC,
@@ -43,6 +43,8 @@ from .variants import (
 __all__ = [
     "DARK_SEMANTIC",
     "DEFAULT_RAW",
+    "FOCUS_RING_OFFSET",
+    "FOCUS_RING_WIDTH",
     "LIGHT_SEMANTIC",
     "RAMP_STEPS",
     "ButtonStyle",
