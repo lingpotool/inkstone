@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的新推送取消旧构建——省资源，也让"最新一次是否绿"没有歧义。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUTF8: "1"          # 中文源码/输出在 Windows runner 上不乱码
+  PYTHONDONTWRITEBYTECODE: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  # ---------------------------------------------------------------- 静态检查
+  lint:
+    name: lint · ruff + mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 安装开发依赖
+        run: python -m pip install -e ".[dev]"
+      - name: ruff format --check
+        run: python -m ruff format --check src tests
+      - name: ruff check
+        run: python -m ruff check src tests
+      - name: mypy（strict）
+        run: python -m mypy
+
+  # ---------------------------------------------------------------- 三平台测试
+  # 黄金图是**逐字节**比对的，理论上三平台应完全一致：
+  # 无头度量表是纯数据、软件光栅是纯算术、PNG 编码固定参数，
+  # 全程不依赖系统字体/时钟/随机数。若这里出现平台间不一致，
+  # 说明确定性的某条链路破了——那正是要立刻知道的事。
+  test:
+    name: test · ${{ matrix.os }} · py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false       # 一个平台挂了也要看另外两个的结果
+      matrix:
+        include:
+          - os: windows-latest
+            python: "3.12"
+          - os: macos-latest
+            python: "3.12"
+          - os: ubuntu-latest
+            python: "3.12"
+          # 最低支持版本也要真跑一遍，否则 pyproject 里的 >=3.10 是空头承诺
+          - os: ubuntu-latest
+            python: "3.10"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: 安装开发依赖
+        run: python -m pip install -e ".[dev]"
+
+      # 在 Linux 上跑无头测试不需要 X11：全部测试都不开窗口。
+      # 这一条本身就是"布局与文本 100% 可无头测试"的证明。
+      - name: 运行全部测试（含黄金图逐字节比对）
+        run: python -m pytest tests -q
+
+      - name: 黄金图不匹配时上传实际产物
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-failures-${{ matrix.os }}-py${{ matrix.python }}
+          path: tests/golden/failures/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ---------------------------------------------------------------- 覆盖率
+  coverage:
+    name: coverage · ≥85%
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 安装开发依赖
+        run: python -m pip install -e ".[dev]"
+      # 排除 slow：性能断言的预算在覆盖率插桩下必然失真，
+      # 把它和覆盖率混在一起会得到一个"时红时绿"的假信号。
+      # 性能由下面的 perf 任务在无插桩环境下单独把关。
+      - name: 覆盖率（ROADMAP Phase 1 要求 ≥ 85%）
+        run: |
+          python -m pytest tests -q -m "not slow" \
+            --cov=src/inkstone --cov-report=term-missing --cov-fail-under=85
+
+  # ---------------------------------------------------------------- 性能
+  # 无插桩，才能真正测出布局与排版的耗时。
+  perf:
+    name: perf · 布局与排版预算
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 安装开发依赖
+        run: python -m pip install -e ".[dev]"
+      - name: 性能预算（1000 节点布局 / 1000 字排版）
+        run: python -m pytest tests -q -m "slow"
+
+  # ---------------------------------------------------------------- 架构约束
+  # 单独成任务，是为了让"分层被破坏"在 CI 上有一个**指名道姓**的红点，
+  # 而不是淹没在 500 多个测试里。规则写在 tests/unit/test_architecture.py。
+  architecture:
+    name: architecture · 分层与铁律
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: 安装开发依赖
+        run: python -m pip install -e ".[dev]"
+      - name: 单向依赖 / text 层无平台 API / 组件零硬编码
+        run: python -m pytest tests/unit/test_architecture.py -q

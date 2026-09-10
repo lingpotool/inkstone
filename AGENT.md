@@ -94,6 +94,21 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 
 四条全绿才能提。mypy 是 **strict 模式**，所有函数必须有完整注解。
 
+### CI（`.github/workflows/ci.yml`）跑五个任务
+
+| 任务 | 内容 | 为什么单独成任务 |
+|---|---|---|
+| `lint` | ruff format --check + ruff check + mypy | 风格与类型常被绕过，单独可见 |
+| `test` | 三平台（py3.12）+ Ubuntu py3.10，跑全部测试含黄金图 | 黄金图逐字节比对，任何平台不一致都要立刻知道 |
+| `coverage` | `-m "not slow"` + `--cov-fail-under=85` | ROADMAP 要求 ≥ 85% |
+| `perf` | `-m slow`，**无插桩** | 覆盖率插桩会让性能断言随机变红，两者必须分开 |
+| `architecture` | `test_architecture.py` | 分层被破坏要在 CI 上有指名道姓的红点 |
+
+黄金图的 CI 行为值得说清：**理论上三平台应逐字节相同**——无头度量表是纯数据、
+软件光栅是纯算术、PNG 编码固定参数，全程不碰系统字体/时钟/随机数。
+若出现平台间差异，那是确定性的某条链路破了，正是要立刻知道的事。
+（真字形后端上线后会引入平台差异，届时按 `tests/golden/<platform>/` 分目录。）
+
 ### 关于 ruff 的一条重要配置
 
 `pyproject.toml` 里永久忽略了 **RUF001 / RUF002 / RUF003**。

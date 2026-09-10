@@ -683,8 +683,14 @@ class TestLongMixedContent:
         para = layout_paragraph("👨\u200d👩\u200d👧", STYLE, resolver, shaper, max_width=200.0)
         assert para.lines[0].line.cluster_count == 1
 
+    @pytest.mark.slow
     def test_layout_performance_1000_chars(self, resolver: FontResolver, shaper: Shaper) -> None:
-        """1000 字排版必须在预算内——文本是每帧都要跑的热路径。"""
+        """1000 字排版必须在预算内——文本是每帧都要跑的热路径。
+
+        标 `slow` 的原因：性能断言在**覆盖率插桩**下必然失真（逐行统计的
+        开销远大于排版本身）。CI 用 `-m "not slow"` 跑覆盖率，
+        性能由独立任务在无插桩的情况下测。
+        """
         import time
 
         text = "这是一段用于测试性能的中文文本，包含 English 和 12345。" * 40
