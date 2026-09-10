@@ -76,46 +76,35 @@ class SoftwareRasterizer(RasterBackend):
                 _blend_pixel(buf, w, x, y, color)
 
     def _stroke(self, buf: bytearray, w: int, h: int, op: StrokeRectOp) -> None:
-        if op.color.a == 0.0 or op.width <= 0.0:
+        """描边 = 圆环：外圈圆角矩形 **减去** 内圈圆角矩形。
+
+        曾经用"四条矩形条拼边框"，结果圆角处会漏：条的两端被圆角裁掉，
+        填充又是圆的，于是**边框与圆角之间裂开露出底色**。
+        圆环法让描边严格贴合圆角轮廓，四角不会有任何缝隙。
+        """
+        rect, width, color = op.rect, op.width, op.color
+        if color.a == 0.0 or width <= 0.0 or rect.width <= 0.0 or rect.height <= 0.0:
             return
-        rect, width = op.rect, op.width
-        # 描边 = 四条边的实心填充，向内生长
-        self._fill(
-            buf,
-            w,
-            h,
-            Rect(rect.left, rect.top, rect.width, width),
-            op.color,
-            _corner_radius(op, "top"),
-            op.clip,
+
+        outer_radius = (
+            min(op.radius, rect.width / 2.0, rect.height / 2.0) if op.radius > 0.0 else 0.0
         )
-        self._fill(
-            buf,
-            w,
-            h,
-            Rect(rect.left, rect.bottom - width, rect.width, width),
-            op.color,
-            _corner_radius(op, "bottom"),
-            op.clip,
-        )
-        self._fill(
-            buf,
-            w,
-            h,
-            Rect(rect.left, rect.top + width, width, rect.height - 2 * width),
-            op.color,
-            0.0,
-            op.clip,
-        )
-        self._fill(
-            buf,
-            w,
-            h,
-            Rect(rect.right - width, rect.top + width, width, rect.height - 2 * width),
-            op.color,
-            0.0,
-            op.clip,
-        )
+        inner_w, inner_h = rect.width - 2 * width, rect.height - 2 * width
+        has_inner = inner_w > 0.0 and inner_h > 0.0
+        inner = Rect(rect.left + width, rect.top + width, max(inner_w, 0.0), max(inner_h, 0.0))
+        inner_radius = max(0.0, outer_radius - width)
+
+        x0, y0 = _clamp_to_canvas(rect.left, rect.top, op.clip, w, h)
+        x1, y1 = _clamp_to_canvas(rect.right, rect.bottom, op.clip, w, h)
+
+        for y in range(y0, y1):
+            for x in range(x0, x1):
+                px, py = x + 0.5, y + 0.5
+                if not _inside_rounded(px, py, rect, outer_radius):
+                    continue
+                if has_inner and _inside_rounded(px, py, inner, inner_radius):
+                    continue
+                _blend_pixel(buf, w, x, y, color)
 
 
 # ---------------------------------------------------------------- 几何辅助
@@ -137,11 +126,6 @@ def _inside_rounded(px: float, py: float, rect: Rect, radius: float) -> bool:
     cx = min(max(px, rect.left + radius), rect.right - radius)
     cy = min(max(py, rect.top + radius), rect.bottom - radius)
     return (px - cx) ** 2 + (py - cy) ** 2 <= radius * radius
-
-
-def _corner_radius(op: StrokeRectOp, side: str) -> float:
-    """上下两条边的填充沿用圆角，左右两条边用直角（避免圆角被画两遍）。"""
-    return op.radius
 
 
 # ---------------------------------------------------------------- 像素混合
