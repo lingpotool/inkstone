@@ -55,6 +55,12 @@
      layout 阶段改状态抛 FrameError。
    - 未实现：signals（docs/06 §3 状态双轨）、semantics 阶段（Phase 3 无障碍）。
 6. **样式**：设计系统三层令牌（含阴影/动效令牌，规格见 `docs/13`）+ 明暗主题 + 组件变体解析
+   - **进度（部分完成）**：`gfx/color.py`（含 WCAG 对比度计算）、
+     `style/tokens.py`（12 级色板、8pt 间距、圆角、字号、控件高度、阴影 e0–e4、
+     动效时长与缓动、语义令牌 25 个）、`style/theme.py`（明暗两版 + 取值 API）已实现。
+     **明暗两版的 WCAG 2.2 AA 对比度已作为断言进测试**——颜色是我调的，对比度是算的。
+   - 未完成：组件令牌层、变体解析（`variants.py` / `resolve.py`）、
+     密度档位、高对比主题、prefers-reduced-motion。
 7. **最小组件集**：Box / Text / Button / Input / Row / Column / Card
 8. **测试基建**：布局单测 + 黄金图测试（三平台基线）+ CI
 

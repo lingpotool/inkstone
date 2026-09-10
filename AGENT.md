@@ -23,10 +23,12 @@ Phase 1 · 地基进行中。真实代码只集中在 **布局引擎**：
 | `layout/stack.py` | ✅ Stack / Positioned / Align |
 | `layout/scroll.py` | ✅ ScrollView（向子级派发无限主轴约束） |
 | `core/`（key / widget / element / render_object / binding） | ✅ 三棵树 + 帧调度 |
-| 其余 73 个模块（gfx / text / style / widgets …） | ⬜ 占位桩 |
+| `gfx/color.py` | ✅ Color（hex 解析、插值、WCAG 对比度） |
+| `style/`（tokens / theme） | ✅ 三层令牌 + 明暗主题 |
+| 其余 70 个模块（gfx 渲染 / text / widgets / events …） | ⬜ 占位桩 |
 
-布局引擎 + core 覆盖率 94%，210 个无头单测。下一步是 `style/tokens`、
-`gfx`，以及 ROADMAP Phase 1 item 7 的最小组件集（Box/Text/Button/Input/Row/Column/Card）。
+243 个无头单测全绿。下一步是 ROADMAP Phase 1 item 7 的最小组件集
+（Box / Text / Button / Input / Row / Column / Card）与 gfx 显示列表。
 
 **占位桩长这样**：一段说明用途的 docstring + `__all__: list[str] = []`。
 看到这个形态就别指望里面有实现，也别在它上面继续叠代码——先实现它。
