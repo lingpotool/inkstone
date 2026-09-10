@@ -62,6 +62,13 @@
    - 未完成：组件令牌层、变体解析（`variants.py` / `resolve.py`）、
      密度档位、高对比主题、prefers-reduced-motion。
 7. **最小组件集**：Box / Text / Button / Input / Row / Column / Card
+   - **进度（除 Text 外已实现）**：Box / Card / Row / Column / Flexible / Button / Input
+     已完成，配套 `style/variants.py` 的 Button 变体配方（6 变体 × 5 尺寸 × 8 状态）
+     与 `style/resolve.py` 的五层确定性解析。一个真实登录表单能完整建出三棵树
+     并算出正确几何（含 Flexible 撑满剩余宽度）。
+   - Text 未实现：**文字宽度不许估算**，必须等 `text/` 的字体度量落地（docs/04 反复强调的坑）。
+   - 顺带修掉两个三棵树层的 bug：slot（flex 权重）穿过组件层会丢、
+     重排序找不到组件型子级的 RenderObject。
 8. **测试基建**：布局单测 + 黄金图测试（三平台基线）+ CI
 
 ### 验收标准（DoD）

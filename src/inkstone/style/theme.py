@@ -135,6 +135,20 @@ class Theme:
         return self.raw.font_mono
 
 
+_DEFAULT_THEME: Theme | None = None
+
+
+def default_theme() -> Theme:
+    """环境主题缺失时的兜底（组件没挂到 BuildOwner 上时会用到）。
+
+    缓存一份复用：Theme 是不可变的，没必要每次都造新的。
+    """
+    global _DEFAULT_THEME
+    if _DEFAULT_THEME is None:
+        _DEFAULT_THEME = Theme.light()
+    return _DEFAULT_THEME
+
+
 def _lookup(group: str, name: str, table: Mapping[str, _V]) -> _V:
     try:
         return table[name]

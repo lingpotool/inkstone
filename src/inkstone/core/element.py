@@ -21,6 +21,7 @@ from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 from ..layout import RenderBox
+from ..style import Theme, default_theme
 from .widget import RenderObjectWidget, StatefulWidget, StatelessWidget, Widget
 
 if TYPE_CHECKING:
@@ -37,6 +38,11 @@ __all__ = [
 ]
 
 
+# 哨兵：区分"没传 slot"与"传了 None"（None 本身是合法槽位值）。
+# 定义在类之前，因为它要用作方法默认参数。
+_SLOT_UNCHANGED = object()
+
+
 class Element:
     """所有 Element 的基类。"""
 
@@ -47,6 +53,10 @@ class Element:
         self._depth: int = 0
         self._dirty: bool = True
         self._active: bool = False
+        # 槽位：父容器给本节点的"位置信息"（如 flex 权重）。
+        # 它必须穿过 StatelessWidget / StatefulWidget 一直传到真正的渲染节点，
+        # 否则 `Flexible(Button())` 里的 flex 会丢——Button 是个组件，中间隔了一层。
+        self._slot: object | None = None
 
     # ------------------------------------------------------------ 属性
 
@@ -88,6 +98,18 @@ class Element:
         """由 BuildOwner 在挂载根节点时调用，其余节点沿 parent 链向上找。"""
         self._owner = owner
 
+    @property
+    def theme(self) -> Theme:
+        """环境主题（BuildContext 的核心能力之一）。
+
+        组件靠它取令牌，不必把 theme 当参数层层透传。
+        没挂到 BuildOwner 上时退回到默认主题，保证单独构造也能工作。
+        """
+        owner = self.owner
+        if owner is None:
+            return default_theme()
+        return owner.theme
+
     # ------------------------------------------------------------ 生命周期
 
     def mount(self, parent: Element | None, slot: object | None) -> None:
@@ -96,12 +118,19 @@ class Element:
         self._depth = 0 if parent is None else parent.depth + 1
         self._active = True
         self._dirty = False
+        self._slot = slot
         if parent_owner is not None and self._owner is None:
             self._owner = parent_owner
 
-    def update(self, new_widget: Widget) -> None:
-        """配置变了但身份没变——只换 Widget 引用，Element 与其状态保留。"""
+    def update(self, new_widget: Widget, slot: object = _SLOT_UNCHANGED) -> None:
+        """配置变了但身份没变——只换 Widget 引用，Element 与其状态保留。
+
+        `slot` 默认"不变"；显式传值表示父容器改了本节点的位置信息
+        （比如 flex 权重从 1 变成 2），新槽位会继续往下传到真正的渲染节点。
+        """
         self._widget = new_widget
+        if slot is not _SLOT_UNCHANGED:
+            self._slot = slot
 
     def unmount(self) -> None:
         self._active = False
@@ -149,8 +178,8 @@ class Element:
 
         if child is not None:
             if Widget.can_update(child.widget, new_widget):
-                if child.widget is not new_widget:
-                    child.update(new_widget)
+                if child.widget is not new_widget or child._slot != slot:
+                    child.update(new_widget, slot)
                 return child
             # 类型或 Key 变了：旧身份作废，连 RenderBox 一起丢
             self._deactivate_child(child)
@@ -214,10 +243,12 @@ class ComponentElement(Element):
 
     def perform_rebuild(self) -> None:
         built = self.build()
-        self._child = self.update_child(self._child, built, None)
+        # 关键：把本节点的槽位继续传给子级。写成 None 的话，
+        # `Flexible(Button())` 里的 flex 会在这一层丢掉。
+        self._child = self.update_child(self._child, built, self._slot)
 
-    def update(self, new_widget: Widget) -> None:
-        super().update(new_widget)
+    def update(self, new_widget: Widget, slot: object = _SLOT_UNCHANGED) -> None:
+        super().update(new_widget, slot)
         self.perform_rebuild()
 
     def visit_children(self, visitor: Callable[[Element], None]) -> None:
@@ -256,9 +287,9 @@ class StatefulElement(ComponentElement):
     def build(self) -> Widget:
         return self.state.build(self)
 
-    def update(self, new_widget: Widget) -> None:
+    def update(self, new_widget: Widget, slot: object = _SLOT_UNCHANGED) -> None:
         old_widget = self.widget
-        super().update(new_widget)
+        super().update(new_widget, slot)
         assert isinstance(new_widget, StatefulWidget)
         self.state.widget = new_widget
         self.state.did_update_widget(old_widget)
@@ -287,8 +318,8 @@ class RenderObjectElement(Element):
         self._render_object = widget.create_render_object()
         self.attach_render_object(self._render_object, slot)
 
-    def update(self, new_widget: Widget) -> None:
-        super().update(new_widget)
+    def update(self, new_widget: Widget, slot: object = _SLOT_UNCHANGED) -> None:
+        super().update(new_widget, slot)
         assert self._render_object is not None
         widget = self.widget
         assert isinstance(widget, RenderObjectWidget)
@@ -379,8 +410,8 @@ class MultiChildRenderObjectElement(RenderObjectElement):
         # RenderObjectElement 没有 build，重建就是重新对齐子级
         self._sync_children()
 
-    def update(self, new_widget: Widget) -> None:
-        super().update(new_widget)
+    def update(self, new_widget: Widget, slot: object = _SLOT_UNCHANGED) -> None:
+        super().update(new_widget, slot)
         self._sync_children()
 
     def _sync_children(self) -> None:
@@ -439,7 +470,8 @@ class MultiChildRenderObjectElement(RenderObjectElement):
 
         # 顺序变了就要重挂 RenderBox：Element 的身份保住了，
         # 但渲染树里的先后顺序还得跟着变。
-        if [id(e) for e in updated] != [id(e) for e in old_children]:
+        # 首次挂载时 old_children 为空，挂载本身已按顺序插入，不必重排。
+        if old_children and [id(e) for e in updated] != [id(e) for e in old_children]:
             self._reorder_render_objects(updated)
 
     def _reorder_render_objects(self, children: Sequence[Element]) -> None:
@@ -449,13 +481,33 @@ class MultiChildRenderObjectElement(RenderObjectElement):
         子级应当静默返回，而不是报错。具体容器元素实现时请注意这一点。
         """
         for element in children:
-            render_object = element.render_object
+            render_object = self.render_object_of(element)
             if render_object is not None:
                 self.remove_child_render_object(render_object)
         for index, element in enumerate(children):
-            render_object = element.render_object
+            render_object = self.render_object_of(element)
             if render_object is not None:
                 self.insert_child_render_object(render_object, self.slot_for(index))
+
+    @staticmethod
+    def render_object_of(element: Element) -> RenderBox | None:
+        """找出"代表这个 element"的 RenderObject。
+
+        组件型子级（StatelessWidget / StatefulWidget）自己不持有 RenderObject，
+        真正的渲染节点在它下面一层或几层。重排序时必须往下找到它——
+        只看 `element.render_object` 的话，`Row(children=[Button(), ...])`
+        里的按钮会在重排后留在原地，于是界面顺序就乱了。
+        """
+        direct = element.render_object
+        if direct is not None:
+            return direct
+        pending: list[Element] = []
+        element.visit_children(pending.append)
+        for child in pending:
+            found = MultiChildRenderObjectElement.render_object_of(child)
+            if found is not None:
+                return found
+        return None
 
     def visit_children(self, visitor: Callable[[Element], None]) -> None:
         for child in self._children:

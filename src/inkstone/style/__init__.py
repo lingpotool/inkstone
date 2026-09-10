@@ -17,7 +17,8 @@ theme.contrast_issues()              # WCAG AA 检查，CI 里必须为空
 """
 
 from ..gfx.color import Color
-from .theme import Theme, ThemeMode, TokenError
+from .resolve import ComponentState, resolve
+from .theme import Theme, ThemeMode, TokenError, default_theme
 from .tokens import (
     DARK_SEMANTIC,
     DEFAULT_RAW,
@@ -31,15 +32,26 @@ from .tokens import (
     SpringSpec,
     contrast_issues,
 )
+from .variants import (
+    ButtonStyle,
+    ButtonVariant,
+    InputStyle,
+    resolve_button_style,
+    resolve_input_style,
+)
 
 __all__ = [
     "DARK_SEMANTIC",
     "DEFAULT_RAW",
     "LIGHT_SEMANTIC",
     "RAMP_STEPS",
+    "ButtonStyle",
+    "ButtonVariant",
     "Color",
+    "ComponentState",
     "CubicBezier",
     "FontSize",
+    "InputStyle",
     "RawTokens",
     "SemanticTokens",
     "ShadowSpec",
@@ -48,4 +60,8 @@ __all__ = [
     "ThemeMode",
     "TokenError",
     "contrast_issues",
+    "default_theme",
+    "resolve",
+    "resolve_button_style",
+    "resolve_input_style",
 ]

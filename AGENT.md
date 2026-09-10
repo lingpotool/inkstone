@@ -24,11 +24,13 @@ Phase 1 · 地基进行中。真实代码只集中在 **布局引擎**：
 | `layout/scroll.py` | ✅ ScrollView（向子级派发无限主轴约束） |
 | `core/`（key / widget / element / render_object / binding） | ✅ 三棵树 + 帧调度 |
 | `gfx/color.py` | ✅ Color（hex 解析、插值、WCAG 对比度） |
-| `style/`（tokens / theme） | ✅ 三层令牌 + 明暗主题 |
-| 其余 70 个模块（gfx 渲染 / text / widgets / events …） | ⬜ 占位桩 |
+| `style/`（tokens / theme / resolve / variants） | ✅ 三层令牌 + 明暗主题 + 变体解析 |
+| `widgets/`（basic / layout / form） | ✅ Box / Card / Row / Column / Flexible / Button / Input |
+| 其余 65 个模块（gfx 渲染 / text / events / primitives …） | ⬜ 占位桩 |
 
-243 个无头单测全绿。下一步是 ROADMAP Phase 1 item 7 的最小组件集
-（Box / Text / Button / Input / Row / Column / Card）与 gfx 显示列表。
+273 个无头单测全绿。一个真实登录表单（Card + 两个 Input + Row 里一个
+ghost 取消 + 一个 fill 登录按钮）能完整建出三棵树并算出正确几何。
+下一步是 gfx 显示列表 + headless 光栅（让界面真正被画出来），然后 Text。
 
 **占位桩长这样**：一段说明用途的 docstring + `__all__: list[str] = []`。
 看到这个形态就别指望里面有实现，也别在它上面继续叠代码——先实现它。
@@ -116,6 +118,15 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 - **在 layout / paint 阶段改状态会抛 `FrameError`。** 那是时序 bug 高发区，
   改了但本帧已经错过，表现为"界面下一帧才动"。框架选择响亮地失败。
 - **命名用 snake_case**（`set_state` 不是 `setState`）。这是纯 Python 库，不是 Flutter 移植。
+- **slot（flex 权重等）必须穿过组件层**。`Flexible(Button())` 里的 Button 是
+  StatefulWidget，中间隔着 StatefulElement——slot 存在 Element 上随 update 透传，
+  写死成 None 会让 flex 静默失效。子级同步 / 重排序同理：
+  组件型子级的 RenderObject 要往下找（`render_object_of`），不能只看 `element.render_object`。
+- **danger 变体不许发明 solid 红。** 语义令牌只定义了状态色的"浅底 + 深字"一对，
+  硬造实心红等于发明新值，且在暗色主题下必翻车。danger 按钮 = 危险浅底 + 危险深字，
+  明暗两版天然过 AA。
+- **文字宽度不许估算。** Text 组件在 `text/` 的字体度量落地前不实现，
+  更不能写"每字 14px"这种近似——中英混排和字号变化时会悄悄算错。
 
 ## 测试怎么写
 
@@ -142,5 +153,8 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 
 - `.gitattributes` 声明 `eol=lf`，但工作区多数 `.py` 实际是 CRLF。
   三平台 CI 上会产生幽灵 diff。修法：`git add --renormalize .`（会产生大 diff，单独提交）。
+- **docs/13 §8 与实现有一处待裁决的分歧**：文档写"… → 状态 → 实例覆盖"，
+  `style/resolve.py` 把**交互态放在最后**（否则实例 `bg=red` 会悄悄关掉 hover 反馈）。
+  若按文档原文来，把 `resolve()` 里 state 与 overrides 位置对调即可。需要你拍板。
 - Flex 还不支持 `wrap` 换行（docs/05 §4 有这条）。
 - Scroll 只做了单/双向偏移。滚动条、锚点保持、过滚动按 ROADMAP 属于 Phase 2。
