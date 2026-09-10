@@ -12,10 +12,14 @@
 指令全部是不可变数据类，坐标在录制时已经折算成绝对坐标，
 所以 `dl1 == dl2` 就是逐指令逐坐标比对——确定性由此而来。
 
-v0 的指令集刻意收敛：矩形填充 / 圆角填充 / 矩形描边 + 裁剪。
-阴影、渐变、路径、文本属后续阶段（docs/03 的完整指令表）。
+v0 的指令集刻意收敛：矩形填充 / 圆角填充 / 矩形描边 / 裁剪 / 文本。
+阴影、渐变、路径属后续阶段（docs/03 的完整指令表）。
 
-状态：已实现（v0 指令集）。
+**文本指令只吃字形不吃字符串**（`TextRunOp`）：整形与断行在 L3 文本层
+完成，渲染层只负责"把已定位的字形画出来"。这样换行规则、回退链、
+字素簇这些知识不会渗进渲染层，渲染层也就不必知道"字"是什么。
+
+状态：已实现（v0 指令集 + 文本）。
 """
 
 from __future__ import annotations
@@ -23,14 +27,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Union
 
-from ..layout.types import Rect
+from ..layout.types import Offset, Rect
 from .color import Color
 
 __all__ = [
     "DisplayList",
     "FillRectOp",
     "Op",
+    "PositionedGlyph",
     "StrokeRectOp",
+    "TextRunOp",
 ]
 
 
@@ -55,8 +61,52 @@ class StrokeRectOp:
     clip: Rect | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PositionedGlyph:
+    """一个**已定位**的字形簇：文本 + 相对 run 原点的位置。
+
+    `text` 是这一簇的源文本（通常 1 个字符，emoji 序列可能几个码点）。
+    为什么带着文本而不是"字形 ID"：字形 ID 是字体内部编号，需要后端
+    在加载字体时分配；在字体后端落地前，光栅层靠文本查内置字形表。
+    真字形 ID 落地时给本类加一个可选字段即可，指令形状不变。
+    """
+
+    text: str
+    #: 字形左下角相对 run 原点的偏移（x 向右、y 向上为正）。
+    x: float
+    #: 该簇的推进宽度（来自文本层的度量，**不是光栅层自己算的**）。
+    advance: float
+    #: 承载它的字体族（回退链可能让同一行来自多个字体）。
+    family: str = ""
+    #: 该簇的 em 高度（用于占位字形定尺寸）。
+    em: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class TextRunOp:
+    """一段文本的绘制指令 —— docs/03 所称的 `text_run`。
+
+    **不接受字符串**（docs/03 §指令表）：整形与断行在文本层完成，
+    这条指令只承载"哪些字形、画在哪"。这是渲染层唯一认识的文本形态，
+    所以渲染层永远不需要知道换行规则、回退链、字素簇——那些是 L3 的事。
+
+    `baseline` 是基线相对 `origin.y` 的偏移。**不用"行顶"定位**：
+    不同字体的 ascent 不同，用行顶定位会让混排的基线参差不齐，
+    而基线是字体排印里唯一稳定的对齐基准。
+    """
+
+    origin: Offset
+    baseline: float
+    glyphs: tuple[PositionedGlyph, ...]
+    size: float
+    color: Color
+    #: 是否绘制组合态下划线（IME 未上屏的拼音）。Phase 2 IME 用。
+    underline: bool = False
+    clip: Rect | None = None
+
+
 # 指令联合类型。新增指令时只扩这里，光栅端同步加一个分支。
-Op = Union[FillRectOp, StrokeRectOp]  # noqa: UP007
+Op = Union[FillRectOp, StrokeRectOp, TextRunOp]  # noqa: UP007
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,11 +133,25 @@ def _describe_op(op: Op) -> str:
         radius = f" r={op.radius:g}" if op.radius > 0 else ""
         clip = f" clip={_r(op.clip)}" if op.clip else ""
         return f"fill {_r(op.rect)}{radius} {op.color}{clip}"
+    if isinstance(op, TextRunOp):
+        clip = f" clip={_r(op.clip)}" if op.clip else ""
+        # 只报"多少个字形 + 前几个字"，避免检查器输出被长文本淹没
+        preview = "".join(g.text for g in op.glyphs[:12])
+        if len(op.glyphs) > 12:
+            preview += "…"
+        return (
+            f"text {_o(op.origin)} baseline={op.baseline:g} size={op.size:g} "
+            f"n={len(op.glyphs)} {op.color} {preview!r}{clip}"
+        )
     return (
         f"stroke {_r(op.rect)} w={op.width:g}"
         f"{' r=' + format(op.radius, 'g') if op.radius > 0 else ''} {op.color}"
         + (f" clip={_r(op.clip)}" if op.clip else "")
     )
+
+
+def _o(offset: Offset) -> str:
+    return f"({offset.dx:g},{offset.dy:g})"
 
 
 def _r(rect: Rect | None) -> str:

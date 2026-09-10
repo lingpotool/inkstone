@@ -38,6 +38,8 @@ from ..backend.fonts import (
 __all__ = [
     "FontRegistry",
     "FontResolver",
+    "FontSlant",
+    "FontWeight",
     "ResolvedTextStyle",
     "TextStyle",
 ]

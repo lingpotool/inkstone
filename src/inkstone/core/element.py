@@ -25,6 +25,7 @@ from ..style import Theme, default_theme
 from .widget import RenderObjectWidget, StatefulWidget, StatelessWidget, Widget
 
 if TYPE_CHECKING:
+    from ..text import TextEngine
     from .binding import BuildOwner
 
 __all__ = [
@@ -109,6 +110,20 @@ class Element:
         if owner is None:
             return default_theme()
         return owner.theme
+
+    @property
+    def text_engine(self) -> TextEngine | None:
+        """环境文本引擎（与 `theme` 并列的共享服务）。
+
+        组件排版文字时用它——**不要在自己内部 new 一个**：
+        `TextEngine` 带度量缓存与整形缓存，每帧重建会让排版性能垮掉。
+        返回 `None` 表示这棵树没有配置文本引擎（纯布局测试场景会很常见），
+        组件此时应退化为"不排版文字"，而不是抛异常。
+        """
+        owner = self.owner
+        if owner is None:
+            return None
+        return owner.text_engine
 
     # ------------------------------------------------------------ 生命周期
 

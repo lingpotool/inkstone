@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import math
 import struct
 import zlib
 from binascii import crc32
@@ -36,7 +37,8 @@ from dataclasses import dataclass
 
 from ...layout.types import Rect
 from ..color import Color
-from ..display_list import DisplayList, FillRectOp, Op, StrokeRectOp
+from ..display_list import DisplayList, FillRectOp, Op, StrokeRectOp, TextRunOp
+from ..glyphs import BuiltinGlyphProvider, GlyphProvider, rect_of_mask
 from .base import FrameBuffer, RasterBackend
 
 __all__ = ["SoftwareRasterizer", "encode_png"]
@@ -94,29 +96,41 @@ class SoftwareRasterizer(RasterBackend):
     默认 4 已经远超"每像素 16 点子采样"的质量。
     """
 
-    def __init__(self, *, samples: int = 4) -> None:
+    def __init__(
+        self,
+        *,
+        samples: int = 4,
+        glyph_provider: GlyphProvider | None = None,
+    ) -> None:
         if samples < 1:
             raise ValueError(f"垂直采样数必须 ≥ 1，收到 {samples}")
         self._samples = samples
         # 固定偏移（不用随机数）——确定性全靠这一点
         self._offsets = tuple((j + 0.5) / samples for j in range(samples))
         self._weight = 1.0 / samples
+        # 字形来源可替换：默认是内置确定性字形（无字体文件）。
+        # 平台字形后端上线后从这里注入，光栅逻辑一行不改。
+        self._glyphs: GlyphProvider = (
+            glyph_provider if glyph_provider is not None else BuiltinGlyphProvider()
+        )
 
     def rasterize(self, display_list: DisplayList) -> FrameBuffer:
         width, height = display_list.width, display_list.height
         buffer = bytearray(width * height * 4)
         row = [0.0] * width
         for op in display_list.ops:
-            self._rasterize_op(buffer, width, row, op)
+            self._rasterize_op(buffer, width, height, row, op)
         return FrameBuffer(width, height, buffer)
 
     # ------------------------------------------------------------ 指令分派
 
-    def _rasterize_op(self, buf: bytearray, w: int, row: list[float], op: Op) -> None:
+    def _rasterize_op(self, buf: bytearray, w: int, h: int, row: list[float], op: Op) -> None:
         if isinstance(op, FillRectOp):
             self._fill(buf, w, row, op.rect, op.color, op.radius, op.clip)
         elif isinstance(op, StrokeRectOp):
             self._stroke(buf, w, row, op)
+        elif isinstance(op, TextRunOp):
+            self._text(buf, w, h, op)
 
     # ------------------------------------------------------------ 填充
 
@@ -186,6 +200,119 @@ class SoftwareRasterizer(RasterBackend):
             if touched:
                 self._paint_row(buf, w, row, y, x_lo, x_hi, color)
                 _clear(row, x_lo, x_hi)
+
+    # ------------------------------------------------------------ 文本
+
+    def _text(self, buf: bytearray, w: int, h: int, op: TextRunOp) -> None:
+        """绘制一段已定位的文本。
+
+        **位置一律取自 `glyph.x`，不自己累加 advance。**
+        这一点很关键：文本层可能为了字距调整、两端对齐、标点悬挂而
+        把字形放得比"累加宽度"更远或更近。光栅层如果自作主张按 advance
+        重算位置，那些排版决策会被静默丢掉——表现是"排版算对了但画歪了"。
+        指令里已经有位置，就只照位置画。
+
+        `advance` 仍然有用（推进笔位置、命中测试），但那是文本层与自己
+        的事；光栅层只消费结果。
+
+        字形掩码由 `GlyphProvider` 提供（默认内置确定性字形）。
+        `underline` 走复用 `_fill` 画一条细线（IME 组合态下划线用）。
+        """
+        if op.color.a == 0.0 or not op.glyphs:
+            return
+
+        baseline_y = op.origin.dy + op.baseline
+        pen_x = op.origin.dx
+        last_x = pen_x
+
+        for glyph in op.glyphs:
+            glyph_x = op.origin.dx + glyph.x
+            # 只对"有实际形状"的字形取掩码：空格没有字形，
+            # 但它的 advance 照样推进笔位置（否则词间距会塌掉）
+            if glyph.text.strip():
+                mask = self._glyphs.mask_for(glyph.text, op.size, glyph.family, glyph.advance)
+                self._blit_mask(buf, w, h, mask, glyph_x, baseline_y, op.color, op.clip)
+            pen_x = glyph_x + glyph.advance
+            last_x = max(last_x, pen_x)
+
+        if op.underline:
+            self._underline(buf, w, op, last_x, baseline_y)
+
+    def _underline(
+        self, buf: bytearray, w: int, op: TextRunOp, end_x: float, baseline_y: float
+    ) -> None:
+        """组合态下划线：基线下方 1–2px 的一条细线，覆盖整段 run。"""
+        thickness = max(1.0, op.size / 14.0)
+        start = op.origin.dx
+        if end_x <= start:
+            return
+        rect = Rect(
+            left=start,
+            top=baseline_y + max(1.0, op.size * 0.12),
+            width=end_x - start,
+            height=thickness,
+        )
+        self._fill(buf, w, [0.0] * w, rect, op.color, 0.0, op.clip)
+
+    def _blit_mask(
+        self,
+        buf: bytearray,
+        w: int,
+        h: int,
+        mask: object,
+        pen_x: float,
+        baseline_y: float,
+        color: Color,
+        clip: Rect | None,
+    ) -> None:
+        """把一个字形掩码按覆盖度 source-over 合成到缓冲区。
+
+        掩码落位是**整数像素**（字形天然对齐像素栅格），
+        所以这里不需要抗锯齿采样——抗锯齿信息已经在掩码的覆盖度里了。
+        """
+        from ..glyphs import GlyphMask
+
+        assert isinstance(mask, GlyphMask)
+        rect = rect_of_mask(mask, pen_x, baseline_y)
+        left = round(rect.left)
+        top = round(rect.top)
+
+        # 裁剪边界：用 ceil 而不是 `int(...) + 1`。
+        # 像素 x 覆盖 [x, x+1)。裁剪矩形 `clip` 覆盖 [clip.left, clip.right)。
+        # 像素与裁剪相交 ⟺ x < clip.right，所以上界（开区间）应当是
+        # `ceil(clip.right)`——当 right 恰好落在整数上时，`int(right)+1`
+        # 会多放一个像素进来（在裁剪边界上漏 1px 出去）。
+        cx0, cy0 = 0, 0
+        cx1, cy1 = w, h
+        if clip is not None:
+            cx0 = max(cx0, math.ceil(clip.left))
+            cy0 = max(cy0, math.ceil(clip.top))
+            cx1 = min(cx1, math.ceil(clip.right))
+            cy1 = min(cy1, math.ceil(clip.bottom))
+
+        for my in range(mask.height):
+            py = top + my
+            if py < cy0 or py >= cy1:
+                continue
+            row_off = my * mask.width
+            row_start = max(0, cx0 - left)
+            row_end = min(mask.width, cx1 - left)
+            if row_start >= row_end:
+                continue
+            for mx in range(row_start, row_end):
+                coverage = mask.coverage[row_off + mx]
+                if coverage == 0:
+                    continue
+                alpha = color.a * (coverage / 255.0)
+                if alpha <= 0.0:
+                    continue
+                _blend_pixel(
+                    buf,
+                    w,
+                    left + mx,
+                    py,
+                    color if alpha >= 1.0 else color.with_alpha(alpha),
+                )
 
     # ------------------------------------------------------------ 上色
 

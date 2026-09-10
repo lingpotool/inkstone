@@ -43,8 +43,23 @@
    - 覆盖范围说清楚：SDL2 的 `create_window` / `pump_events` 需要真窗口与输入设备，
      CI 跑不了，代码里已标注"未在 CI 覆盖"；能在无环境测的部分都拆成纯函数测了。
 2. **渲染管线**：显示列表 + 自研 GL 光栅后端（先不引入 Skia，减少变量）
-   - 矩形 / 圆角矩形 / 描边 / 文本 / 裁剪
+   - 矩形 / 圆角矩形 / 描边 / **文本** / 裁剪
+   - **进度（部分完成）**：显示列表（含 `TextRunOp`）、录制器、软件光栅
+     （矩形 / 圆角 / 描边 / 抗锯齿 / **文本** / 裁剪）、PNG 编码已实现。
+     文本字形走 `GlyphProvider`：默认是内置确定性字形（ASCII 真位图 +
+     非拉丁占位块），**真字形待平台后端**（ADR-0007）。
+     尚缺：自研 GL 光栅后端、阴影、渐变。
 3. **文本**：字体加载与度量 + 单行/多行排版 + **CJK 字体回退链**
+   - **进度（已完成）**：`backend/fonts.py`（度量契约，全库唯一入口）、
+     `backend/headless_fonts.py`（确定性度量表 + 字素簇）、`text/font.py`
+     （样式/解析/注册）、`text/fallback.py`（三平台 CJK/emoji 回退链）、
+     `text/shaping.py`（按脚本分段整形）、`text/linebreak.py`
+     （UAX #14 核心 + 完整 CJK 禁则）、`text/paragraph.py`
+     （对齐/行高/省略号/命中测试/选区）、`text/engine.py`（门面）。
+     123 个测试，含 docs/04 §7 要求的 20 例行首禁则 + 10 例行尾禁则。
+   - 关键决定：**度量下沉到 L0 后端**（ADR-0006），使"测量与绘制同源"
+     成为结构必然而非纪律；`text/` 全程不碰平台 API（有架构测试守着）。
+   - 尚缺：HarfBuzz 级复杂脚本整形、RTL、真字形光栅化（均属后续阶段）。
 4. **布局引擎**：`BoxConstraints` 协议 + 盒子模型 + Flex（Row/Column）+ Stack
    - 采用"约束向下、尺寸向上"，替换 Phase 0 的简化实现
    - **进度（基本完成）**：`protocol.py` / `box.py` / `flex.py` / `grid.py` /
@@ -66,19 +81,25 @@
    - 变体解析已完成（`variants.py` / `resolve.py`）。
    - 未完成：密度档位、高对比主题、prefers-reduced-motion。
 7. **最小组件集**：Box / Text / Button / Input / Row / Column / Card
-   - **进度（除 Text 外已实现）**：Box / Card / Row / Column / Flexible / Button / Input
-     已完成，配套 `style/variants.py` 的 Button 变体配方（6 变体 × 5 尺寸 × 8 状态）
-     与 `style/resolve.py` 的五层确定性解析。一个真实登录表单能完整建出三棵树
-     并算出正确几何（含 Flexible 撑满剩余宽度）。
-   - Text 未实现：**文字宽度不许估算**，必须等 `text/` 的字体度量落地（docs/04 反复强调的坑）。
+   - **进度（除 Button/Input 的文字外已实现）**：Box / Card / **Text** /
+     Row / Column / Flexible / Button / Input 已完成，配套
+     `style/variants.py` 的 Button 变体配方（6 变体 × 5 尺寸 × 8 状态）
+     与 `style/resolve.py` 的五层确定性解析。一个真实登录表单能完整建出
+     三棵树并算出正确几何（含 Flexible 撑满剩余宽度）。
+   - **Text 已实现**：尺寸完全来自真实字体度量（`text_engine`），
+     支持换行 / 对齐 / max_lines / 省略号，`paint` 产出 `TextRunOp`。
+     支持字重、字色（默认取主题 `text` 令牌）。
+   - 待补：**Button 按标签收缩宽度、Input 显示值/占位符**——依赖已就绪，
+     属 Phase 1 收尾工作。
    - 顺带修掉两个三棵树层的 bug：slot（flex 权重）穿过组件层会丢、
      重排序找不到组件型子级的 RenderObject。
 8. **测试基建**：布局单测 + 黄金图测试（三平台基线）+ CI
-   - **进度（部分完成）**：282 个无头单测全绿；5 张黄金图（登录表单明暗、
-     Button / Card / Input 单独）已建立并逐字节比对。
+   - **进度（部分完成）**：517 个无头单测全绿；7 张黄金图（登录表单明暗、
+     Button / Card / Input 单独、文本块、文本换行）已建立并逐字节比对。
      devtools 强制 `force_repaint` 让黄金图每帧都是完整画面，
      不污染生产帧的"跳干净子树"优化。
-   - 待补：CI 配置、gl_backend / skia_backend、Text 渲染。
+     另有**架构约束测试**（分层单向依赖 / text 层无平台 API / 组件零硬编码）。
+   - 待补：CI 配置、gl_backend / skia_backend、真字形渲染。
 
 ### 验收标准（DoD）
 

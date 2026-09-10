@@ -26,6 +26,7 @@ para.rects_for_range(2, 5)       # 选区的矩形（跨行时多个）
 状态：文本栈已实现（字体管理 / 回退链 / 整形 / 断行 / 段落排版）。
 """
 
+from .engine import TextEngine
 from .fallback import (
     FallbackChain,
     FontScript,
@@ -34,7 +35,14 @@ from .fallback import (
     script_of,
     split_by_script,
 )
-from .font import FontRegistry, FontResolver, ResolvedTextStyle, TextStyle
+from .font import (
+    FontRegistry,
+    FontResolver,
+    FontSlant,
+    FontWeight,
+    ResolvedTextStyle,
+    TextStyle,
+)
 from .linebreak import (
     BreakOpportunity,
     LineBreakResult,
@@ -58,6 +66,8 @@ __all__ = [
     "FontRegistry",
     "FontResolver",
     "FontScript",
+    "FontSlant",
+    "FontWeight",
     "LineBreakResult",
     "Paragraph",
     "ParagraphLayout",
@@ -67,6 +77,7 @@ __all__ = [
     "ShapedLine",
     "Shaper",
     "TextAlign",
+    "TextEngine",
     "TextStyle",
     "break_line",
     "can_break_between",

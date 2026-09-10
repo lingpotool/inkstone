@@ -30,6 +30,7 @@ from enum import Enum
 
 from ..layout import BoxConstraints, RenderBox, Size
 from ..style import Theme, default_theme
+from ..text import TextEngine
 from .element import Element
 from .render_object import PaintContext
 from .widget import Widget
@@ -72,13 +73,22 @@ class FrameError(RuntimeError):
 class BuildOwner:
     """脏集合与帧调度。整棵组件树共享一个。"""
 
-    def __init__(self, *, theme: Theme | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        theme: Theme | None = None,
+        text_engine: TextEngine | None = None,
+    ) -> None:
         self._dirty: dict[int, Element] = {}
         self._phase: FramePhase = FramePhase.IDLE
         self._root: Element | None = None
         # 环境主题：组件通过 `context.theme` 拿到它，不必层层透传。
         # 放在 BuildOwner 是因为它本来就是整棵树的上下文根。
         self.theme: Theme = theme if theme is not None else default_theme()
+        # 文本引擎：Text / Input / Button 排版时通过 `context.text_engine` 取。
+        # 与 theme 并列放在这里，理由相同——它是整棵树共享的**有状态**服务
+        # （带度量缓存与整形缓存），每帧重建会让排版性能垮掉。
+        self.text_engine: TextEngine | None = text_engine
         # 计数器：测试用它验证"批处理"与"帧数"，调试时也能看出有没有过度重建
         self.build_count: int = 0
         self.frame_count: int = 0

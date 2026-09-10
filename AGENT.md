@@ -11,7 +11,7 @@ Windows / macOS / Linux 一等公民、中文一等公民。
 
 ## 当前状态（动手前先看这里）
 
-Phase 1 · 地基进行中。真实代码只集中在 **布局引擎**：
+Phase 1 · 地基。真实代码覆盖布局、组件树、样式、渲染、**文本**：
 
 | 模块 | 状态 |
 |---|---|
@@ -22,21 +22,26 @@ Phase 1 · 地基进行中。真实代码只集中在 **布局引擎**：
 | `layout/grid.py` | ✅ Grid（fixed / fr / auto 轨道 + span） |
 | `layout/stack.py` | ✅ Stack / Positioned / Align |
 | `layout/scroll.py` | ✅ ScrollView（向子级派发无限主轴约束） |
-| `core/`（key / widget / element / render_object / binding） | ✅ 三棵树 + 帧调度 |
-| `backend/`（base / headless / sdl2） | ✅ 平台抽象层：归一化事件 + 无头后端 + SDL2 |
+| `core/`（key / widget / element / render_object / binding） | ✅ 三棵树 + 帧调度 + `text_engine` 环境服务 |
+| `backend/`（base / headless / sdl2 / **fonts** / **headless_fonts**） | ✅ 平台抽象层 + **字体度量契约**（`MetricsProvider`） |
 | `gfx/color.py` | ✅ Color（hex 解析、插值、WCAG 对比度） |
 | `style/`（tokens / theme / resolve / variants） | ✅ 三层令牌 + 明暗主题 + 变体解析 |
-| `widgets/`（basic / layout / form） | ✅ Box / Card / Row / Column / Flexible / Button / Input |
-| `gfx/`（display_list / paint / raster.base / raster.software） | ✅ 显示列表 + 录制器 + 软件光栅 + PNG |
-| `devtools/screenshot.py` | ✅ 确定性截图 + 黄金图基线（5 张） |
-| 其余 58 个模块（gfx GL+Skia / text / events / primitives …） | ⬜ 占位桩 |
+| `text/`（font / fallback / shaping / linebreak / paragraph / engine） | ✅ 字体度量、CJK 回退链、整形、断行（含禁则）、段落排版 |
+| `widgets/`（basic / layout / form） | ✅ Box / Card / **Text** / Row / Column / Flexible / Button / Input |
+| `gfx/`（display_list / paint / **glyphs** / raster.base / raster.software） | ✅ 显示列表（含 **`TextRunOp`**）+ 录制器 + 软件光栅（含文本）+ PNG |
+| `devtools/screenshot.py` | ✅ 确定性截图 + 黄金图基线（7 张，含 2 张文本） |
+| 其余模块（gfx GL+Skia / events / primitives …） | ⬜ 占位桩 |
 
-342 个无头单测全绿，**黄金图逐字节比对**也跑通。登录表单
-（Card + 两个 Input + Row 里一个 ghost 取消 + 一个 fill 登录按钮）
-能完整画成 PNG 并在每次跑测试时与基线逐字节相等。
+517 个无头单测全绿，**黄金图逐字节比对**也跑通。
 
-按 ROADMAP 顺序，Phase 1 剩下：③ 文本（字体度量与 CJK 回退链）→
-⑦ Text 组件 → ⑧ CI 配置。文本是 Text 组件与"中文输入"验收项的前置。
+按 ROADMAP 顺序，Phase 1 剩下：⑧ CI 配置。③ 文本栈与 ⑦ Text 组件已完成；
+"中文输入"验收项有了地基（受控输入与光标几何已具备，IME 组合态属 Phase 2）。
+
+**文本栈当前的诚实边界**：软件光栅的字形来自内置确定性字形（ASCII 真位图 +
+非拉丁占位块），**不是真字形**。这是刻意的——它是验证后端，服务黄金图与
+无头 CI，要的是跨平台逐比特一致。真字形由平台后端提供（Phase 1 item 2 的
+GL 后端 / Phase 2），接口（`GlyphProvider`）已留好，替换时上层零改动。
+详见 ADR-0007。
 
 **占位桩长这样**：一段说明用途的 docstring + `__all__: list[str] = []`。
 看到这个形态就别指望里面有实现，也别在它上面继续叠代码——先实现它。
@@ -99,22 +104,26 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 
 这些是踩过坑之后定下来的，改动前先想清楚：
 
-- **文本度量住在 L0 后端，`text/` 不许碰平台 API。** 度量是"平台相关"的事
-  （DirectWrite / CoreText / fontconfig 各一套），按铁律 1「平台差异不出 L0」
-  它必须待在后端。`Backend` 协议因此**继承 `MetricsProvider`**
-  （`backend/fonts.py`）——"渲染后端"与"度量后端"是**同一个对象**，
-  于是 docs/04 §3 的"测量与绘制同源"从纪律变成了结构上的必然。
-  `text/` 里出现 `ctypes` / `windll` / 字体路径 / `sys.platform` 分支 = 打回。
-- **度量同源，但"源"在测试与生产是两回事。** 生产源必须与渲染后端一致；
-  测试源（`backend/headless_fonts.py` 的度量表）必须**跨平台一致**，
-  否则黄金图在三平台没法同字节。这不算"两套度量"——它们是同一个
-  `Backend.measure_text` 入口的两种实现，永远不会有第三个调用点。
-- **文本一切按字素簇操作，不按码点。** 断行、命中测试、选区、省略号截断
-  都必须先过 `grapheme_clusters()`。按码点切的后果是删一个字符删掉半张 emoji 脸、
-  光标停到 "é" 中间。
-- **无限约束遇到 fill 不许静默**（铁律 5）。文本度量到无限宽度同理：
-  单行测量允许无限宽（`text` 不换行时就是无限宽），但**段落排版**
-  拿到无限可用宽度时必须走"不换行"路径，不能死循环。
+- **文字宽度不算不估算，只度量。** 一切都经 `Backend.measure_text`（全库唯一入口）。
+  组件里写"每字 14px"这类近似会在中英混排、字号变化时悄悄算错，**审查直接打回**。
+  `Text` 组件的尺寸必须来自 `context.text_engine`，`text/` 里不许出现平台 API
+  （`test_architecture.py` 用 AST 扫这条）。
+- **文本一切按字素簇操作，不按码点。** 断行、命中测试、选区、省略号截断、
+  脚本分段都必须先过 `grapheme_clusters()`。按码点切的后果是删一个字符删掉
+  半张 emoji 脸、光标停到 "é" 中间、家庭 emoji 被切成 5 段。
+- **行高来自令牌，不是字体自然行高。** `TextStyle.line_height` 是倍数，
+  字体的 `ascent+descent` 只用于基线定位。两者混用会让中文行距忽大忽小。
+- **渲染层按 `glyph.x` 画，不自己累加 advance。** 文本层可能为字距、
+  两端对齐、标点悬挂而把字形放得比"累加宽度"更远或更近；光栅层若重算位置，
+  那些排版决策会被静默丢掉——表现是"排版算对了但画歪了"。
+- **字形必须画进 `advance` 给定的宽度里。** 按字号自由决定字形宽度会让
+  相邻字形直接叠在一起（半角 advance 只有 0.5em，很容易越界）。
+- **`RenderObject` 拿不到 `BuildOwner`，环境服务一律"元素写、渲染对象读"。**
+  `theme` / `text_engine` 都是这个套路。另外框架**挂载时只调 `create_render_object`**，
+  不调 `update_render_object`——字段必须在 `create_*` 里就填满，
+  否则首次布局量到空值（表现为"文字没画出来但也不报错"）。
+- **`Perform_layout` 里的无限宽是正常输入，不是错误。** Row 里放 Text 时
+  宽度无界，此时应走"不换行"路径，而不是抛异常或死循环。
 
 - **盒模型的 `width` 是 border-box。** `width=fixed(160)` 且 `padding=12` 时总宽就是
   160、内容区 136。把 fixed 解释成内容宽度会让 padding 把盒子撑大——没人想要这个。
@@ -169,6 +178,11 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 - 布局引擎必须 **100% 无窗口可测**——不开窗口、不碰显卡，跑出全部几何。
 - 关键行为要有测试钉住：无限约束报错、重复布局逐位一致、溢出可见、性能预算。
 - 性能预算：1000 节点全量布局 < 5ms（测试里放宽到 2ms 留 CI 余量）。
+- **架构约束也是测试**（`test_architecture.py`）：分层单向依赖、`text/` 无平台 API、
+  组件零硬编码颜色。新增反向依赖会让 CI 红；登记表（`KNOWN_EXCEPTIONS`）
+  里出现过期条目也会红——所以例外不会腐化成垃圾桶。
+- **文本有专用的禁则测试集**（`test_text_stack.py`）：docs/04 §7 要求的
+  行首禁则 20 例 + 行尾禁则 10 例，逐条参数化。改断行逻辑先看它红不红。
 
 ## 文档地图
 
@@ -193,10 +207,27 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 |---|---|---|
 | ADR-0001 | 平台后端选 SDL2 | 完整 IME + 原生 Wayland，headless 用于测试（docs/01） |
 | ADR-0005 | 整形与断行复用成熟实现，不自己造 | HarfBuzz 级整形规则上千条，自写=两年换更差版本（docs/04 §2） |
-| ADR-0006 | **文本度量下沉到 L0 后端** | 度量是平台相关能力，放 L0 才不违反"平台差异不出 L0"；`Backend` 继承 `MetricsProvider` 让度量与绘制同源成为结构必然。`text/` 只面向协议说话，可 100% 无窗口测试。真字体整形（HarfBuzz / DirectWrite）后续在后端内替换实现，上层零改动 |
+| ADR-0006 | **文本度量下沉到 L0 后端** | 度量是平台相关能力，放 L0 才不违反"平台差异不出 L0"；`Backend` 继承 `MetricsProvider` 让度量与绘制同源成为结构必然。`text/` 只面向协议说话，可 100% 无窗口测试 |
+| ADR-0007 | **软件光栅用内置确定性字形，真字形交给平台后端** | 验证后端要的是"跨平台逐比特一致"与"布局可验证"，不是字形美观。ASCII 用内置 5×7 真位图（可读、整数倍放大保持锋利），非拉丁用按 advance 定宽的占位块。真字形由平台后端提供（GL/FreeType），经 `GlyphProvider` 替换，上层零改动。**字形宽度必须画进 `advance` 里**——按字号自由决定宽度会让相邻字形重叠 |
+| ADR-0008 | **`text_run` 指令只吃字形不吃字符串** | docs/03 的约定落地：整形与断行在 L3 完成，渲染层只接收"哪些字形、画在哪"。换行规则、回退链、字素簇的知识不渗进渲染层。光栅层**按 `glyph.x` 画，不自己累加 advance**——否则字距调整/两端对齐/标点悬挂的决策会被静默丢掉 |
 
 ## 已知待办
 
+- **软件光栅的 CJK 是占位块，不是真字形**（ADR-0007）。ASCII 已可读，
+  中文只表达"这个字占多宽、画在哪"，用于验证布局。真字形需要平台后端
+  （Windows GDI/DirectWrite 的 `GetGlyphOutline`、macOS CoreText、
+  Linux FreeType），实现后经 `GlyphProvider` 注入即可，上层零改动。
+  这是 Phase 1 item 2（渲染管线）的后续工作。
+- **`_fill` / `_stroke` 的裁剪边界有一处 1px 越界**：`_column_range` /
+  `_row_range` 用 `int(right) + 1` 作为上界，当裁剪边恰好落在整数像素上时
+  会多放一列/一行进来。文本路径已用 `ceil` 修正；形状路径未改
+  （改动会波及既有黄金图，需要单独一次提交 + 肉眼比对）。
+- **`Button` / `Input` 仍未渲染文字**：它们现在撑满可用宽度。文本栈已就绪，
+  接下来应让 Button 按标签收缩、Input 用 Text 显示值/占位符——这是 Phase 1
+  收尾的一部分。
+- **架构上有 4 处已登记的反向依赖**（`test_architecture.py` 的
+  `KNOWN_EXCEPTIONS`）：gfx/text → layout（几何原语，属共享内核）、
+  backend → gfx、core → style。登记表不允许留失效条目，消除了就要删掉。
 - `.gitattributes` 声明 `eol=lf`，但工作区多数 `.py` 实际是 CRLF。
   三平台 CI 上会产生幽灵 diff。修法：`git add --renormalize .`（会产生大 diff，单独提交）。
 - **docs/13 §8 与实现有一处待裁决的分歧**：文档写"… → 状态 → 实例覆盖"，

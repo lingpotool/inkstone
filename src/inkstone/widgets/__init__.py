@@ -23,7 +23,7 @@ owner.begin_frame(BoxConstraints(max_width=320, max_height=600))
 状态：Box / Card / Row / Column / Flexible / Button / Input 已实现。
 """
 
-from .basic import Box, Card
+from .basic import Box, Card, Text
 from .form import Button, ButtonState, Input, InputState
 from .layout import Column, Flex, Flexible, Row
 
@@ -38,4 +38,5 @@ __all__ = [
     "Input",
     "InputState",
     "Row",
+    "Text",
 ]

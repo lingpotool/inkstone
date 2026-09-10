@@ -15,9 +15,16 @@ GL 后端上线后，同一个接口会换成录制 GL 指令的实现，
 
 from __future__ import annotations
 
-from ..layout.types import Rect
+from ..layout.types import Offset, Rect
 from .color import Color
-from .display_list import DisplayList, FillRectOp, Op, StrokeRectOp
+from .display_list import (
+    DisplayList,
+    FillRectOp,
+    Op,
+    PositionedGlyph,
+    StrokeRectOp,
+    TextRunOp,
+)
 
 __all__ = ["DisplayListRecorder"]
 
@@ -65,6 +72,39 @@ class DisplayListRecorder:
     def stroke_rect(self, rect: Rect, width: float, color: Color, radius: float = 0.0) -> None:
         """描边。线宽向矩形内侧生长。"""
         self._ops.append(StrokeRectOp(self._map(rect), color, width, radius, self._clip))
+
+    def text_run(
+        self,
+        origin: Offset,
+        baseline: float,
+        glyphs: tuple[PositionedGlyph, ...],
+        size: float,
+        color: Color,
+        *,
+        underline: bool = False,
+    ) -> None:
+        """录制一段已定位的文本（docs/03 的 `text_run`）。
+
+        参数里的 `glyphs` 来自 L3 文本层的整形结果——**字形位置已经算好**，
+        录制器不做任何度量、不碰字体。这正是"渲染层不认识字符串"的落地：
+        换行、回退、字素簇的知识全留在文本层。
+
+        `origin` 是**局部坐标**（当前平移前），录制时折算成绝对坐标，
+        与其它指令一致。
+        """
+        if not glyphs:
+            return  # 空 run 不产生指令：空指令会白白占用一次光栅分派
+        self._ops.append(
+            TextRunOp(
+                origin=Offset(origin.dx + self._ox, origin.dy + self._oy),
+                baseline=baseline,
+                glyphs=glyphs,
+                size=size,
+                color=color,
+                underline=underline,
+                clip=self._clip,
+            )
+        )
 
     # ------------------------------------------------------------ 收尾
 
