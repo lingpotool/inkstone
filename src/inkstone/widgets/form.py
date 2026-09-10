@@ -30,8 +30,9 @@ from ..core import (
 from ..core.element import _SLOT_UNCHANGED, Element
 from ..core.key import Key
 from ..gfx.color import Color
+from ..gfx.display_list import PositionedGlyph
 from ..layout import BoxConstraints, RenderBox, Size
-from ..layout.types import Rect
+from ..layout.types import Offset, Rect
 from ..style import (
     ButtonStyle,
     ButtonVariant,
@@ -41,6 +42,7 @@ from ..style import (
     resolve_button_style,
     resolve_input_style,
 )
+from ..text import EllipsisMode, Paragraph, TextAlign, TextEngine, TextStyle
 
 __all__ = ["Button", "Input"]
 
@@ -49,7 +51,19 @@ __all__ = ["Button", "Input"]
 
 
 class _ControlRenderObject(RenderBox):
-    """Button 与 Input 共用的渲染对象：固定高度、宽度撑满可用空间。"""
+    """Button 与 Input 共用的渲染对象。
+
+    尺寸规则：
+
+        - 显式给了 `width` → 用它；
+        - 没给且约束是紧的（比如 Flex 里 `flex=1` 分到的份额）→ 撑满，
+          否则"要它撑满"的意图会落空；
+        - 没给且是 Button → **按标签文字的真实度量收缩**（加上两侧内边距）；
+        - 没给且是 Input → 撑满可用宽度（输入框应当占满一行）。
+
+    第 3 条是文本栈落地后才敢做的：早先只能写死宽度或撑满，
+    因为**文字宽度不许估算**（docs/04 §3）。
+    """
 
     def __init__(self) -> None:
         super().__init__()
@@ -63,12 +77,73 @@ class _ControlRenderObject(RenderBox):
         self.radius: float = 10.0
         self.focus_ring: Color | None = None
         self.focus_ring_width: float = 0.0
+        # ---- 文本 ----
+        self.label: str = ""
+        self.placeholder: str = ""
+        self.text_style: TextStyle | None = None
+        self.padding_h: float = 12.0
+        #: 按钮居中、输入框左对齐
+        self.center_text: bool = True
+        #: 由 Element 注入的环境文本引擎（RenderObject 拿不到 BuildOwner）
+        self.engine: TextEngine | None = None
+        self.painted_paragraph: Paragraph | None = None
+
+    # ------------------------------------------------------------ 内容文字
+
+    def _content_text(self) -> tuple[str, bool]:
+        """要显示的文字 + 是否是占位符。
+
+        输入框有值时显示值，没值时显示占位符（用占位符色）。
+        """
+        if self.label:
+            return self.label, False
+        if self.placeholder:
+            return self.placeholder, True
+        return "", False
+
+    def _measure_content_width(self) -> float:
+        """内容文字的真实宽度。没有引擎时返回 0（退化为最小宽度）。"""
+        text, _ = self._content_text()
+        if not text or self.engine is None or self.text_style is None:
+            return 0.0
+        return self.engine.measure_width(text, self.text_style)
 
     def perform_layout(self, constraints: BoxConstraints) -> Size:
+        height = self.height_value
         width = self.width_value
         if width is None:
-            width = constraints.max_width if constraints.has_bounded_width else 0.0
-        return constraints.constrain(Size(width, self.height_value))
+            if constraints.is_tight:
+                # 紧约束意味着父级已经决定了尺寸（例如 flex 份额）——
+                # 必须照办，否则 Button 在 Flexible 里不会撑满。
+                width = constraints.max_width
+            elif not self.center_text:
+                # 输入框：撑满可用宽度
+                width = constraints.max_width if constraints.has_bounded_width else 0.0
+            else:
+                # 按钮：按标签的真实度量收缩
+                width = self._measure_content_width() + 2.0 * self.padding_h
+                if constraints.has_bounded_width:
+                    width = min(width, constraints.max_width)
+
+        size = constraints.constrain(Size(width, height))
+
+        # 排版内容文字（宽度取内边距内的可用空间，超出则省略号收尾）
+        self.painted_paragraph = self._layout_content(size)
+        return size
+
+    def _layout_content(self, size: Size) -> Paragraph | None:
+        text, _ = self._content_text()
+        if not text or self.engine is None or self.text_style is None:
+            return None
+        available = max(0.0, size.width - 2.0 * self.padding_h)
+        return self.engine.paragraph(
+            text,
+            self.text_style,
+            max_width=available,
+            align=TextAlign.CENTER if self.center_text else TextAlign.START,
+            max_lines=1,
+            ellipsis=EllipsisMode.END,
+        )
 
     def paint(self, context: object) -> None:
         rect = Rect(0.0, 0.0, self.size.width, self.size.height)
@@ -85,6 +160,8 @@ class _ControlRenderObject(RenderBox):
         if self.border_width > 0.0 and border is not None and border.a > 0.0 and stroke is not None:
             stroke(rect, self.border_width, border, radius)
 
+        self._paint_content(context)
+
         # 焦点环：2px 环 + 2px 偏移，向外长不裁切（docs/13 §5）
         ring = self.focus_ring
         if self.focus_ring_width > 0.0 and ring is not None and ring.a > 0.0 and stroke is not None:
@@ -98,16 +175,74 @@ class _ControlRenderObject(RenderBox):
             )
             stroke(ring_rect, self.focus_ring_width, ring, radius + FOCUS_RING_OFFSET)
 
+    def _paint_content(self, context: object) -> None:
+        """绘制标签 / 值 / 占位符。
+
+        纵向居中：控件高度通常大于行高，文字要垂直居中而不是贴顶——
+        按钮上文字贴顶是肉眼一眼就能看出的"没做完"。
+        """
+        paragraph = self.painted_paragraph
+        text_run = getattr(context, "text_run", None)
+        if paragraph is None or text_run is None or not paragraph.lines:
+            return
+
+        _, is_placeholder = self._content_text()
+        color = self.placeholder_color if is_placeholder else self.fg
+        if color is None or color.a == 0.0:
+            return
+
+        leading = max(0.0, (self.size.height - paragraph.height) / 2.0)
+        for layout in paragraph.lines:
+            glyphs = _control_glyphs(layout)
+            if not glyphs:
+                continue
+            text_run(
+                Offset(layout.x + self.padding_h, layout.origin_y + leading),
+                layout.line.baseline,
+                glyphs,
+                self.text_style.size if self.text_style else 0.0,
+                color,
+            )
+
+
+def _control_glyphs(layout: object) -> tuple[PositionedGlyph, ...]:
+    """行的整形结果 → 显示列表字形序列（与 Text 组件同一套适配）。"""
+    line = getattr(layout, "line", None)
+    if line is None:
+        return ()
+    return tuple(
+        PositionedGlyph(
+            text=line.text[cluster.start : cluster.end],
+            x=cluster.x,
+            advance=cluster.advance,
+            family=cluster.family,
+        )
+        for cluster in line.clusters
+    )
+
 
 class _ControlBox(RenderObjectWidget):
     """承载解析好样式的渲染组件。样式在这里已经是具体值了。"""
 
-    def __init__(self, *, style: ButtonStyle | InputStyle, width: float | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        style: ButtonStyle | InputStyle,
+        width: float | None = None,
+        label: str = "",
+        placeholder: str = "",
+        center_text: bool = True,
+    ) -> None:
         self.style = style
         self.width = width
+        self.label = label
+        self.placeholder = placeholder
+        self.center_text = center_text
 
     def create_render_object(self) -> _ControlRenderObject:
-        return _ControlRenderObject()
+        render_object = _ControlRenderObject()
+        self._apply(render_object)
+        return render_object
 
     def update_render_object(self, render_object: RenderBox) -> None:
         self._apply(render_object)
@@ -123,6 +258,10 @@ class _ControlBox(RenderObjectWidget):
         render_object.radius = self.style.radius
         render_object.focus_ring = self.style.focus_ring
         render_object.focus_ring_width = self.style.focus_ring_width
+        render_object.padding_h = self.style.padding_h
+        render_object.label = self.label
+        render_object.placeholder = self.placeholder
+        render_object.center_text = self.center_text
         if isinstance(self.style, InputStyle):
             render_object.placeholder_color = self.style.placeholder
         render_object.mark_needs_layout()
@@ -143,8 +282,23 @@ class _ControlElement(LeafRenderObjectElement):
     def _apply(self) -> None:
         widget = self.widget
         assert isinstance(widget, _ControlBox)
-        if self.render_object is not None:
-            widget._apply(self.render_object)
+        render_object = self.render_object
+        if render_object is None:
+            return
+        assert isinstance(render_object, _ControlRenderObject)
+        widget._apply(render_object)
+        # 文字样式从主题令牌翻译（组件层负责"md 是多少像素"这类知识）
+        theme = self.theme
+        font = widget.style.font
+        render_object.text_style = TextStyle(
+            families=theme.font_sans,
+            size=float(font.px),
+            line_height=font.line_height,
+        )
+        # 环境文本引擎由元素注入（RenderObject 拿不到 BuildOwner）
+        render_object.engine = self.text_engine
+        render_object.mark_needs_layout()
+        render_object.mark_needs_paint()
 
 
 # ---------------------------------------------------------------- Button
@@ -195,7 +349,13 @@ class ButtonState(State["Button"]):
             size=self.widget.size,
             state=self.component_state,
         )
-        return _ControlBox(style=style, width=self.widget.width)
+        # 标签交给渲染对象去量——**不在这里估算宽度**（docs/04 §3）
+        return _ControlBox(
+            style=style,
+            width=self.widget.width,
+            label=self.widget.label,
+            center_text=True,
+        )
 
     def set_component_state(self, state: ComponentState) -> None:
         """切换交互状态。真正接上事件系统后，这会由 pointer / focus 事件调用。"""
@@ -249,7 +409,13 @@ class InputState(State["Input"]):
             size=self.widget.size,
             state=self.component_state,
         )
-        return _ControlBox(style=style, width=self.widget.width)
+        return _ControlBox(
+            style=style,
+            width=self.widget.width,
+            label=self.widget.value,
+            placeholder=self.widget.placeholder,
+            center_text=False,
+        )
 
     def set_component_state(self, state: ComponentState) -> None:
         if self.component_state is state:

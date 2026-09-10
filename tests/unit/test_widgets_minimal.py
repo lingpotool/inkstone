@@ -300,3 +300,132 @@ class TestNoHardcodedValues:
 
         with pytest.raises(KeyError):
             resolve_button_style(Theme.light(), size="gigantic")
+
+
+class TestControlTextRendering:
+    """Button / Input 的文字：尺寸来自真实度量，不估算（docs/04 §3）。"""
+
+    @staticmethod
+    def _owner(theme=None):
+        from inkstone.backend import HeadlessBackend
+        from inkstone.text import TextEngine
+
+        return BuildOwner(
+            theme=theme if theme is not None else Theme.light(),
+            text_engine=TextEngine(HeadlessBackend()),
+        )
+
+    def test_button_shrinks_to_label(self):
+        """**没有显式宽度时，按钮按标签文字的真实度量收缩。**
+
+        文本栈落地前做不到这一点——只能撑满或写死宽度，因为文字宽度
+        不许估算。现在宽度 = 文字度量 + 两侧内边距。
+        """
+        owner = self._owner()
+        owner.mount(Button("确定"))
+        size = owner.flush_layout(BoxConstraints(max_width=320, max_height=100))
+        assert size is not None
+        assert size.width < 320, "按钮没有按标签收缩，仍然撑满了可用宽度"
+        assert size.width > 0
+
+    def test_longer_label_makes_wider_button(self):
+        wide, narrow = None, None
+        for label in ("确定", "确定并继续下一步"):
+            owner = self._owner()
+            owner.mount(Button(label))
+            size = owner.flush_layout(BoxConstraints(max_width=320, max_height=100))
+            assert size is not None
+            if label == "确定":
+                narrow = size.width
+            else:
+                wide = size.width
+        assert wide is not None and narrow is not None
+        assert wide > narrow, "更长的标签没有让按钮变宽——说明没按度量算"
+
+    def test_button_in_flexible_still_fills(self):
+        """`flex=1` 分到的是紧约束：按钮必须撑满份额，不能收缩成小按钮。"""
+        owner = self._owner()
+        owner.mount(Row(children=(Flexible(Button("登录"), flex=1),)))
+        size = owner.flush_layout(BoxConstraints(max_width=320, max_height=100))
+        assert size is not None
+        assert size.width == pytest.approx(320.0)
+
+    def test_explicit_width_wins(self):
+        owner = self._owner()
+        owner.mount(Button("确定", width=200))
+        size = owner.flush_layout(BoxConstraints(max_width=320, max_height=100))
+        assert size is not None
+        assert size.width == pytest.approx(200.0)
+
+    def test_input_fills_available_width(self):
+        """输入框与按钮不同：它应当占满一行。"""
+        owner = self._owner()
+        owner.mount(Input(placeholder="邮箱"))
+        size = owner.flush_layout(BoxConstraints(max_width=320, max_height=100))
+        assert size is not None
+        assert size.width == pytest.approx(320.0)
+
+    def test_button_label_is_painted(self):
+        from inkstone.gfx import DisplayListRecorder, TextRunOp
+
+        owner = self._owner()
+        owner.mount(Button("确定"))
+        owner.flush_layout(BoxConstraints(max_width=320, max_height=100))
+        recorder = DisplayListRecorder()
+        owner.flush_paint(recorder)
+        ops = [op for op in recorder.finish(320, 100).ops if isinstance(op, TextRunOp)]
+        assert len(ops) == 1, "按钮标签没有被绘制"
+        assert "".join(g.text for g in ops[0].glyphs) == "确定"
+
+    def test_input_placeholder_is_painted(self):
+        from inkstone.gfx import DisplayListRecorder, TextRunOp
+        from inkstone.widgets import Input as InputWidget
+
+        owner = self._owner()
+        owner.mount(InputWidget(placeholder="邮箱"))
+        owner.flush_layout(BoxConstraints(max_width=320, max_height=100))
+        recorder = DisplayListRecorder()
+        owner.flush_paint(recorder)
+        ops = [op for op in recorder.finish(320, 100).ops if isinstance(op, TextRunOp)]
+        assert len(ops) == 1, "占位符没有被绘制"
+
+    def test_input_value_replaces_placeholder(self):
+        from inkstone.gfx import DisplayListRecorder, TextRunOp
+        from inkstone.widgets import Input as InputWidget
+
+        owner = self._owner()
+        owner.mount(InputWidget(value="user@example.com", placeholder="邮箱"))
+        owner.flush_layout(BoxConstraints(max_width=320, max_height=100))
+        recorder = DisplayListRecorder()
+        owner.flush_paint(recorder)
+        op = next(op for op in recorder.finish(320, 100).ops if isinstance(op, TextRunOp))
+        assert "".join(g.text for g in op.glyphs) == "user@example.com"
+
+    def test_placeholder_uses_placeholder_color(self):
+        """占位符要用占位符色，有值用正文色——否则两者视觉上无法区分。"""
+        from inkstone.gfx import DisplayListRecorder, TextRunOp
+        from inkstone.widgets import Input as InputWidget
+
+        empty = self._owner()
+        empty.mount(InputWidget(placeholder="邮箱"))
+        empty.flush_layout(BoxConstraints(max_width=320, max_height=100))
+        rec = DisplayListRecorder()
+        empty.flush_paint(rec)
+        placeholder_op = next(op for op in rec.finish(320, 100).ops if isinstance(op, TextRunOp))
+
+        filled = self._owner()
+        filled.mount(InputWidget(value="邮箱"))
+        filled.flush_layout(BoxConstraints(max_width=320, max_height=100))
+        rec2 = DisplayListRecorder()
+        filled.flush_paint(rec2)
+        value_op = next(op for op in rec2.finish(320, 100).ops if isinstance(op, TextRunOp))
+
+        assert placeholder_op.color != value_op.color
+
+    def test_without_text_engine_controls_still_layout(self):
+        """没配文本引擎时按钮退化为最小宽度，**不崩**。"""
+        owner = BuildOwner(theme=Theme.light())
+        owner.mount(Button("确定"))
+        size = owner.flush_layout(BoxConstraints(max_width=320, max_height=100))
+        assert size is not None
+        assert size.height > 0

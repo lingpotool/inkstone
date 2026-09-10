@@ -28,10 +28,12 @@ from pathlib import Path
 
 import pytest
 
+from inkstone.backend import HeadlessBackend
 from inkstone.core import BuildOwner
 from inkstone.devtools import render_to_png
 from inkstone.layout import BoxConstraints
 from inkstone.style import ButtonVariant, Theme
+from inkstone.text import TextEngine
 from inkstone.widgets import Box, Button, Card, Column, Flexible, Input, Row
 
 GOLDEN_DIR = Path(__file__).resolve().parents[1] / "golden"
@@ -43,8 +45,18 @@ def _constraints() -> BoxConstraints:
     return BoxConstraints(max_width=320, max_height=260)
 
 
+def _owner(theme: Theme) -> BuildOwner:
+    """带文本引擎的 BuildOwner。
+
+    **必须带**：不带的话按钮标签、输入框占位符都画不出来，
+    黄金图就成了"没有字的表单"——看着像渲染坏了，其实只是没配引擎。
+    文本引擎是整棵树共享的有状态服务（带度量缓存），所以要复用一个实例。
+    """
+    return BuildOwner(theme=theme, text_engine=TextEngine(HeadlessBackend()))
+
+
 def _build_login_form(theme: Theme) -> BuildOwner:
-    owner = BuildOwner(theme=theme)
+    owner = _owner(theme)
     owner.mount(
         Column(
             children=(
@@ -125,19 +137,19 @@ class TestGoldenLoginForm:
 
 class TestGoldenElementaryShapes:
     def test_button_primary_only(self):
-        owner = BuildOwner(theme=Theme.light())
+        owner = _owner(Theme.light())
         owner.mount(Button("确定", width=200))
         png = render_to_png(owner, BoxConstraints(max_width=220, max_height=80))
         _assert_or_update_golden("button_primary", png)
 
     def test_card_standalone(self):
-        owner = BuildOwner(theme=Theme.light())
+        owner = _owner(Theme.light())
         owner.mount(Card(child=Box(height=80, width=200)))
         png = render_to_png(owner, BoxConstraints(max_width=240, max_height=120))
         _assert_or_update_golden("card_standalone", png)
 
     def test_input_field(self):
-        owner = BuildOwner(theme=Theme.light())
+        owner = _owner(Theme.light())
         owner.mount(Input(placeholder="邮箱", width=280))
         png = render_to_png(owner, BoxConstraints(max_width=320, max_height=80))
         _assert_or_update_golden("input_field", png)
