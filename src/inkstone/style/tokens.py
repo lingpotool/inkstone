@@ -143,6 +143,10 @@ class RawTokens:
     # 控件高度阶梯：所有可交互控件必须从这一列取值，保证表单对齐
     control_heights: Mapping[str, float]
 
+    # 描边宽度档位。边框、分隔线、焦点环都从这里取——
+    # "1px 还是 2px"是设计决定，不该散落在组件里当字面量。
+    border_widths: Mapping[str, float]
+
     # 阴影 e0–e4（docs/13 §5）
     shadows: Mapping[str, ShadowSpec | None]
 
@@ -214,6 +218,7 @@ DEFAULT_RAW = RawTokens(
     font_sans=("Inter", "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", "system-ui"),
     font_mono=("JetBrains Mono", "Cascadia Code", "Consolas", "monospace"),
     control_heights={"xs": 24.0, "sm": 28.0, "md": 36.0, "lg": 44.0, "xl": 52.0},
+    border_widths={"hairline": 1.0, "thick": 2.0},
     shadows={
         "e0": None,
         "e1": ShadowSpec(1.0, 3.0, 0.0, Color.from_hex("#0F172A").with_alpha(0.08)),

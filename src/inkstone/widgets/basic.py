@@ -81,10 +81,14 @@ class _CardRenderObject(RenderBox):
     def __init__(self, padding: EdgeInsets) -> None:
         super().__init__(padding=padding)
         self._child: RenderBox | None = None
-        self.elevation: str = "e1"
         self.surface_color: Color | None = None
         self.border_color: Color | None = None
-        self.radius: float | None = None
+        # 外观全部由 Element 从主题令牌填入（RenderObject 拿不到 BuildOwner，
+        # 与 theme / text_engine 同一套路）。默认值刻意取**中性值**：
+        # 漏填时会明显画错（直角、无边框），而不是悄悄画出一个
+        # "看起来还挺像"的卡片——后者要等到设计评审才被发现。
+        self.radius: float = 0.0
+        self.border_width: float = 0.0
 
     @property
     def child(self) -> RenderBox | None:
@@ -112,15 +116,20 @@ class _CardRenderObject(RenderBox):
 
     def paint(self, context: object) -> None:
         rect = Rect(0.0, 0.0, self.size.width, self.size.height)
-        radius = self.radius or 10.0
+        radius = self.radius
 
         round_rect = getattr(context, "round_rect", None)
         if self.surface_color is not None and self.surface_color.a > 0.0 and round_rect is not None:
             round_rect(rect, radius, self.surface_color)
 
         stroke = getattr(context, "stroke_rect", None)
-        if self.border_color is not None and self.border_color.a > 0.0 and stroke is not None:
-            stroke(rect, 1.0, self.border_color, radius)
+        if (
+            self.border_color is not None
+            and self.border_color.a > 0.0
+            and self.border_width > 0.0
+            and stroke is not None
+        ):
+            stroke(rect, self.border_width, self.border_color, radius)
 
 
 class Box(RenderObjectWidget):
@@ -247,6 +256,7 @@ class _CardElement(RenderObjectElement):
         render_object.surface_color = theme.color("surface")
         render_object.border_color = theme.color("border")
         render_object.radius = theme.radius("md")
+        render_object.border_width = theme.border_width("hairline")
         render_object.mark_needs_paint()
 
     def _sync_child(self) -> None:

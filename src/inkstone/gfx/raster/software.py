@@ -126,9 +126,9 @@ class SoftwareRasterizer(RasterBackend):
 
     def _rasterize_op(self, buf: bytearray, w: int, h: int, row: list[float], op: Op) -> None:
         if isinstance(op, FillRectOp):
-            self._fill(buf, w, row, op.rect, op.color, op.radius, op.clip)
+            self._fill(buf, w, h, row, op.rect, op.color, op.radius, op.clip)
         elif isinstance(op, StrokeRectOp):
-            self._stroke(buf, w, row, op)
+            self._stroke(buf, w, h, row, op)
         elif isinstance(op, TextRunOp):
             self._text(buf, w, h, op)
 
@@ -138,6 +138,7 @@ class SoftwareRasterizer(RasterBackend):
         self,
         buf: bytearray,
         w: int,
+        h: int,
         row: list[float],
         rect: Rect,
         color: Color,
@@ -147,7 +148,9 @@ class SoftwareRasterizer(RasterBackend):
         if color.a == 0.0 or rect.width <= 0.0 or rect.height <= 0.0:
             return
         shape = _RoundedBox.of(rect, radius)
-        y0, y1 = _row_range(rect, clip, w)
+        # 注意两个上限各归其位：行范围按**画布高度**夹，列范围按**画布宽度**夹。
+        # 传反的后果不是报错而是静默错画——宽扁画布直接崩、竖长画布少画一截。
+        y0, y1 = _row_range(rect, clip, h)
         x_lo, x_hi = _column_range(rect, clip, w)
 
         for y in range(y0, y1):
@@ -162,7 +165,7 @@ class SoftwareRasterizer(RasterBackend):
 
     # ------------------------------------------------------------ 描边
 
-    def _stroke(self, buf: bytearray, w: int, row: list[float], op: StrokeRectOp) -> None:
+    def _stroke(self, buf: bytearray, w: int, h: int, row: list[float], op: StrokeRectOp) -> None:
         """描边 = 外圈覆盖 **减去** 内圈覆盖。
 
         两条边界各自做解析抗锯齿，所以圆环严丝合缝地贴在轮廓上：
@@ -183,7 +186,7 @@ class SoftwareRasterizer(RasterBackend):
             else None
         )
 
-        y0, y1 = _row_range(rect, op.clip, w)
+        y0, y1 = _row_range(rect, op.clip, h)
         x_lo, x_hi = _column_range(rect, op.clip, w)
 
         for y in range(y0, y1):
@@ -236,10 +239,10 @@ class SoftwareRasterizer(RasterBackend):
             last_x = max(last_x, pen_x)
 
         if op.underline:
-            self._underline(buf, w, op, last_x, baseline_y)
+            self._underline(buf, w, h, op, last_x, baseline_y)
 
     def _underline(
-        self, buf: bytearray, w: int, op: TextRunOp, end_x: float, baseline_y: float
+        self, buf: bytearray, w: int, h: int, op: TextRunOp, end_x: float, baseline_y: float
     ) -> None:
         """组合态下划线：基线下方 1–2px 的一条细线，覆盖整段 run。"""
         thickness = max(1.0, op.size / 14.0)
@@ -252,7 +255,7 @@ class SoftwareRasterizer(RasterBackend):
             width=end_x - start,
             height=thickness,
         )
-        self._fill(buf, w, [0.0] * w, rect, op.color, 0.0, op.clip)
+        self._fill(buf, w, h, [0.0] * w, rect, op.color, 0.0, op.clip)
 
     def _blit_mask(
         self,
@@ -375,20 +378,29 @@ def _clear(row: list[float], x_lo: int, x_hi: int) -> None:
 
 
 def _row_range(rect: Rect, clip: Rect | None, h: int) -> tuple[int, int]:
+    """本次要扫的像素行区间 `[y0, y1)`。
+
+    像素 y 覆盖 `[y, y+1)`，形状覆盖 `[top, bottom)`（下边界开）：
+    相交 ⟺ `y < bottom`，所以上界（开区间）是 `ceil(bottom)`。
+    写成 `int(bottom) + 1` 的话，bottom 恰好落在整数上时会多扫一行——
+    那一行与形状其实毫无交集，多扫出来的墨迹就是"裁剪边漏 1px"。
+    下界用 `floor`（`int`）是对的：`y + 1 > top` 的最小的 y 就是 `floor(top)`。
+    """
     top = max(0.0, clip.top if clip else 0.0)
     bottom = min(float(h), clip.bottom if clip else float(h))
     return (
         max(0, min(h, int(max(top, rect.top)))),
-        max(0, min(h, int(min(bottom, rect.bottom)) + 1)),
+        max(0, min(h, math.ceil(min(bottom, rect.bottom)))),
     )
 
 
 def _column_range(rect: Rect, clip: Rect | None, w: int) -> tuple[int, int]:
+    """本次要扫的像素列区间 `[x0, x1)`。语义与 `_row_range` 完全对称。"""
     left = max(0.0, clip.left if clip else 0.0)
     right = min(float(w), clip.right if clip else float(w))
     return (
         max(0, min(w, int(max(left, rect.left)))),
-        max(0, min(w, int(min(right, rect.right)) + 1)),
+        max(0, min(w, math.ceil(min(right, rect.right)))),
     )
 
 

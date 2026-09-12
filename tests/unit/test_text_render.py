@@ -38,6 +38,7 @@ from inkstone.layout.types import Offset, Rect
 from inkstone.style import Theme
 from inkstone.text import TextAlign, TextEngine
 from inkstone.widgets import Card, Column, Text
+from png_compare import GoldenBaseline
 
 GOLDEN_DIR = Path(__file__).resolve().parents[1] / "golden"
 FAILURES_DIR = GOLDEN_DIR / "failures"
@@ -52,20 +53,13 @@ def _owner(theme: Theme | None = None) -> BuildOwner:
 
 
 def _assert_or_update_golden(name: str, actual: bytes) -> None:
-    baseline = GOLDEN_DIR / f"{name}.png"
-    if os.environ.get(UPDATE_ENV) == "1" or not baseline.exists():
-        baseline.parent.mkdir(parents=True, exist_ok=True)
-        baseline.write_bytes(actual)
-        return
-    expected = baseline.read_bytes()
-    if expected == actual:
-        return
-    FAILURES_DIR.mkdir(parents=True, exist_ok=True)
-    (FAILURES_DIR / f"{name}.actual.png").write_bytes(actual)
-    raise AssertionError(
-        f"黄金图 {name}.png 不匹配。实际产物见 {FAILURES_DIR}/{name}.actual.png，"
-        f"确认无误后用 INKSTONE_UPDATE_GOLDEN=1 更新基线。"
-    )
+    """比对 / 更新黄金图基线。
+
+    比对单位是**解码后的 RGBA 像素**，不是 PNG 文件字节——`encode_png` 用
+    `zlib.compress(..., level=6)`，而 deflate 的输出不跨 zlib 版本保证一致
+    （docs/16 §R2.1）。基线缺失也不再"顺手写一份然后绿灯"（§R2.2）。
+    """
+    GoldenBaseline(GOLDEN_DIR, update=os.environ.get(UPDATE_ENV) == "1").check(name, actual)
 
 
 # ================================================================ 指令层

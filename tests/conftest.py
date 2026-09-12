@@ -2,36 +2,24 @@
 
 原则：**时间、随机数、字体度量都必须是可注入的**。
 只要渲染读的是注入时钟而不是墙上时钟，截图才能在三台机器上完全一致。
+
+这里**刻意没有 fixture**（docs/16 §R2.5）。此前放着两个没人用的：
+
+    `clock` / `FakeClock`   全仓 grep 只命中自身定义
+    `any_backend`           同上，而且读的是改名前残留的环境变量 `NANOUI_BACKEND`
+
+它们的问题不是"多写了几行"，而是**装样子**：读代码的人看到 `clock` fixture
+会以为"时间可注入"是靠它保证的，于是真正的那条保证（时钟由后端注入、
+渲染层根本不读时钟）反而被遮住了。测试装置里的空承诺比没有更糟——
+它让"我们测过了"变成一句无法验证的话。
+
+那两条保证的真实落点：
+
+    时间      `Backend` 协议里的注入式时钟（`backend/base.py`），
+              渲染与布局全程不读墙上时钟 —— 由 `test_backend.py` 与
+              `test_text_stack.py::test_no_wall_clock_dependency` 钉住。
+    确定性    软件光栅是纯算术、PNG 编码固定参数 —— 由黄金图测试钉住
+              （比对单位是解码后的像素，见 `tests/png_compare.py`）。
+
+需要新的公共装置时再往这里加，但先问一句：它守的是哪条真实保证？
 """
-
-from __future__ import annotations
-
-from dataclasses import dataclass
-
-import pytest
-
-
-@dataclass
-class FakeClock:
-    """可控时钟：让"光标闪烁""动画进度"这类东西在测试里是确定的。"""
-
-    now: float = 0.0
-
-    def advance(self, seconds: float) -> None:
-        self.now += seconds
-
-    def time(self) -> float:
-        return self.now
-
-
-@pytest.fixture
-def clock() -> FakeClock:
-    return FakeClock()
-
-
-@pytest.fixture
-def any_backend() -> str:
-    """返回一个可用的后端名；CI 无显示环境时应当返回 headless。"""
-    import os
-
-    return os.environ.get("NANOUI_BACKEND", "headless")

@@ -107,6 +107,20 @@ class RenderBox:
         if self._parent is not None:
             self._parent.mark_needs_layout()
 
+    def mark_subtree_needs_layout(self) -> None:
+        """把本节点与**所有后代**标成需要重新布局。
+
+        `mark_needs_layout` 只向上冒泡（"我的尺寸可能变了"），刻意**不往下走**——
+        子级约束没变时它们本来就该走缓存。所以"整棵树都要重排"需要一个显式的
+        向下版本：全局失效（换主题这类）、检查器强制重算、性能基准都靠它。
+
+        与 `mark_subtree_needs_paint` 同理，这里**不能**"节点已脏就提前收工"：
+        向上冒泡会让祖先变脏，但祖先的其他子级可能还是干净的。
+        """
+        self.mark_needs_layout()
+        for child in self.children:
+            child.mark_subtree_needs_layout()
+
     # ------------------------------------------------------------ 布局
 
     @property
@@ -149,6 +163,14 @@ class RenderBox:
         self._constraints = constraints
         self._size = self.perform_layout(constraints)
         self._needs_layout = False
+        # 真的跑了一趟布局，就必须重绘——几何变了画面才跟着变。
+        #
+        # 判据刻意**不是**"尺寸变了没有"：滚动、resize 这类主场景里，
+        # 子级尺寸常常一个像素都没变，变的是父级给它定的**位置**；
+        # 而子级自己的布局因为约束没变会走缓存，于是它永远标不上脏。
+        # 所以策略取最保守的那条：**凡实际执行过 perform_layout 的节点，
+        # 其自身与所有后代都标脏**。先正确，收窄留到以后有需要时再做。
+        self.mark_subtree_needs_paint()
         return self._size
 
     def perform_layout(self, constraints: BoxConstraints) -> Size:
@@ -238,12 +260,41 @@ class RenderBox:
     def clear_needs_paint(self) -> None:
         self._needs_paint = False
 
+    def mark_subtree_needs_paint(self) -> None:
+        """把本节点与**所有后代**标成需要重绘。
+
+        为什么要一路标到叶子：`paint_tree` 遇到干净节点会整棵跳过，
+        而"父级重排导致子级挪了位置"这件事不会改变子级自身的尺寸，
+        子级的 `layout()` 因此走缓存、不会标脏——只标父级的话，
+        画面会出现"父级重画了、子级留在原地"的错位。
+
+        这里**不能**加 `if self._needs_paint: return` 提前收工：
+        `mark_needs_paint` 是向上冒泡的，一个节点脏不代表后代也脏
+        （叶子标脏会把祖先带上，祖先的其他子级却还是干净的）。
+        提前收工会漏掉"祖先变脏 + 部分后代干净"这一整类情形。
+        """
+        self.mark_needs_paint()
+        for child in self.children:
+            child.mark_subtree_needs_paint()
+
     def paint(self, context: object) -> None:
         """绘制自身。默认什么都不画；由 gfx 层或具体节点覆写。
 
         `context` 的具体类型由 gfx 层定义，这一层不解释它——
         布局引擎不该知道画布长什么样。
         """
+
+    def paint_clip(self) -> Rect | None:
+        """本节点要施加给**整棵子树**的裁剪矩形（本节点局部坐标）。
+
+        默认 `None`（不裁剪）。滚动容器靠它把视口外的内容挡掉——
+        没有它，滚出去的内容会直接画在视口外面，糊在别的组件上。
+
+        为什么做成钩子而不是在 `paint()` 里自己调裁剪：裁剪要罩住整个子树，
+        而 `paint()` 只负责画自己；子树的遍历在 `paint_tree` 手里，
+        只有它能在进入子树前施加、出来后恢复。
+        """
+        return None
 
     def paint_tree(self, context: object) -> None:
         """绘制整棵脏子树，干净子树整棵跳过。
@@ -262,6 +313,11 @@ class RenderBox:
         if save is not None and translate is not None and restore is not None:
             save()
             translate(self._offset.dx, self._offset.dy)
+            clip = self.paint_clip()
+            clip_rect = getattr(context, "clip_rect", None)
+            if clip is not None and clip_rect is not None:
+                # 局部坐标：录制器会折算成绝对坐标并与已有裁剪取交
+                clip_rect(clip)
             self._paint_and_descend(context)
             restore()
             return

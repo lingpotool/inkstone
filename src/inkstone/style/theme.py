@@ -114,6 +114,14 @@ class Theme:
         """控件高度（px）。`"xs"=24 … "xl"=52`，表单对齐靠它。"""
         return _lookup("control_heights", name, self.raw.control_heights)
 
+    def border_width(self, name: str) -> float:
+        """描边宽度（px）。`"hairline"=1 / "thick"=2`。
+
+        边框、分隔线、焦点环都从这里取——"1px 还是 2px"是设计决定，
+        散落在组件里当字面量就没人能一次改全。
+        """
+        return _lookup("border_widths", name, self.raw.border_widths)
+
     def shadow(self, name: str) -> ShadowSpec | None:
         """阴影。`"e0"` 无阴影，`"e1"–"e4"` 逐级加深。"""
         return _lookup("shadows", name, self.raw.shadows)

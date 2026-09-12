@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import re
 
 import pytest
 
@@ -225,12 +226,10 @@ class TestLayerDependencies:
 
 
 class TestNoHardcodedLiterals:
-    """铁律 2：组件里不许出现字面量颜色。"""
+    """铁律 2：组件里不许出现字面量。"""
 
     def test_widgets_contain_no_hex_colors(self) -> None:
         """`widgets/` 里出现 `#RRGGBB` = 审查打回，一律走主题令牌。"""
-        import re
-
         root = pathlib.Path(__file__).resolve().parents[2] / "src" / "inkstone" / "widgets"
         pattern = re.compile(r"#[0-9a-fA-F]{6}\b")
         offenders: list[str] = []
@@ -241,3 +240,187 @@ class TestNoHardcodedLiterals:
         assert not offenders, "组件里出现硬编码颜色（违反铁律 2）：\n" + "\n".join(
             f"  {o}" for o in offenders
         )
+
+    def test_widgets_have_no_hardcoded_design_values(self) -> None:
+        """`widgets/` 里的圆角 / 描边宽度 / 控件高度不许写字面量。
+
+        颜色扫描（上一条）只扫 `#RRGGBB`，于是"圆角回退 10.0""描边写死 1.0"
+        "控件高度默认 36.0"这类**数值**硬编码全部漏网（docs/16 §R2.4 的实锤）。
+        这条把扫描扩到数值，但只覆盖三类设计槽位——**窄扫描，宁可漏不可吵**：
+        一个误报多的扫描会被人习惯性忽略，那比没有更糟。
+        """
+        root = pathlib.Path(__file__).resolve().parents[2] / "src" / "inkstone" / "widgets"
+        offenders: list[str] = []
+        for path in sorted(root.rglob("*.py")):
+            offenders.extend(
+                _design_literal_violations(path.read_text(encoding="utf-8"), path.name)
+            )
+        assert not offenders, (
+            "组件里出现硬编码的设计数值（违反铁律 2）：\n"
+            + "\n".join(f"  {o}" for o in offenders)
+            + "\n\n修法：先看 style/tokens.py 有没有对应令牌，没有就加一个再用。"
+            "\n（0 / 0.0 视为中性值，不算设计值；比值类请命名为 `*_ratio`。）"
+        )
+
+
+# 三类"设计槽位"：值必须来自 style/tokens.py，不许写字面量。
+#
+# 名字匹配刻意**窄**：只认这三类，且要求名字以槽位词结尾（`height_ratio` 不是槽位，
+# 它是比值；`item_height` 是）。窄扫描的漏网由代码审查兜，误报却会让门禁被忽略。
+_DESIGN_SLOT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("圆角", re.compile(r"^(?:.*_)?(?:radius|corner)$")),
+    ("描边宽度", re.compile(r"^(?:.*_)?(?:border_width|stroke_width)$")),
+    ("控件高度", re.compile(r"^(?:.*_)?(?:height|height_value)$")),
+)
+
+
+def _slot_category(name: str) -> str | None:
+    for category, pattern in _DESIGN_SLOT_PATTERNS:
+        if pattern.match(name):
+            return category
+    return None
+
+
+def _slot_name(target: ast.expr) -> str | None:
+    """赋值目标的"名字"：`self.radius` → `radius`，`radius` → `radius`。"""
+    if isinstance(target, ast.Name):
+        return target.id
+    if isinstance(target, ast.Attribute):
+        return target.attr
+    return None
+
+
+def _design_literal_violations(source: str, filename: str = "<memory>") -> list[str]:
+    """在源码里找出"设计槽位被写成字面量"的地方。
+
+    看三类位置：**赋值**（含带注解赋值）、**关键字实参**、以及**绘制原语的位置实参**。
+
+    为什么要专门管位置实参：审查抓到的漏网之一是 `stroke(rect, 1.0, ...)`——
+    描边宽度写死在调用点，连名字都没有，光看赋值是抓不到的。
+    光栅录制器的签名是固定的（`gfx/paint.py`），所以这里能精确到位置，不必猜。
+    `2.0 * self.padding_h` 这类系数不在任何槽位上，不会被误判。
+    """
+    tree = ast.parse(source)
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.keyword):
+            _check_slot(node.arg, node.value, node.lineno, filename, offenders)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                _check_slot(_slot_name(target), node.value, node.lineno, filename, offenders)
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            _check_slot(_slot_name(node.target), node.value, node.lineno, filename, offenders)
+        elif isinstance(node, ast.Call):
+            _check_positional_slots(node, filename, offenders)
+    return offenders
+
+
+# 绘制原语的"哪个位置参数是设计值"。签名固定（gfx/paint.py）：
+#     stroke_rect(rect, width, color, radius=0.0)
+#     round_rect(rect, radius, color)
+# `stroke` / `round` 是组件里 `getattr(context, "stroke_rect")` 之后的别名。
+_DRAW_PRIMITIVE_SLOTS: dict[str, dict[int, str]] = {
+    "stroke_rect": {1: "stroke_width", 3: "radius"},
+    "stroke": {1: "stroke_width", 3: "radius"},
+    "round_rect": {1: "radius"},
+    "round": {1: "radius"},
+}
+
+
+def _callee_name(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _check_positional_slots(call: ast.Call, filename: str, offenders: list[str]) -> None:
+    slots = _DRAW_PRIMITIVE_SLOTS.get(_callee_name(call.func) or "")
+    if slots is None:
+        return
+    for index, slot_name in slots.items():
+        if index < len(call.args):
+            _check_slot(slot_name, call.args[index], call.lineno, filename, offenders)
+
+
+def _numeric_literals(node: ast.expr) -> list[float]:
+    """子树里所有**非零**数值字面量。
+
+    为什么要钻整棵子树而不是只看顶层：审查实锤的第一个漏网写成
+    `radius = self.radius or 10.0`——顶层是 `BoolOp`，只看顶层会漏掉那个 10.0。
+    而"给槽位赋的值里出现设计数字"正是要拦的东西。
+    0 / 0.0 是中性值（"未配置 / 无"），不算设计决定，放行。
+    """
+    out: list[float] = []
+    for sub in ast.walk(node):
+        if not isinstance(sub, ast.Constant):
+            continue
+        if isinstance(sub.value, bool) or not isinstance(sub.value, (int, float)):
+            continue
+        value = float(sub.value)
+        if value != 0.0:
+            out.append(value)
+    return out
+
+
+def _check_slot(
+    name: str | None,
+    value: ast.expr,
+    lineno: int,
+    filename: str,
+    offenders: list[str],
+) -> None:
+    if name is None:
+        return
+    category = _slot_category(name)
+    if category is None:
+        return
+    for literal in _numeric_literals(value):
+        offenders.append(
+            f"{filename}:{lineno}: {category} {name} 里出现字面量 {literal:g}"
+            f"（应当来自 style/tokens.py）"
+        )
+
+
+class TestNumericLiteralScanSelfCheck:
+    """自验证：扫描本身要能抓到硬编码（docs/16 §R2.4 的验收）。
+
+    门禁最常见的死法是"扫描写错了 → 永远绿灯"，所以这里故意喂几段
+    该红与该绿的代码，把扫描的行为钉死。
+    """
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "self.radius = 10.0\n",
+            "render_object.border_width = 1.0\n",
+            "self.height_value = 36.0\n",
+            "box = Box(height=52.0)\n",
+            "self.corner = 6.0\n",
+            "self.item_height = 24.0\n",
+            "radius = self.radius or 10.0\n",  # 审查实锤：字面量藏在布尔表达式里
+            "stroke(rect, 1.0, color)\n",  # 位置实参也要抓（审查实锤的漏网形态）
+            "context.stroke_rect(rect, 2.0, color)\n",
+            "round_rect(rect, 10.0, color)\n",
+        ],
+    )
+    def test_hardcoded_slot_is_flagged(self, source: str) -> None:
+        assert _design_literal_violations(source), f"没抓到硬编码：{source!r}"
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "self.radius = 0.0\n",  # 中性值
+            "self.border_width: float = 0.0\n",
+            "self.radius = theme.radius('md')\n",  # 来自令牌
+            "height_ratio = 1.0\n",  # 比值，不是槽位
+            "padding = 12.0\n",  # 不在三类槽位里（间距由组件层从令牌取）
+            "width = 2.0 * self.padding_h\n",  # 系数
+            "self.radius = other.radius\n",
+            "stroke(rect, self.border_width, color)\n",  # 位置对了但值来自字段
+            "helper(1.0, 2.0)\n",  # 不是绘制原语
+        ],
+    )
+    def test_non_violation_is_not_flagged(self, source: str) -> None:
+        assert _design_literal_violations(source) == [], f"误报了：{source!r}"

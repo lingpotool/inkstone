@@ -2,19 +2,28 @@
 
 核心是 docs/05 §6 那条规则：**滚动容器给子级的必须是无限主轴约束**。
 这条做错的表现是"滚动区里的 fill 子级把整个窗口撑爆"，所以这里专门测它。
+
+后半部分（`TestViewportClipping`）跨到绘制侧：滚动容器还必须**裁剪视口**，
+否则滚出去的内容会画在视口外面。那条链路要跑显示列表与软件光栅才看得见。
 """
 
 import pytest
 
+from inkstone.gfx import DisplayList, DisplayListRecorder, SoftwareRasterizer
+from inkstone.gfx.color import Color
 from inkstone.layout import (
     BoxConstraints,
+    EdgeInsets,
     LayoutError,
+    RenderBox,
     RenderColumn,
+    RenderContainer,
     RenderScroll,
     RenderSized,
     ScrollDirection,
     Sizing,
 )
+from inkstone.layout.types import Rect, Size
 
 
 def tall_list(count: int = 5, item_height: float = 40.0) -> RenderColumn:
@@ -176,3 +185,123 @@ class TestReplacingChild:
         scroll = RenderScroll(tall_list(5), debug_name="Scroll")
         scroll.layout(BoxConstraints(max_width=120, max_height=100))
         assert "content=100×200" in scroll.describe()
+
+
+# ================================================================ 视口裁剪
+
+_BG = Color.from_hex("#FF00FF")
+_INK = Color.from_hex("#FFFFFF")
+
+
+class _PaintableBox(RenderBox):
+    """会真的往显示列表里录一条指令的叶子——用来断言"画在哪、有没有画"。"""
+
+    def __init__(self, width: float, height: float, **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.box_width = width
+        self.box_height = height
+
+    def perform_layout(self, constraints: BoxConstraints) -> Size:
+        return constraints.constrain(Size(self.box_width, self.box_height))
+
+    def paint(self, context: object) -> None:  # type: ignore[override]
+        fill = getattr(context, "fill_rect", None)
+        if fill is not None:
+            fill(Rect(0.0, 0.0, self.size.width, self.size.height), _INK)
+
+
+def _long_list(count: int = 6, item_height: float = 40.0) -> RenderColumn:
+    col = RenderColumn(debug_name="List")
+    for i in range(count):
+        col.add(_PaintableBox(100.0, item_height, debug_name=f"I{i}"))
+    return col
+
+
+def _record(root: RenderBox, width: int, height: int) -> DisplayList:
+    recorder = DisplayListRecorder()
+    root.paint_tree(recorder)
+    return recorder.finish(width, height)
+
+
+class TestViewportClipping:
+    """滚出视口的内容必须被裁掉——`paint_tree` 只 translate，不 clip。"""
+
+    VIEWPORT = (120, 100)
+
+    def _scrolled(self) -> RenderScroll:
+        scroll = RenderScroll(_long_list(), debug_name="Scroll")
+        constraints = BoxConstraints(max_width=120, max_height=100)
+        scroll.layout(constraints)
+        _record(scroll, *self.VIEWPORT)  # 先清干净
+        scroll.scroll_to(dy=50)
+        scroll.layout(constraints)
+        return scroll
+
+    def test_scrolled_ops_carry_the_viewport_clip(self) -> None:
+        scroll = self._scrolled()
+        dl = _record(scroll, *self.VIEWPORT)
+
+        assert len(dl) == 6
+        expected = Rect(0.0, 0.0, 120.0, 100.0)
+        for op in dl.ops:
+            assert op.clip == expected, f"视口外的指令没带裁剪：{op}"
+
+    def test_clip_is_relative_to_the_scroll_node(self) -> None:
+        """裁剪矩形是**本节点**的 bounds，父级给的偏移不算在里面。"""
+        scroll = RenderScroll(_long_list(), debug_name="Scroll")
+        holder = RenderContainer(
+            scroll,
+            width=Sizing.fixed(160),
+            height=Sizing.fixed(140),
+            padding=EdgeInsets.all(20),
+            debug_name="Holder",
+        )
+        constraints = BoxConstraints(max_width=160, max_height=140)
+        holder.layout(constraints)
+        _record(holder, 160, 140)
+        scroll.scroll_to(dy=50)
+        holder.layout(constraints)
+
+        dl = _record(holder, 160, 140)
+        expected = Rect(20.0, 20.0, 120.0, 100.0)
+        for op in dl.ops:
+            assert op.clip == expected
+
+    def test_pixels_outside_the_viewport_stay_clean(self) -> None:
+        """端到端：光栅出图后，视口外不许有墨迹。"""
+        scroll = RenderScroll(_long_list(), debug_name="Scroll")
+        holder = RenderContainer(
+            scroll,
+            width=Sizing.fixed(160),
+            height=Sizing.fixed(140),
+            padding=EdgeInsets.all(20),
+            debug_name="Holder",
+        )
+        constraints = BoxConstraints(max_width=160, max_height=140)
+        holder.layout(constraints)
+        _record(holder, 160, 140)
+        scroll.scroll_to(dy=50)
+        holder.layout(constraints)
+
+        recorder = DisplayListRecorder()
+        recorder.fill_rect(Rect(0.0, 0.0, 160.0, 140.0), _BG)
+        holder.paint_tree(recorder)
+        fb = SoftwareRasterizer().rasterize(recorder.finish(160, 140))
+
+        # 视口 = (20,20) 起、120×100；外面那一圈必须是底色
+        for y in range(140):
+            for x in range(160):
+                inside = 20 <= x < 140 and 20 <= y < 120
+                if not inside:
+                    assert fb.pixel(x, y)[:3] == (_BG.r, _BG.g, _BG.b), (
+                        f"视口外的 ({x},{y}) 有墨迹——内容没被裁掉"
+                    )
+        # 视口内必须有内容（否则这个测试只是在验证"什么都没画"）
+        assert fb.pixel(80, 80)[:3] == (_INK.r, _INK.g, _INK.b)
+
+    def test_without_scrolling_nothing_is_clipped_away_inside_the_viewport(self) -> None:
+        scroll = RenderScroll(_long_list(), debug_name="Scroll")
+        scroll.layout(BoxConstraints(max_width=120, max_height=100))
+        dl = _record(scroll, *self.VIEWPORT)
+        assert len(dl) == 6, "视口内的内容不许被裁掉"
+        assert all(op.clip == Rect(0.0, 0.0, 120.0, 100.0) for op in dl.ops)

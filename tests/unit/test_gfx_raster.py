@@ -34,6 +34,19 @@ def rasterize(*ops: object, size: int = 40) -> FrameBuffer:
     return SoftwareRasterizer().rasterize(recorder.finish(size, size))
 
 
+def rasterize_canvas(width: int, height: int, *ops: object) -> FrameBuffer:
+    """在任意尺寸的画布上光栅化（背景铺满整幅画布）。
+
+    非方形画布是这里的主角：宽高一旦被混淆，宽扁画布会直接崩，
+    竖长画布会静默少画一截——两者都是"测试全用方形画布"掩盖掉的。
+    """
+    recorder = DisplayListRecorder()
+    recorder.fill_rect(Rect(0.0, 0.0, float(width), float(height)), BG)
+    for op in ops:
+        recorder._ops.append(op)
+    return SoftwareRasterizer().rasterize(recorder.finish(width, height))
+
+
 class TestRecorder:
     def test_translate_and_save_restore(self):
         r = DisplayListRecorder()
@@ -187,6 +200,87 @@ class TestClipping:
         fb = rasterize(FillRectOp(Rect(0, 0, 40, 40), FILL, 0.0, Rect(0, 0, 10, 10)))
         assert fb.pixel(5, 5)[:3] == (255, 255, 255)
         assert fb.pixel(20, 20)[:3] == (255, 0, 255)
+
+    def test_clip_boundary_on_integer_pixels_leaks_nothing(self):
+        """裁剪边恰好落在整数像素时，第 10 列/行之外不许有墨迹。
+
+        曾经的 bug：上界写成 `int(right) + 1`，于是 clip=(0,0,10,10) 会
+        多放第 10 列与第 10 行进来——像素 10 覆盖 [10,11)，与 [0,10) 无交集。
+        """
+        fb = rasterize(FillRectOp(Rect(0, 0, 20, 20), FILL, 0.0, Rect(0, 0, 10, 10)))
+        assert fb.pixel(9, 9)[:3] == (255, 255, 255), "裁剪区内应当着色"
+        for x in range(10, 20):
+            assert fb.pixel(x, 5)[:3] == (255, 0, 255), f"第 {x} 列越出了裁剪"
+        for y in range(10, 20):
+            assert fb.pixel(5, y)[:3] == (255, 0, 255), f"第 {y} 行越出了裁剪"
+
+    def test_clip_boundary_on_integer_pixels_for_stroke(self):
+        """描边走的是另一条分派路径，同样不许越界。
+
+        环的右半边落在裁剪边之外：第 6 列/行与裁剪区 [0,6) 无交集，不许有墨迹。
+        """
+        fb = rasterize(
+            StrokeRectOp(Rect(0, 0, 10, 10), FILL, 4.0, 0.0, Rect(0, 0, 6, 6)),
+        )
+        assert fb.pixel(1, 1)[:3] == (255, 255, 255), "裁剪区内的环应当着色"
+        for x in range(6, 10):
+            assert fb.pixel(x, 1)[:3] == (255, 0, 255), f"描边越出了裁剪（第 {x} 列）"
+        for y in range(6, 10):
+            assert fb.pixel(1, y)[:3] == (255, 0, 255), f"描边越出了裁剪（第 {y} 行）"
+
+
+class TestNonSquareCanvas:
+    """非方形画布：宽必须归宽、高必须归高。
+
+    曾经的 bug：`_fill` / `_stroke` 把**画布宽度**当成高度传给了 `_row_range`。
+    宽扁画布（宽 > 高）上画超出底部的形状会直接崩；竖长画布（高 > 宽）
+    全屏填充会在底部静默少画一截。方形画布恰好掩盖了这两个方向。
+    """
+
+    @pytest.mark.parametrize(("width", "height"), [(200, 100), (100, 200)])
+    def test_full_canvas_fill_colors_all_four_corners(self, width: int, height: int) -> None:
+        fb = rasterize_canvas(width, height, FillRectOp(Rect(0, 0, width, height), FILL, 0.0, None))
+        for x, y in ((0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)):
+            assert fb.pixel(x, y)[:3] == (255, 255, 255), f"({x},{y}) 没被着色"
+
+    @pytest.mark.parametrize(("width", "height"), [(200, 100), (100, 200)])
+    def test_full_canvas_fill_colors_every_edge_pixel(self, width: int, height: int) -> None:
+        fb = rasterize_canvas(width, height, FillRectOp(Rect(0, 0, width, height), FILL, 0.0, None))
+        for x in range(width):
+            assert fb.pixel(x, 0)[:3] == (255, 255, 255), f"上边缘 ({x},0) 没着色"
+            assert fb.pixel(x, height - 1)[:3] == (255, 255, 255), (
+                f"下边缘 ({x},{height - 1}) 没着色"
+            )
+        for y in range(height):
+            assert fb.pixel(0, y)[:3] == (255, 255, 255), f"左边缘 (0,{y}) 没着色"
+            assert fb.pixel(width - 1, y)[:3] == (255, 255, 255), f"右边缘 ({width - 1},{y}) 没着色"
+
+    def test_shape_overflowing_bottom_does_not_crash(self):
+        """滚动列表每帧都在画"内容比视口长"——这里曾经抛 ValueError。"""
+        fb = rasterize_canvas(200, 100, FillRectOp(Rect(0, 0, 200, 150), FILL, 0.0, None))
+        for x, y in ((0, 0), (199, 0), (0, 99), (199, 99), (100, 50)):
+            assert fb.pixel(x, y)[:3] == (255, 255, 255), f"可见区域 ({x},{y}) 没着色"
+
+    def test_shape_overflowing_right_does_not_crash(self):
+        fb = rasterize_canvas(200, 100, FillRectOp(Rect(0, 0, 260, 100), FILL, 0.0, None))
+        for x, y in ((0, 0), (199, 0), (0, 99), (199, 99)):
+            assert fb.pixel(x, y)[:3] == (255, 255, 255), f"可见区域 ({x},{y}) 没着色"
+
+    def test_shape_overflowing_both_axes_does_not_crash(self):
+        fb = rasterize_canvas(200, 100, FillRectOp(Rect(0, 0, 260, 150), FILL, 0.0, None))
+        assert fb.pixel(199, 99)[:3] == (255, 255, 255)
+
+    def test_stroke_overflowing_bottom_does_not_crash(self):
+        """描边走的是另一条分派路径，宽高同样不许传反。"""
+        fb = rasterize_canvas(200, 100, StrokeRectOp(Rect(0, 0, 200, 150), FILL, 2.0, 0.0, None))
+        assert fb.pixel(1, 50)[:3] == (255, 255, 255), "可见区域的环应当着色"
+        assert fb.pixel(100, 50)[:3] == (255, 0, 255), "环内部不填"
+
+    def test_tall_canvas_fill_reaches_the_bottom(self):
+        """100×200 竖向画布全屏填充：曾经底部 100 行静默留空。"""
+        fb = rasterize_canvas(100, 200, FillRectOp(Rect(0, 0, 100, 200), FILL, 0.0, None))
+        for y in (0, 99, 100, 150, 199):
+            assert fb.pixel(50, y)[:3] == (255, 255, 255), f"第 {y} 行没着色"
 
 
 class TestAlphaBlending:

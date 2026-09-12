@@ -69,6 +69,71 @@ class TestEndToEnd:
         assert owner.theme.mode is ThemeMode.LIGHT
 
 
+class TestThemeHotSwap:
+    """运行时换主题必须真的换掉颜色——"换肤"不能只是句承诺。
+
+    修复前：`BuildOwner.theme` 是个普通可变属性，`Element.theme` 活读它，
+    但样式只在 mount / update 的 `_apply_style` 里被写进渲染对象——
+    运行时换主题，整棵树静默保留旧色：主题"换了"，界面一点没动。
+    """
+
+    @staticmethod
+    def _owner() -> BuildOwner:
+        owner = BuildOwner(theme=Theme.light())
+        owner.mount(Button("确定", width=120))
+        owner.begin_frame(CONSTRAINTS)
+        return owner
+
+    @staticmethod
+    def _expected_bg(theme: Theme) -> object:
+        return resolve_button_style(
+            theme,
+            variant=ButtonVariant.PRIMARY,
+            size="md",
+            state=ComponentState.DEFAULT,
+        ).bg
+
+    def test_swapping_theme_changes_the_button_background(self) -> None:
+        owner = self._owner()
+        render_object = owner.root_render_object
+        assert render_object is not None
+        light_bg = render_object.bg
+        assert light_bg == self._expected_bg(Theme.light())
+
+        owner.theme = Theme.dark()
+        owner.begin_frame(CONSTRAINTS)
+
+        assert render_object.bg != light_bg, "换主题后按钮底色必须变"
+        assert render_object.bg == self._expected_bg(Theme.dark())
+
+    def test_swapping_theme_marks_the_whole_tree_dirty(self) -> None:
+        owner = self._owner()
+        owner.build_count = 0
+        owner.theme = Theme.dark()
+
+        assert owner.dirty_count > 0, "换主题必须把整棵树标脏"
+        owner.begin_frame(CONSTRAINTS)
+        assert owner.build_count > 0, "重建必须真的发生"
+
+    def test_assigning_the_same_theme_object_is_a_no_op(self) -> None:
+        owner = self._owner()
+        owner.build_count = 0
+        current = owner.theme
+
+        owner.theme = current
+        assert owner.dirty_count == 0, "同一个主题对象不该白白触发重建"
+        owner.begin_frame(CONSTRAINTS)
+        assert owner.build_count == 0
+
+    def test_swapping_theme_before_mount_is_fine(self) -> None:
+        owner = BuildOwner(theme=Theme.light())
+        owner.theme = Theme.dark()  # 还没挂载，没有树可标脏
+        owner.mount(Button("确定", width=120))
+        owner.begin_frame(CONSTRAINTS)
+        assert owner.root_render_object is not None
+        assert owner.root_render_object.bg == self._expected_bg(Theme.dark())
+
+
 class TestCardPaddingComesFromTokens:
     def test_card_padding_is_the_token_value(self):
         owner = BuildOwner(theme=Theme.light())

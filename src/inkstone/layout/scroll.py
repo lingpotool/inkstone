@@ -26,7 +26,7 @@ from .protocol import (
     Axis,
     constraints_from,
 )
-from .types import BoxConstraints, Offset, Size
+from .types import BoxConstraints, Offset, Rect, Size
 
 __all__ = ["RenderScroll", "ScrollDirection"]
 
@@ -125,6 +125,17 @@ class RenderScroll(RenderBox):
 
     def scroll_by(self, dx: float = 0.0, dy: float = 0.0) -> None:
         self.scroll_to(self._scroll.dx + dx, self._scroll.dy + dy)
+
+    # ------------------------------------------------------------ 绘制
+
+    def paint_clip(self) -> Rect | None:
+        """视口裁剪：滚出去的内容不许画在视口外。
+
+        `paint_tree` 只做 translate 不做 clip，而滚动容器给子级的是
+        **无限主轴约束**——内容天然比视口长，滚出视口的部分必须被挡掉，
+        否则它会直接糊在视口下方的组件上（"滚动列表盖住下面的按钮"）。
+        """
+        return Rect(0.0, 0.0, self._size.width, self._size.height)
 
     # ------------------------------------------------------------ 布局
 

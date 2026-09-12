@@ -24,17 +24,22 @@ docs/06 §7 那条最关键的设计纪律在这里落地：
 from __future__ import annotations
 
 import os
+import sys
+import zlib
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
 from inkstone.backend import HeadlessBackend
 from inkstone.core import BuildOwner
 from inkstone.devtools import render_to_png
+from inkstone.gfx import encode_png
 from inkstone.layout import BoxConstraints
 from inkstone.style import ButtonVariant, Theme
 from inkstone.text import TextEngine
 from inkstone.widgets import Box, Button, Card, Column, Flexible, Input, Row
+from png_compare import GoldenBaseline, decode_png
 
 GOLDEN_DIR = Path(__file__).resolve().parents[1] / "golden"
 FAILURES_DIR = GOLDEN_DIR / "failures"
@@ -78,23 +83,13 @@ def _build_login_form(theme: Theme) -> BuildOwner:
 
 
 def _assert_or_update_golden(name: str, actual: bytes) -> None:
-    baseline = GOLDEN_DIR / f"{name}.png"
+    """比对 / 更新黄金图基线。
 
-    if os.environ.get(UPDATE_ENV) == "1" or not baseline.exists():
-        baseline.parent.mkdir(parents=True, exist_ok=True)
-        baseline.write_bytes(actual)
-        return
-
-    expected = baseline.read_bytes()
-    if expected == actual:
-        return
-
-    FAILURES_DIR.mkdir(parents=True, exist_ok=True)
-    (FAILURES_DIR / f"{name}.actual.png").write_bytes(actual)
-    raise AssertionError(
-        f"黄金图 {name}.png 不匹配。已把实际产物写到 {FAILURES_DIR}/{name}.actual.png"
-        f"，请比对差异后用 INKSTONE_UPDATE_GOLDEN=1 更新基线。"
-    )
+    比对单位是**解码后的 RGBA 像素**，不是 PNG 文件字节——`encode_png` 用
+    `zlib.compress(..., level=6)`，而 deflate 的输出不跨 zlib 版本保证一致
+    （docs/16 §R2.1）。基线缺失也不再"顺手写一份然后绿灯"（§R2.2）。
+    """
+    GoldenBaseline(GOLDEN_DIR, update=os.environ.get(UPDATE_ENV) == "1").check(name, actual)
 
 
 # ---------------------------------------------------------------- 验收
@@ -165,3 +160,64 @@ def test_no_orphan_failures_in_fixtures():
         f"黄金图失败产物没清：{[p.name for p in stale]}。"
         f"确认是预期变化后用 INKSTONE_UPDATE_GOLDEN=1 提交基线，然后清空此目录。"
     )
+
+
+class TestGoldenGateIsReal:
+    """门禁本身要能红——这是 docs/16 §R2.2 的验收，也是 R2 整包验收的第一条。
+
+    全部用 `tmp_path` 隔离，**不动真基线**。
+    """
+
+    @staticmethod
+    def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(sys.modules[__name__], "GOLDEN_DIR", tmp_path)
+
+    def test_missing_baseline_fails_with_guidance(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """基线缺失不许"顺手写一份然后绿灯"。"""
+        self._isolate(tmp_path, monkeypatch)
+        png = render_to_png(_build_login_form(Theme.light()), _constraints())
+        with pytest.raises(AssertionError) as exc:
+            _assert_or_update_golden("login_form_light", png)
+        assert "基线缺失" in str(exc.value)
+        assert "INKSTONE_UPDATE_GOLDEN=1" in str(exc.value)
+        assert not (tmp_path / "login_form_light.png").exists()
+
+    def test_one_changed_pixel_fails(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """故意改坏一个像素 → 必须红（改坏在**基线**上，模拟基线悄悄漂移）。"""
+        self._isolate(tmp_path, monkeypatch)
+        png = render_to_png(_build_login_form(Theme.light()), _constraints())
+        frame = decode_png(png)
+
+        broken = bytearray(frame.rgba)
+        broken[0] = (broken[0] + 1) & 0xFF
+        (tmp_path / "login_form_light.png").write_bytes(
+            encode_png(frame.width, frame.height, bytes(broken))
+        )
+
+        with pytest.raises(AssertionError, match="像素不一致"):
+            _assert_or_update_golden("login_form_light", png)
+
+    def test_identical_pixels_in_differently_compressed_png_pass(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """R2.1 的核心：PNG 字节不同、像素相同 → 必须通过。
+
+        用不同的 zlib 压缩级别重编一遍同一份像素来制造"字节不同"。
+        旧实现比对 PNG 文件字节，这种情形会红——而它其实什么都没坏。
+        """
+        self._isolate(tmp_path, monkeypatch)
+        png = render_to_png(_build_login_form(Theme.light()), _constraints())
+        frame = decode_png(png)
+
+        # 只在这一小段里换压缩级别；**不要用 monkeypatch.undo()**——
+        # 那会把上面的 GOLDEN_DIR 隔离一起撤销，测试会悄悄跑回真基线。
+        real_compress = zlib.compress
+        with mock.patch.object(zlib, "compress", lambda data, level=6: real_compress(data, 9)):
+            recompressed = encode_png(frame.width, frame.height, frame.rgba)
+
+        assert recompressed != png, "前提：不同压缩级别应当产出不同字节"
+        (tmp_path / "login_form_light.png").write_bytes(recompressed)
+
+        _assert_or_update_golden("login_form_light", png)  # 不该抛

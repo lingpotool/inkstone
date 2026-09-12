@@ -25,7 +25,14 @@
 状态：三棵树与帧调度已实现；signals（高频更新）未实现，见 docs/06 §3。
 """
 
-from .binding import BuildOwner, FrameError, FramePhase
+from .binding import (
+    MAX_BUILD_FAILURES_PER_FRAME,
+    BuildError,
+    BuildFailure,
+    BuildOwner,
+    FrameError,
+    FramePhase,
+)
 from .element import (
     ComponentElement,
     Element,
@@ -46,6 +53,9 @@ from .widget import (
 )
 
 __all__ = [
+    "MAX_BUILD_FAILURES_PER_FRAME",
+    "BuildError",
+    "BuildFailure",
     "BuildOwner",
     "ComponentElement",
     "Element",

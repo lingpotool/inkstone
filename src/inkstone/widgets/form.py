@@ -67,21 +67,25 @@ class _ControlRenderObject(RenderBox):
 
     def __init__(self) -> None:
         super().__init__()
-        self.height_value: float = 36.0
+        # 下面这些字段**全部由 Element 从主题令牌填入**（`_ControlBox._apply`）：
+        # RenderObject 拿不到 BuildOwner，所以外观一律"元素写、渲染对象读"。
+        # 初值刻意取中性值而不是像 36.0 / 10.0 / 12.0 这样的**设计值**——
+        # 后者会让"漏填"表现为一个看起来还挺正常的控件，而不是明显画错。
+        self.height_value: float = 0.0
         self.width_value: float | None = None
         self.bg: Color | None = None
         self.fg: Color | None = None
         self.border: Color | None = None
         self.placeholder_color: Color | None = None
-        self.border_width: float = 1.0
-        self.radius: float = 10.0
+        self.border_width: float = 0.0
+        self.radius: float = 0.0
         self.focus_ring: Color | None = None
         self.focus_ring_width: float = 0.0
         # ---- 文本 ----
         self.label: str = ""
         self.placeholder: str = ""
         self.text_style: TextStyle | None = None
-        self.padding_h: float = 12.0
+        self.padding_h: float = 0.0
         #: 按钮居中、输入框左对齐
         self.center_text: bool = True
         #: 由 Element 注入的环境文本引擎（RenderObject 拿不到 BuildOwner）

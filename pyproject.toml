@@ -91,6 +91,9 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# `tests/` 本身入 path：黄金图比对助手（tests/png_compare.py）要被两个测试模块共用，
+# 而测试目录不是 Python 包（没有 __init__.py），只能靠这一行让它可导入。
+pythonpath = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
     "golden: 黄金图（截图）对比测试，需要光栅后端",

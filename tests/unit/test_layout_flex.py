@@ -154,6 +154,76 @@ class TestCrossAxisAlignment:
         assert b.offset.dy == pytest.approx(30.0)
 
 
+class TestBaselineCrossSize:
+    """基线对齐时，交叉轴尺寸必须容得下**基线以下**的那部分。
+
+    参考线取组内最大基线是对的，但容器高度若只取 `max(子级高度)`，
+    基线偏低（descender 更长）的子级就会从容器底部溢出去，而且不报 overflow——
+    因为它压根没参与交叉轴定尺寸。正确做法（Flutter 同款）：
+    `max(above) + max(below)`，above = 子级 baseline，below = 子级 height − baseline。
+    """
+
+    @pytest.mark.parametrize(
+        ("a_h", "a_b", "b_h", "b_b"),
+        [
+            (50.0, 40.0, 20.0, 5.0),
+            (30.0, 20.0, 40.0, 10.0),
+            (24.0, 18.0, 24.0, 18.0),
+            (60.0, 12.0, 20.0, 19.0),
+        ],
+    )
+    def test_cross_size_fits_both_sides_of_the_reference_line(
+        self, a_h: float, a_b: float, b_h: float, b_b: float
+    ) -> None:
+        row = RenderRow(align=CrossAxisAlignment.BASELINE, debug_name="Row")
+        a = row.add(
+            RenderSized(
+                width=Sizing.fixed(20), height=Sizing.fixed(a_h), baseline=a_b, debug_name="A"
+            )
+        ).child
+        b = row.add(
+            RenderSized(
+                width=Sizing.fixed(20), height=Sizing.fixed(b_h), baseline=b_b, debug_name="B"
+            )
+        ).child
+        row.layout(BoxConstraints(max_width=400))
+
+        expected = max(a_b, b_b) + max(a_h - a_b, b_h - b_b)
+        assert row.size.height == pytest.approx(expected), "容器高 = max(above) + max(below)"
+        # 任何子级的底边都不许越过容器底边
+        for child in (a, b):
+            assert child.offset.dy + child.size.height <= row.size.height + 1e-9, (
+                f"{child.debug_name} 从容器底部溢出了"
+            )
+        # 两条基线仍然落在同一条参考线上
+        assert a.offset.dy + a_b == pytest.approx(b.offset.dy + b_b)
+
+    def test_without_baseline_alignment_cross_size_is_unchanged(self) -> None:
+        """没有基线对齐时维持 `max(子级高度)`——不许顺手改掉既有行为。"""
+        row = RenderRow(debug_name="Row")
+        row.add(RenderSized(width=Sizing.fixed(20), height=Sizing.fixed(50), baseline=40.0))
+        row.add(RenderSized(width=Sizing.fixed(20), height=Sizing.fixed(20), baseline=5.0))
+        row.layout(BoxConstraints(max_width=400))
+        assert row.size.height == pytest.approx(50.0)
+
+    def test_non_baseline_children_still_participate_in_cross_size(self) -> None:
+        """组内混着"基线对齐"与"普通对齐"时，两边都要算进去。"""
+        row = RenderRow(align=CrossAxisAlignment.START, debug_name="Row")
+        row.add(RenderSized(width=Sizing.fixed(20), height=Sizing.fixed(80)))
+        row.add(
+            RenderSized(width=Sizing.fixed(20), height=Sizing.fixed(50), baseline=40.0),
+            align=CrossAxisAlignment.BASELINE,
+        )
+        b = row.add(
+            RenderSized(width=Sizing.fixed(20), height=Sizing.fixed(20), baseline=5.0),
+            align=CrossAxisAlignment.BASELINE,
+        ).child
+        row.layout(BoxConstraints(max_width=400))
+        # 基线组 40 + 15 = 55，普通子级 80 → 取大者
+        assert row.size.height == pytest.approx(80.0)
+        assert b.offset.dy + b.size.height <= row.size.height + 1e-9
+
+
 class TestFlexWeights:
     def test_single_flex_child_takes_remaining_space(self):
         row = RenderRow(debug_name="Row")

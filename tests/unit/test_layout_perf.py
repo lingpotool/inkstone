@@ -1,12 +1,22 @@
 """布局引擎的性能与确定性验收测试。
 
-对应 docs/05 §8 的两条硬指标：
+对应 docs/05 §8 的两条硬指标，但**口径必须诚实**（docs/16 §R2.3）：
 
-    - 1000 节点全量布局 < 5ms
+    - 1000 节点**增量**布局 < 5ms   （只标脏根节点：一次根布局 + 250 次缓存查询）
+    - 1000 节点**全量**布局 < 30ms  （整棵树都标脏：每一层都真的重排）
     - 同一棵树重复布局两次，几何完全一致
 
-这两条一旦破了，界面要么卡、要么"每次打开长得不一样"，都属于回归。
-用测试钉住，比靠人记得跑 benchmark 可靠。
+**为什么必须拆成两个用例**：此前只有一个"1001 节点全量布局 0.89ms"的用例，
+但它每轮只调 `root.mark_needs_layout()`——而该方法只**向上冒泡**，
+于是第二轮起 250 个 Row 与 750 个叶子全部缓存命中。那个数字测的是
+"一次根节点布局 + 250 次缓存查询"，却被当成"全量布局"写进了文档。
+审查实测真全量 14.6ms，是它的 16 倍。
+
+这不是"数字不好看"的问题，而是**假保证**：一个建立在假测量上的预算，
+会让真正的数量级回归（比如误写成 O(n²)）从门禁底下溜过去。
+所以拆成两条并各自改名——名字要说清它到底测了什么。
+
+性能优化本身不在 R2 的范围（记入 docs/20 的后补清单）。
 """
 
 from __future__ import annotations
@@ -18,6 +28,7 @@ import pytest
 
 from inkstone.layout import (
     BoxConstraints,
+    RenderBox,
     RenderColumn,
     RenderRow,
     RenderSized,
@@ -25,18 +36,14 @@ from inkstone.layout import (
     collect_descendants,
 )
 
-# 断言的是**文档里写的那个预算**（docs/05 §8：1000 节点全量布局 < 5ms），
-# 不是更紧的"理想值"。
-#
-# 为什么不用更紧的阈值（曾经用过 2ms，结果在 CI 的 py3.10 共享 runner 上
-# 实测 2.10ms 挂了）：**墙上时钟断言在共享 runner 上天生会抖**。
-# 一个"偶尔红一次"的性能门禁比没有更糟——它会让所有人学会忽略 CI。
-# 用文档预算并把数值打出来，能抓住的是数量级回归（误写成 O(n²) 之类），
-# 那才是这个测试真正要防的东西。
-#
-# 需要更严的本地门禁时用环境变量：
-#     INKSTONE_PERF_BUDGET_MS=2 pytest -m slow
-FULL_LAYOUT_BUDGET_MS = float(os.environ.get("INKSTONE_PERF_BUDGET_MS", "5.0"))
+# 增量预算：docs/05 §8 的原值。断言的就是文档里那个数，不额外收紧——
+# 墙上时钟断言在共享 CI runner 上天生会抖，紧阈值会变成"偶尔红一次"，
+# 而一个偶尔红的门禁比没有更糟（大家会学会忽略 CI）。
+INCREMENTAL_LAYOUT_BUDGET_MS = float(os.environ.get("INKSTONE_PERF_BUDGET_MS", "5.0"))
+
+# 全量预算：本机实测 17.3ms（R1 之后；审查时为 14.6ms），按 2 倍余量定 30ms。
+# 同样**不收紧**：它的作用是抓数量级回归，不是卡毫秒。
+FULL_LAYOUT_BUDGET_MS = float(os.environ.get("INKSTONE_PERF_FULL_BUDGET_MS", "30.0"))
 
 
 def build_tree(rows: int = 250, per_row: int = 3) -> RenderColumn:
@@ -53,6 +60,15 @@ def build_tree(rows: int = 250, per_row: int = 3) -> RenderColumn:
     return root
 
 
+def mark_tree_dirty(root: RenderBox) -> None:
+    """整棵树标脏——这才是"全量布局"的前提。
+
+    `mark_needs_layout()` 只向上冒泡（父级需要重排），子级约束没变时会走缓存。
+    要真全量就得用向下的 `mark_subtree_needs_layout()`。
+    """
+    root.mark_subtree_needs_layout()
+
+
 CONSTRAINTS = BoxConstraints(max_width=1200, max_height=800)
 
 
@@ -60,8 +76,25 @@ def test_tree_has_expected_node_count():
     assert len(collect_descendants(build_tree())) == 1001
 
 
+def test_mark_tree_dirty_actually_dirty_every_node():
+    """先证明"全量"这个前提成立——否则下面那条预算又是在测缓存。"""
+    root = build_tree(rows=20, per_row=3)
+    root.layout(CONSTRAINTS)
+    assert not any(node.needs_layout for node in collect_descendants(root))
+
+    mark_tree_dirty(root)
+    assert all(node.needs_layout for node in collect_descendants(root)), (
+        "整树标脏必须覆盖每一个节点，不然「全量布局」名不副实"
+    )
+
+
 @pytest.mark.slow
-def test_full_layout_of_1000_nodes_stays_within_budget():
+def test_layout_perf_incremental():
+    """增量布局预算：只标脏根节点。
+
+    这是真实界面里最常见的帧：一个属性变了 → 冒泡到根 → 根重排，
+    子级约束没变所以全部命中缓存。**它不等于"全量布局"**。
+    """
     root = build_tree()
     for _ in range(3):  # 预热，避开首次执行的导入与分支预测开销
         root.mark_needs_layout()
@@ -74,13 +107,45 @@ def test_full_layout_of_1000_nodes_stays_within_budget():
         root.layout(CONSTRAINTS)
     elapsed_ms = (time.perf_counter() - start) / runs * 1000
 
-    # 把实测值打出来：CI 日志里能看到"离预算还有多远"，
-    # 而不是只在超了的时候才知道——趋势比门槛更有价值。
-    print(f"\n[perf] 1001 节点全量布局：{elapsed_ms:.2f}ms（预算 {FULL_LAYOUT_BUDGET_MS}ms）")
+    print(
+        f"\n[perf] 1001 节点增量布局（只标根）：{elapsed_ms:.2f}ms"
+        f"（预算 {INCREMENTAL_LAYOUT_BUDGET_MS}ms）"
+    )
+
+    assert elapsed_ms < INCREMENTAL_LAYOUT_BUDGET_MS, (
+        f"1001 节点增量布局耗时 {elapsed_ms:.2f}ms，超出 {INCREMENTAL_LAYOUT_BUDGET_MS}ms 预算"
+        f"（docs/05 §8 的指标是 5ms；可用 INKSTONE_PERF_BUDGET_MS 调整）"
+    )
+
+
+@pytest.mark.slow
+def test_layout_perf_full():
+    """真全量布局预算：整棵树都标脏，每一层都真的重排。
+
+    触发场景是真实存在的：换主题、DPI 缩放变化、检查器强制重算、
+    窗口尺寸变化导致约束全体变化。这条用例的存在本身就是"假保证"的补丁。
+    """
+    root = build_tree()
+    for _ in range(3):
+        mark_tree_dirty(root)
+        root.layout(CONSTRAINTS)
+
+    runs = 20
+    start = time.perf_counter()
+    for _ in range(runs):
+        mark_tree_dirty(root)
+        root.layout(CONSTRAINTS)
+    elapsed_ms = (time.perf_counter() - start) / runs * 1000
+
+    print(
+        f"\n[perf] 1001 节点全量布局（整树标脏）：{elapsed_ms:.2f}ms"
+        f"（预算 {FULL_LAYOUT_BUDGET_MS}ms）"
+    )
 
     assert elapsed_ms < FULL_LAYOUT_BUDGET_MS, (
-        f"1001 节点全量布局耗时 {elapsed_ms:.2f}ms，超出 {FULL_LAYOUT_BUDGET_MS}ms 预算"
-        f"（docs/05 §8 的指标是 5ms；可用 INKSTONE_PERF_BUDGET_MS 调整）"
+        f"1001 节点全量布局耗时 {elapsed_ms:.2f}ms，超出 {FULL_LAYOUT_BUDGET_MS}ms 预算。"
+        f"这是真全量（整树标脏），不是增量——别把它和增量预算搞混。"
+        f"（可用 INKSTONE_PERF_FULL_BUDGET_MS 调整）"
     )
 
 
@@ -96,7 +161,7 @@ def test_cached_layout_is_effectively_free():
         root.layout(CONSTRAINTS)
     cached_ms = (time.perf_counter() - start) / runs * 1000
 
-    root.mark_needs_layout()
+    mark_tree_dirty(root)
     start = time.perf_counter()
     root.layout(CONSTRAINTS)
     full_ms = (time.perf_counter() - start) * 1000
@@ -110,7 +175,7 @@ def test_repeated_layout_is_bit_for_bit_identical():
     root = build_tree(rows=20, per_row=3)
 
     def snapshot() -> list[tuple[float, float, float, float]]:
-        root.mark_needs_layout()
+        mark_tree_dirty(root)
         root.layout(CONSTRAINTS)
         return [
             (n.offset.dx, n.offset.dy, n.size.width, n.size.height)

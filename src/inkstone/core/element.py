@@ -78,6 +78,15 @@ class Element:
         return self._dirty
 
     @property
+    def slot(self) -> object | None:
+        """父容器给本节点的"位置信息"（如 flex 权重）。
+
+        它必须穿过 StatelessWidget / StatefulWidget 一直传到真正的渲染节点，
+        否则 `Flexible(Button())` 里的 flex 会丢——Button 是个组件，中间隔了一层。
+        """
+        return self._slot
+
+    @property
     def active(self) -> bool:
         return self._active
 
@@ -339,6 +348,12 @@ class RenderObjectElement(Element):
         widget = self.widget
         assert isinstance(widget, RenderObjectWidget)
         widget.update_render_object(self._render_object)
+        # 必须标 **layout** 脏，不能只标 paint：
+        # `update_render_object` 改的往往是几何属性（宽高、padding、flex…），
+        # 只标绘制的话布局会走约束缓存，几何永远停在旧值——表现是
+        # "属性改了、不报错、界面纹丝不动"，属于最难查的那类静默失效。
+        # `layout()` 自带约束缓存兜底，没有几何变化时开销极小。
+        self._render_object.mark_needs_layout()
         self._render_object.mark_needs_paint()
 
     def unmount(self) -> None:
@@ -466,11 +481,19 @@ class MultiChildRenderObjectElement(RenderObjectElement):
                     break
 
         updated: list[Element] = []
+        slot_changed = False
         for index, widget in enumerate(new_widgets):
             reusable = matched[index]
             if reusable is not None:
-                if reusable.widget is not widget:
-                    reusable.update(widget)
+                # 复用路径也必须把槽位传下去——只传 widget 的话，
+                # `Flexible(...)` 的 flex 权重会永远停在首次挂载时的值。
+                slot = self.slot_for(index)
+                widget_changed = reusable.widget is not widget
+                this_slot_changed = reusable.slot != slot
+                if widget_changed or this_slot_changed:
+                    reusable.update(widget, slot)
+                if this_slot_changed:
+                    slot_changed = True
                 updated.append(reusable)
             else:
                 new_element = widget.create_element()
@@ -483,10 +506,12 @@ class MultiChildRenderObjectElement(RenderObjectElement):
                 self._deactivate_child(element)
         self._children = updated
 
-        # 顺序变了就要重挂 RenderBox：Element 的身份保住了，
-        # 但渲染树里的先后顺序还得跟着变。
-        # 首次挂载时 old_children 为空，挂载本身已按顺序插入，不必重排。
-        if old_children and [id(e) for e in updated] != [id(e) for e in old_children]:
+        # 顺序变了、或某个子级的槽位（flex 权重等）变了，都要重挂 RenderBox：
+        # Element 的身份保住了，但渲染树上的挂载参数还得跟着变。
+        # 只盯着"顺序变没变"会漏掉权重变化——顺序不变时渲染树上的旧权重会一直留档。
+        # 首次挂载时 old_children 为空，挂载本身已按顺序与槽位插入，不必重排。
+        order_changed = [id(e) for e in updated] != [id(e) for e in old_children]
+        if old_children and (order_changed or slot_changed):
             self._reorder_render_objects(updated)
 
     def _reorder_render_objects(self, children: Sequence[Element]) -> None:

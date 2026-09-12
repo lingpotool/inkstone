@@ -292,9 +292,36 @@ class RenderFlex(RenderBox):
         if main_bounded:
             container_main = min(max(container_main, main_min), main_max)
 
+        # 对齐方式只取决于 item 的配置，提前算好——交叉轴定尺寸要用到它。
+        aligns = [item.align if item.align is not None else self.cross_align for item in items]
+
         max_cross = 0.0
         for i, item in enumerate(items):
             max_cross = max(max_cross, self._cross_slot(sizes[i], item.child, axis))
+
+        # 基线对齐组要额外容下"基线以下"的那部分（descender）。
+        #
+        # 参考线是组内最大 baseline，这没错；但容器交叉轴尺寸若只取
+        # `max(子级高度)`，基线偏低（或基线以下更长）的子级就会从容器底部
+        # 溢出去——而且因为它压根没参与定尺寸，连 overflow 都不会报。
+        # 正确算法（Flutter 同款）：`max(above) + max(below)`。
+        if any(a is CrossAxisAlignment.BASELINE for a in aligns):
+            above = 0.0
+            below = 0.0
+            for i, item in enumerate(items):
+                if aligns[i] is not CrossAxisAlignment.BASELINE:
+                    continue
+                slot = self._cross_slot(sizes[i], item.child, axis)
+                near = self._near_cross_margin(item.child, axis)
+                baseline = item.child.baseline
+                if baseline is None:
+                    # 没有基线的子级按"顶边贴参考线"处理，整块算进 above
+                    above = max(above, slot)
+                    continue
+                offset = baseline + near
+                above = max(above, offset)
+                below = max(below, slot - offset)
+            max_cross = max(max_cross, above + below)
 
         container_cross = max(max_cross, cross_min)
         if self.cross_align is CrossAxisAlignment.STRETCH and cross_max < INF:
@@ -315,7 +342,6 @@ class RenderFlex(RenderBox):
         main_positions = distribute_main(main_slots, actual_main, self.justify, self.gap)
 
         cross_slots = [self._cross_slot(sizes[i], items[i].child, axis) for i in range(n)]
-        aligns = [item.align if item.align is not None else self.cross_align for item in items]
         baselines: list[float | None] = []
         for item in items:
             b = item.child.baseline

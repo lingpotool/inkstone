@@ -24,8 +24,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from enum import Enum
 
 from ..layout import BoxConstraints, RenderBox, Size
@@ -35,11 +36,24 @@ from .element import Element
 from .render_object import PaintContext
 from .widget import Widget
 
-__all__ = ["MAX_BUILD_ROUNDS", "BuildOwner", "FrameError", "FramePhase"]
+__all__ = [
+    "MAX_BUILD_FAILURES_PER_FRAME",
+    "MAX_BUILD_ROUNDS",
+    "BuildError",
+    "BuildFailure",
+    "BuildOwner",
+    "FrameError",
+    "FramePhase",
+]
 
 # 一帧内允许的最大重建轮数。正常情况 1 轮就收敛；
 # 超过说明 build 里有"无条件 set_state"这类死循环。
 MAX_BUILD_ROUNDS = 20
+
+# 同一帧内一个节点连续失败多少次就本帧不再重试（下一帧接着试）。
+# 不设上限的话，"每次 build 都抛"的节点会把一帧拖成死循环——
+# 那就把"响亮失败"变成了"卡死"，比静默更糟。
+MAX_BUILD_FAILURES_PER_FRAME = 3
 
 
 class FramePhase(Enum):
@@ -70,6 +84,34 @@ class FrameError(RuntimeError):
         return "\n".join(lines)
 
 
+@dataclass(frozen=True, slots=True)
+class BuildFailure:
+    """一个节点在 build 阶段抛出的异常，连同它的节点路径。"""
+
+    path: str
+    exception: BaseException
+
+    def describe(self) -> str:
+        return f"{self.path}: {type(self.exception).__name__}: {self.exception}"
+
+
+class BuildError(RuntimeError):
+    """一帧内一个或多个节点的 build 失败——聚合上报，一个都不掩盖。
+
+    为什么要聚合而不是"遇到第一个就抛"：那样后面所有脏节点都会停在
+    "widget 已换、子树没更新"的不一致态，而且下一帧也不会重试。
+    这里的语义是：**其余节点照常完成本帧**，失败的节点保持脏等下一帧，
+    最后再把这批错误一起响亮地报出来（铁律 5：不许静默）。
+    """
+
+    def __init__(self, failures: Sequence[BuildFailure]) -> None:
+        self.failures: tuple[BuildFailure, ...] = tuple(failures)
+        lines = [f"BuildError: 一帧内有 {len(self.failures)} 处 build 抛出异常"]
+        lines.extend(f"  {failure.describe()}" for failure in self.failures)
+        lines.append("  说明: 其余节点已完成本帧；失败节点保持脏，下一帧会重试")
+        super().__init__("\n".join(lines))
+
+
 class BuildOwner:
     """脏集合与帧调度。整棵组件树共享一个。"""
 
@@ -84,7 +126,8 @@ class BuildOwner:
         self._root: Element | None = None
         # 环境主题：组件通过 `context.theme` 拿到它，不必层层透传。
         # 放在 BuildOwner 是因为它本来就是整棵树的上下文根。
-        self.theme: Theme = theme if theme is not None else default_theme()
+        # 存 `_theme` 而不是直接 `theme`：`theme` 是 property，setter 要触发全树重建。
+        self._theme: Theme = theme if theme is not None else default_theme()
         # 文本引擎：Text / Input / Button 排版时通过 `context.text_engine` 取。
         # 与 theme 并列放在这里，理由相同——它是整棵树共享的**有状态**服务
         # （带度量缓存与整形缓存），每帧重建会让排版性能垮掉。
@@ -92,6 +135,17 @@ class BuildOwner:
         # 计数器：测试用它验证"批处理"与"帧数"，调试时也能看出有没有过度重建
         self.build_count: int = 0
         self.frame_count: int = 0
+        # 本帧 build 阶段的错误（每帧开头清空）。失败节点会保持脏并在下一帧重试，
+        # 但错误不会消失——`flush_build` 结束时若非空就抛聚合的 `BuildError`。
+        self.errors: list[BuildFailure] = []
+        # 帧调度出口："需要一帧"时回调一次。app 层、后端 vsync、motion 包
+        # 都接在这里，所以签名保持最简单形态（无参数、无返回值）。
+        #
+        # 它补上的是闭环里缺的那一环：docs/06 §4 承诺"时钟由后端注入、vsync 对齐"，
+        # 但此前 `schedule_build_for` 只入队，没有任何"该画下一帧了"的出口，
+        # 于是 set_state → 屏幕刷新这条闭环压根不存在。
+        self.on_frame_scheduled: Callable[[], None] | None = None
+        self._frame_scheduled = False
 
     # ------------------------------------------------------------ 查询
 
@@ -106,6 +160,40 @@ class BuildOwner:
     @property
     def dirty_count(self) -> int:
         return len(self._dirty)
+
+    # ------------------------------------------------------------ 环境主题
+
+    @property
+    def theme(self) -> Theme:
+        """当前环境主题。组件通过 `context.theme` 活读它。"""
+        return self._theme
+
+    @theme.setter
+    def theme(self, value: Theme) -> None:
+        """换主题：把整棵树标脏，下一帧重新解析所有样式。
+
+        这是最小版（正式机制——InheritedElement / signals——在 docs/20）。
+        它补的是"换肤承诺"里缺失的那一环：`Element.theme` 是**活读** owner 的，
+        但样式只在 mount / update 的 `_apply_style` 时被写进渲染对象——
+        运行时不标脏重建的话，整棵树会静默保留旧色：主题"换了"，界面没动。
+
+        在 layout / paint 阶段换主题会抛 `FrameError`（与其它状态变更一致）。
+        """
+        if value is self._theme:
+            return
+        self._theme = value
+        self._mark_all_needs_build()
+
+    def _mark_all_needs_build(self) -> None:
+        """整棵树标脏重建。主题是整棵树的上下文，没有局部生效的余地。"""
+        root = self._root
+        if root is None:
+            return
+        pending: list[Element] = [root]
+        while pending:
+            node = pending.pop()
+            node.mark_needs_build()
+            node.visit_children(pending.append)
 
     @property
     def root_render_object(self) -> RenderBox | None:
@@ -147,12 +235,47 @@ class BuildOwner:
                 phase=self._phase.value,
                 path=element.describe_path(),
             )
+        was_empty = not self._dirty
         self._dirty[id(element)] = element
+        if was_empty:
+            self.request_frame()
+
+    def request_frame(self) -> None:
+        """声明"需要一帧"，同一帧内只会通知一次。
+
+        脏集合从空变非空时触发一次 `on_frame_scheduled`；`begin_frame` 末尾
+        重置"已通知"标志，所以下一帧的标脏还能再触发（注册一次、帧末注销）。
+        没有回调时静默通过——headless 测试与纯布局场景不需要它。
+
+        纯绘制脏（不经过 `mark_needs_build`）的场景由 app 层显式调它：
+        `RenderObject` 拿不到 `BuildOwner`，那条路只能由知道 owner 的那一层来接。
+        """
+        if self._frame_scheduled:
+            return
+        self._frame_scheduled = True
+        callback = self.on_frame_scheduled
+        if callback is not None:
+            callback()
 
     def flush_build(self) -> None:
-        """重建所有脏节点，按 depth 从浅到深，保证父级先于子级。"""
+        """重建所有脏节点，按 depth 从浅到深，保证父级先于子级。
+
+        **单个节点 build 抛异常不会打断整批。** 异常被记进 `self.errors`，
+        该节点保持脏（下一帧重试），其余节点照常完成本帧；全部处理完之后
+        如果 `self.errors` 非空，抛聚合的 `BuildError`。
+
+        为什么不能"遇到第一个就抛"：`rebuild()` 是先清 `_dirty` 再执行
+        `perform_rebuild()`，队列也已经整批取空——异常一冒泡，该节点就停在
+        "widget 已换、子树没更新"的不一致态，而且下一帧不重试、没有任何可见错误。
+        响亮失败是对的，但"响亮"不等于"让半棵树停在旧状态"。
+        """
         with self._phase_scope(FramePhase.BUILD):
+            self.errors.clear()
             rounds = 0
+            # 本帧内各节点的失败次数。跨帧重置——"连续失败"是按帧算的。
+            failures: dict[int, int] = {}
+            # 本帧放弃重试、但要留给下一帧的节点
+            retry_next_frame: list[Element] = []
             while self._dirty:
                 rounds += 1
                 if rounds > MAX_BUILD_ROUNDS:
@@ -164,9 +287,36 @@ class BuildOwner:
                 batch = sorted(self._dirty.values(), key=lambda e: e.depth)
                 self._dirty.clear()
                 for element in batch:
-                    if element.active and element.dirty:
+                    if not (element.active and element.dirty):
+                        continue
+                    key = id(element)
+                    if failures.get(key, 0) >= MAX_BUILD_FAILURES_PER_FRAME:
+                        # 本帧不再试，但保持脏——下一帧从头再来
+                        element._dirty = True
+                        retry_next_frame.append(element)
+                        continue
+                    try:
                         element.rebuild()
-                        self.build_count += 1
+                    except Exception as exc:  # 错误边界必须接住一切，不能让单个节点掀翻整批
+                        failures[key] = failures.get(key, 0) + 1
+                        # rebuild 已经清了脏标记，这里必须按回去：
+                        # 失败节点要保持脏，否则下一帧它永远不会被重试。
+                        element._dirty = True
+                        self.errors.append(
+                            BuildFailure(path=element.describe_path(), exception=exc)
+                        )
+                        if failures[key] >= MAX_BUILD_FAILURES_PER_FRAME:
+                            retry_next_frame.append(element)
+                        else:
+                            self._dirty[key] = element  # 本帧内再试一次
+                        continue
+                    self.build_count += 1
+            # 帧末把"本帧放弃重试但仍脏"的节点放回队列，下一帧接着试。
+            # 注意是在 while 循环之后放回，所以不会把本帧拖成死循环。
+            for element in retry_next_frame:
+                self._dirty[id(element)] = element
+            if self.errors:
+                raise BuildError(self.errors)
 
     def flush_layout(self, constraints: BoxConstraints) -> Size | None:
         if self.root_render_object is None:
@@ -194,15 +344,23 @@ class BuildOwner:
         所以 devtools 用这个标志。
         """
         self.frame_count += 1
-        self.flush_build()
-        size = self.flush_layout(constraints)
-        if context is not None:
-            if force_repaint:
-                root = self.root_render_object
-                if root is not None:
-                    _force_paint_all(root)
-            self.flush_paint(context)
-        return size
+        try:
+            self.flush_build()
+            size = self.flush_layout(constraints)
+            if context is not None:
+                if force_repaint:
+                    root = self.root_render_object
+                    if root is not None:
+                        # 整树重画：`mark_needs_paint` 只标自身并冒泡到根，
+                        # 已清过的子级会被 paint_tree 跳过——所以要一路标到叶子。
+                        root.mark_subtree_needs_paint()
+                self.flush_paint(context)
+            return size
+        finally:
+            # 帧末注销"已通知"标志：下一帧再标脏还能再通知一次。
+            # 放在 finally 里，帧中途抛错（如 BuildError）也不会把标志卡住——
+            # 卡住的话"需要一帧"就再也通知不出去了，那是更糟的静默失败。
+            self._frame_scheduled = False
 
     # ------------------------------------------------------------ 内部
 
@@ -214,14 +372,3 @@ class BuildOwner:
             yield
         finally:
             self._phase = previous
-
-
-def _force_paint_all(root: RenderBox) -> None:
-    """把整棵渲染子树标脏。`mark_needs_paint` 只标自身与冒泡到根，
-    但"整树重画"需要把每个节点都标记——否则已清过的子级会被 paint_tree 跳过。
-    """
-    pending: list[RenderBox] = [root]
-    while pending:
-        node = pending.pop()
-        node._needs_paint = True
-        pending.extend(node.children)
