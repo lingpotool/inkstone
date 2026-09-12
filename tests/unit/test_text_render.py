@@ -738,7 +738,7 @@ class TestLigatureRasterization:
         from inkstone.backend import FontLibrary, FontSpec, HbFtFontEngine
 
         font = build_kerned_font(tmp_path / "k.ttf")
-        library = FontLibrary(directories=())
+        library = FontLibrary(directories=(), embedded=False)
         library.register_file(font)
         engine = HbFtFontEngine(library)
         run = engine.shape_line("ffi", FontSpec(families=("Kern Test",), size=20.0))

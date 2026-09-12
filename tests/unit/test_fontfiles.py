@@ -25,6 +25,7 @@ from inkstone.backend.fontfiles import (
     DEFAULT_FALLBACK_FAMILY,
     FontLibrary,
     default_font_directories,
+    embedded_font_path,
     generic_candidates,
     order_weights,
 )
@@ -81,8 +82,13 @@ def build_font(
 
 @pytest.fixture
 def library(tmp_path: Path) -> FontLibrary:
-    """一个只扫 `tmp_path` 的字体库（不碰真实系统字体目录）。"""
-    return FontLibrary(directories=(tmp_path,))
+    """一个只扫 `tmp_path` 的字体库（不碰真实系统字体目录）。
+
+    `embedded=False` 是**刻意**的：这些测试测的是"扫描目录与匹配字重"，
+    内嵌兜底字体（R4.4）是另一件事，混进来只会让"索引里到底有什么"
+    变得含糊。内嵌字体自己的测试在 `TestEmbeddedFallback`。
+    """
+    return FontLibrary(directories=(tmp_path,), embedded=False)
 
 
 # ---------------------------------------------------------------- 字重规则
@@ -346,3 +352,109 @@ class TestGenericFamilies:
     def test_default_directories_are_existing_paths(self):
         for directory in default_font_directories():
             assert directory.is_dir()
+
+
+# ---------------------------------------------------------------- 内嵌兜底字体
+
+
+class TestEmbeddedFallback:
+    """R4.4：内嵌兜底字体——"中文不出豆腐块"从赌运气变成结构保证。
+
+    回退链的终点。系统里一个能用的字体都没有时（精简容器、CI 机器、
+    刚装好的系统），中文会渲染成一排豆腐块。有了这份内嵌字体，
+    那件事不再取决于用户装了什么。
+    """
+
+    def test_the_font_ships_with_the_package(self):
+        path = embedded_font_path()
+        assert path is not None, "内嵌字体没打进包里——打包配置漏了资源文件"
+        assert path.is_file()
+
+    def test_the_license_ships_alongside_it(self):
+        """OFL 要求随字体分发许可。缺了它是**许可问题**，不是小事。"""
+        path = embedded_font_path()
+        assert path is not None
+        license_file = path.with_name("OFL.txt")
+        assert license_file.is_file(), "OFL.txt 必须和字体一起分发"
+        text = license_file.read_text(encoding="utf-8")
+        assert "SIL OPEN FONT LICENSE" in text.upper()
+
+    def test_size_is_within_budget(self):
+        """docs/18 §R4.4 的体积目标是 < 5MB。超了要么换档要么改文档口径。"""
+        path = embedded_font_path()
+        assert path is not None
+        size_mb = path.stat().st_size / 1e6
+        assert size_mb < 5.0, f"内嵌字体 {size_mb:.2f} MB，超出 5MB 目标"
+
+    def test_family_name_matches_the_constant(self):
+        path = embedded_font_path()
+        assert path is not None
+        font = TTFont(str(path), lazy=True)
+        family = font["name"].getDebugName(16) or font["name"].getDebugName(1)
+        assert family == DEFAULT_FALLBACK_FAMILY
+
+    def test_the_default_library_registers_it(self):
+        library = FontLibrary(directories=())
+        assert library.stats()["embedded"] == 1
+        assert library.has_family(DEFAULT_FALLBACK_FAMILY)
+
+    def test_unknown_families_resolve_to_it(self):
+        library = FontLibrary(directories=())
+        record = library.resolve(("完全不存在的字体", "也不存在"))
+        assert record.family == DEFAULT_FALLBACK_FAMILY
+        assert record.is_fallback
+
+    def test_disabling_it_gives_a_truly_empty_library(self):
+        """`embedded=False` 必须真的没有兜底——否则"响亮失败"那类测试会永远通过。"""
+        library = FontLibrary(directories=(), embedded=False)
+        assert library.stats()["embedded"] == 0
+        assert library.families() == ()
+        with pytest.raises(FontMetricsError):
+            library.resolve(("不存在",))
+
+    @pytest.mark.parametrize("char", ["A", "中", "あ", "é", "Ω", "П", "→", "　"])
+    def test_multilingual_coverage(self, char: str):
+        """t3 口径：拉丁（含中欧）+ 中文 + 日文假名 + 希腊 + 西里尔 + 符号。
+
+        "多语言基本盘几乎免费"——从"只有中文 + ASCII"加到这些只多 0.17MB，
+        因为拉丁/希腊/西里尔/假名加起来才 640 个字形。
+        """
+        path = embedded_font_path()
+        assert path is not None
+        cmap = TTFont(str(path), lazy=True).getBestCmap()
+        assert ord(char) in cmap, f"内嵌字体缺 {char!r}"
+
+    def test_rare_hanzi_are_a_documented_gap(self):
+        """生僻字**不在**覆盖范围内——这是文档化的取舍，不是漏了。
+
+        GB2312 收 6763 个常用字；汉字基本区全部 20992 字要 7.31MB（+5.5MB）。
+        """
+        path = embedded_font_path()
+        assert path is not None
+        cmap = TTFont(str(path), lazy=True).getBestCmap()
+        assert ord("龘") not in cmap
+
+    def test_common_hanzi_coverage_is_complete(self):
+        """GB2312 的 6763 个汉字一个都不能少——少一个就是"常用字出豆腐块"。"""
+        path = embedded_font_path()
+        assert path is not None
+        cmap = set(TTFont(str(path), lazy=True).getBestCmap())
+        missing = [char for char in _gb2312_hanzi() if ord(char) not in cmap]
+        assert not missing, f"缺 {len(missing)} 个 GB2312 汉字，例如 {missing[:5]}"
+
+
+def _gb2312_hanzi() -> str:
+    """GB2312 的全部汉字（与 `tools/build_embedded_font.py` 同一套枚举口径）。"""
+    out: list[str] = []
+    for high in range(0xA1, 0xF8):
+        for low in range(0xA1, 0xFF):
+            try:
+                char = bytes((high, low)).decode("gb2312")
+            except UnicodeDecodeError:
+                continue
+            if "\u4e00" <= char <= "\u9fff":
+                out.append(char)
+    return "".join(out)
+
+
+# ---------------------------------------------------------------- 内嵌兜底字体

@@ -55,6 +55,7 @@ __all__ = [
     "FontRecord",
     "default_font_directories",
     "default_font_library",
+    "embedded_font_path",
     "generic_candidates",
     "order_weights",
 ]
@@ -248,6 +249,20 @@ def default_font_directories() -> tuple[pathlib.Path, ...]:
 #: 会被扫描的字体文件后缀。`.ttc`/`.otc` 是集合（一个文件多个面）。
 _FONT_SUFFIXES = (".ttf", ".otf", ".ttc", ".otc")
 
+#: 内嵌兜底字体的文件名（由 `tools/build_embedded_font.py` 产出）
+_EMBEDDED_FONT = "InkstoneSans-Regular.otf"
+
+
+def embedded_font_path() -> pathlib.Path | None:
+    """内嵌兜底字体的路径；资源被裁剪掉时返回 `None`。
+
+    返回 `None` 而不是抛异常：字体缺失应当降级为"回退到系统默认"（还能跑），
+    而不是让 `import` 就失败。但**"缺了"必须能查**——
+    `FontLibrary.stats()["embedded"]` 会如实报 0/1。
+    """
+    path = pathlib.Path(__file__).with_name("fonts_data") / _EMBEDDED_FONT
+    return path if path.is_file() else None
+
 
 @dataclass
 class _FaceInfo:
@@ -354,6 +369,9 @@ class FontLibrary:
     #: 只注册用户字体的场景），若把它当成"没指定"去扫全系统，
     #: 就会得到一个悄悄多出 300 个族的库——那种惊喜正是本项目最讨厌的。
     directories: tuple[pathlib.Path, ...] | None = None
+    #: 是否注册内嵌兜底字体（默认注册）。传 `False` 得到"一个字体都没有"的库——
+    #: 测试要隔离，或者要诊断"没有兜底字体时会怎样"。
+    embedded: bool = True
     #: 扫描时跳过的文件（损坏 / 读不了）。**必须能查**，否则就是静默失败。
     skipped: list[tuple[str, str]] = field(default_factory=list)
 
@@ -364,6 +382,19 @@ class FontLibrary:
     def __post_init__(self) -> None:
         if self.directories is None:
             self.directories = default_font_directories()
+        if self.embedded:
+            self._register_embedded()
+
+    def _register_embedded(self) -> None:
+        """注册内嵌兜底字体。它是回退链的**终点**（docs/18 §R4.4）。
+
+        失败会抛 `FontMetricsError` 而不是被吞掉：打包漏了资源文件、
+        或者资源被截断，都是**构建问题**，必须当场看见——
+        静默降级会让"中文在精简环境里变豆腐块"变成一个要查半天的问题。
+        """
+        path = embedded_font_path()
+        if path is not None:
+            self.register_file(path, is_fallback=True)
 
     @property
     def _dirs(self) -> tuple[pathlib.Path, ...]:
@@ -502,6 +533,7 @@ class FontLibrary:
             "faces": sum(len(v) for v in self._families.values()),
             "skipped": len(self.skipped),
             "directories": len(self._dirs),
+            "embedded": 1 if self._fallback is not None else 0,
         }
 
 

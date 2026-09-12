@@ -66,6 +66,25 @@ __all__ = ["HbFtFontEngine", "hbft_font_engine"]
 #: 26.6 定点的小数位数：HarfBuzz 与 FreeType 的位置单位都是 1/64 像素
 _POSITION_SCALE = 64.0
 
+#: 探测字符覆盖时用的字号。cmap 与字号无关，随便取一个只为能开 face。
+_COVERAGE_PROBE_SIZE = 12.0
+
+
+def _coverage_sample(text: str) -> str:
+    """用来判断"这个族能不能承载这段文本"的样本字符。
+
+    取**第一个非空白字符**。前提是"一个 run 的脚本是齐的"——文本层按脚本
+    切分（`split_by_script`），所以一个 run 里不会既有拉丁又有汉字。
+
+    为什么不逐字符全查：没有哪个字体能覆盖所有字符（emoji 就不行），
+    逐字符要求"全都能画"会让每个族都被否掉、回退链直接失效。
+    也不逐字符要求"有一个能画"——那等于没查。
+    """
+    for char in text:
+        if not char.isspace():
+            return char
+    return ""
+
 
 @dataclass(slots=True)
 class _Face:
@@ -102,7 +121,9 @@ class HbFtFontEngine:
         # 键的「文本位」可能是 str（按文本取）或 tuple[int, ...]（按字形 id 取）：
         # 两条路径的结果不能互相顶掉（同一个字形 id 序列与某段文本可能不同）
         self._mask_cache: dict[tuple[object, int, str], GlyphMask] = {}
-        self._glyph_coverage: dict[tuple[str, int], int] = {}
+        # 覆盖探测的缓存：(族, 基字符) → 能不能画。
+        # 排版每行都要问几次，而 cmap 查询虽快也不该重复做
+        self._glyph_coverage: dict[tuple[str, str], bool] = {}
 
     # ------------------------------------------------------------ 字体发现
 
@@ -138,16 +159,18 @@ class HbFtFontEngine:
         """
         if not char:
             return False
+        base = char[0]
+        cached = self._glyph_coverage.get((family, base))
+        if cached is not None:
+            return cached
         record = self._find(family)
         if record is None:
+            self._glyph_coverage[(family, base)] = False
             return False
-        face = self._face_for(record, self._size_hint(family))
-        return bool(face.ft.get_char_index(ord(char[0])))
-
-    def _size_hint(self, family: str) -> float:
-        """`has_glyph` 只需要一个"随便什么字号"来开 face（cmap 与字号无关）。"""
-        del family
-        return 12.0
+        face = self._face_for(record, _COVERAGE_PROBE_SIZE)
+        covered = bool(face.ft.get_char_index(ord(base)))
+        self._glyph_coverage[(family, base)] = covered
+        return covered
 
     # ------------------------------------------------------------ 度量
 
@@ -165,7 +188,7 @@ class HbFtFontEngine:
         if hit is not None:
             return hit
 
-        record = self._library_or_fallback(spec)
+        record = self._library_or_fallback(spec, text)
         if not text:
             empty = TextMetrics(width=0.0, ascent=0.0, descent=0.0, advance=())
             run = GlyphRun(text=text, placements=(), metrics=empty, start=0, end=0)
@@ -373,24 +396,32 @@ class HbFtFontEngine:
     def _find(self, family: str) -> FontRecord | None:
         return self.library.find(family, weight=FontWeight.REGULAR, slant=FontSlant.NORMAL)
 
-    def _library_or_fallback(self, spec: FontSpec) -> FontRecord:
+    def _library_or_fallback(self, spec: FontSpec, text: str = "") -> FontRecord:
         """按回退链挑字体；链上全无命中时用内嵌兜底字体。
 
-        内嵌兜底字体缺席时抛 `FontMetricsError`——**响亮失败**。
-        静默挑一个系统字体的表现是"中文变方块"，而报错能让人一眼看出
-        是环境没准备好（缺 R4.4 的内嵌字体）。
+        **覆盖探测也在这里做**（R4.4 补的，是一个真 bug 的修法）：
+        回退链的终点是通用名（`sans-serif`），而通用名会展开成平台默认族
+        （Windows 上是 `Segoe UI`）——**它存在，但一个汉字都没有**。
+        只按"族存在"挑的话，中文 run 会落到它头上、渲染成一排豆腐块，
+        而这恰恰是内嵌兜底字体要防的事。文本层那条按脚本的覆盖过滤管不到
+        通用名端点（它总是被保留），所以这道判断必须在**知道文本的地方**做。
+
+        内嵌兜底字体也缺席时抛 `FontMetricsError`——**响亮失败**。
+        静默挑一个画不出字的字体，表现是"中文变方块"；报错能让人一眼看出
+        是环境没准备好。
         """
         library = self.library
+        sample = _coverage_sample(text)
         for family in spec.families:
             hit = library.find(family, weight=spec.weight, slant=spec.slant)
-            if hit is not None:
+            if hit is not None and (not sample or self.has_glyph(hit.family, sample)):
                 return hit
         if library._fallback is not None:
             return library._fallback
         raise FontMetricsError(
             f"回退链里一个族都没找到：{list(spec.families)}；"
             f"内嵌兜底字体（{DEFAULT_FALLBACK_FAMILY}）也还没注册。"
-            f"R4.4 落地前，请确认系统字体可用或先 register_file(..., is_fallback=True)"
+            f"请确认系统字体可用，或先 register_file(..., is_fallback=True)"
         )
 
     def _face_for(self, record: FontRecord, size: float) -> _Face:

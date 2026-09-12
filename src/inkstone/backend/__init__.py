@@ -51,6 +51,7 @@ from .fontfiles import (
     FontRecord,
     default_font_directories,
     default_font_library,
+    embedded_font_path,
     generic_candidates,
     order_weights,
 )
@@ -97,6 +98,7 @@ __all__ = [
     "default_font_directories",
     "default_font_library",
     "default_font_table",
+    "embedded_font_path",
     "gdi_font_engine",
     "generic_candidates",
     "hbft_font_engine",

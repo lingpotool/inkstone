@@ -27,8 +27,13 @@ from inkstone.backend import (
 
 
 def engine_for(*paths: Path, **kwargs: object) -> HbFtFontEngine:
-    """建一个只认给定字体文件的引擎（`directories=()` = 一个系统字体都不扫）。"""
-    library = FontLibrary(directories=())
+    """建一个只认给定字体文件的引擎。
+
+    `directories=()` + `embedded=False` = **一个字体都没有的库**：
+    系统字体目录不扫，内嵌兜底字体也不注册。测引擎行为时必须这样隔离，
+    否则"找不到族时会不会响亮失败"这类测试会因为兜底字体而永远通过。
+    """
+    library = FontLibrary(directories=(), embedded=False)
     for path in paths:
         library.register_file(path, **kwargs)  # type: ignore[arg-type]
     return HbFtFontEngine(library)
@@ -322,3 +327,70 @@ class TestCaching:
         engine = HbFtFontEngine()
         assert engine.stats()["faces"] == 0
         assert engine.stats()["fonts_loaded"] == 0
+
+
+class TestEmbeddedFontRendering:
+    """R4.4：**中文永不出豆腐块**——这条是端到端的，不是查表。
+
+    查 cmap 只能证明"字体里有这个字"；真正要证明的是"没有系统字体时，
+    排版 + 光栅化这条链能把汉字画出来"。所以这里用一个**一个系统字体都不扫**
+    的库，从整形走到像素。
+    """
+
+    @staticmethod
+    def _empty_library_engine() -> HbFtFontEngine:
+        """不扫系统字体目录、但保留内嵌兜底字体的引擎（真实部署的精简形态）。"""
+        return HbFtFontEngine(FontLibrary(directories=()))
+
+    def test_chinese_is_measurable_without_any_system_font(self):
+        engine = self._empty_library_engine()
+        spec = FontSpec(families=("sans-serif",), size=14.0)
+        metrics = engine.measure_text("中文测试", spec)
+        assert metrics.width > 0
+        assert metrics.advance == pytest.approx((14.0, 14.0, 14.0, 14.0), abs=0.02)
+
+    def test_chinese_is_rasterizable_without_any_system_font(self):
+        """**这条就是"不出豆腐块"的证明**：掩码里有真墨迹。"""
+        engine = self._empty_library_engine()
+        mask = engine.mask_for("中", 20.0, DEFAULT_FALLBACK_FAMILY, 20.0)
+        assert mask.width > 0 and mask.height > 0
+        assert any(mask.coverage), "汉字画出来是空的——那就是豆腐块"
+
+    def test_a_latin_only_system_font_falls_back_for_chinese(self, tmp_path: Path):
+        """系统字体只覆盖拉丁时，中文 run 必须**回退**到内嵌字体。
+
+        这是 `has_glyph` 驱动回退的真实场景：`Segoe UI` 装是装了，
+        但它一个汉字都没有。回退链若只按"族存在"判断，中文会全变豆腐块。
+        """
+        latin = build_font(tmp_path / "latin.ttf", family="Latin Only")
+        library = FontLibrary(directories=())
+        library.register_file(latin)
+        engine = HbFtFontEngine(library)
+
+        run = engine.shape_line("中文", FontSpec(families=("Latin Only",), size=14.0))
+        assert run.placements, "应当有簇"
+        assert run.placements[0].family == DEFAULT_FALLBACK_FAMILY, (
+            "画不出汉字的族不该被选中——回退链要按覆盖探测，不只看族存在"
+        )
+
+    def test_the_fallback_family_is_always_present(self):
+        engine = self._empty_library_engine()
+        assert engine.has_family(DEFAULT_FALLBACK_FAMILY)
+        assert engine.has_glyph(DEFAULT_FALLBACK_FAMILY, "中")
+        assert engine.has_glyph(DEFAULT_FALLBACK_FAMILY, "A")
+
+    def test_flat_bottom_cjk_glyphs_share_baseline_row(self):
+        """R4.7：小字号下平底汉字的墨迹底沿必须在同一像素行（容差 1px）。
+
+        起因是肉眼发现"一行字里后几个字不在一条线上"。排查结论：整形与
+        定位数据完全正确（同一字体、共享基线、y_offset 全 0），波动来自
+        字形光栅内部的 hinting 级差异。这条测试把"底沿对齐"钉成不变量——
+        未来改动 hinting 模式或替换内嵌字体时，真错位会在这里红。
+        """
+        engine = self._empty_library_engine()
+        bottoms = []
+        for ch in "版本跨平台原生":  # 全是平底字：底沿在无错位的光栅下应当一致
+            mask = engine.mask_for(ch, 13.0, DEFAULT_FALLBACK_FAMILY, 13.0)
+            assert mask.height > 0, f"{ch} 没有墨迹"
+            bottoms.append(mask.top + mask.height)
+        assert max(bottoms) - min(bottoms) <= 1, f"平底汉字底沿不齐: {bottoms}"
