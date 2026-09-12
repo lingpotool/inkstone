@@ -9,7 +9,7 @@
 
 import pytest
 
-from inkstone.gfx import DisplayList, DisplayListRecorder, SoftwareRasterizer
+from inkstone.gfx import DisplayList, DisplayListRecorder, FrameBuffer, SoftwareRasterizer
 from inkstone.gfx.color import Color
 from inkstone.layout import (
     BoxConstraints,
@@ -223,6 +223,15 @@ def _record(root: RenderBox, width: int, height: int) -> DisplayList:
     return recorder.finish(width, height)
 
 
+def _rasterize(display_list: DisplayList) -> FrameBuffer:
+    """走一遍帧生命周期（R3.1 之后光栅的唯一入口）。"""
+    raster = SoftwareRasterizer()
+    raster.begin_frame(Size(float(display_list.width), float(display_list.height)), 1.0)
+    raster.execute(display_list)
+    raster.end_frame()
+    return raster.screenshot()
+
+
 class TestViewportClipping:
     """滚出视口的内容必须被裁掉——`paint_tree` 只 translate，不 clip。"""
 
@@ -286,7 +295,7 @@ class TestViewportClipping:
         recorder = DisplayListRecorder()
         recorder.fill_rect(Rect(0.0, 0.0, 160.0, 140.0), _BG)
         holder.paint_tree(recorder)
-        fb = SoftwareRasterizer().rasterize(recorder.finish(160, 140))
+        fb = _rasterize(recorder.finish(160, 140))
 
         # 视口 = (20,20) 起、120×100；外面那一圈必须是底色
         for y in range(140):

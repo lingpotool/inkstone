@@ -34,14 +34,31 @@ import struct
 import zlib
 from binascii import crc32
 from dataclasses import dataclass
+from enum import Enum
 
-from ...layout.types import Rect
+from ...layout.types import Rect, Size
 from ..color import Color
-from ..display_list import DisplayList, FillRectOp, Op, StrokeRectOp, TextRunOp
+from ..display_list import (
+    DisplayList,
+    FillRectOp,
+    Op,
+    PathFillOp,
+    PathStrokeOp,
+    StrokeRectOp,
+    TextRunOp,
+)
 from ..glyphs import BuiltinGlyphProvider, GlyphProvider, rect_of_mask
-from .base import FrameBuffer, RasterBackend
+from .base import FrameBuffer, RasterBackend, RasterError
 
 __all__ = ["SoftwareRasterizer", "encode_png"]
+
+
+class _FramePhase(Enum):
+    """帧生命周期所处的位置。顺序错了就响亮地失败，不猜。"""
+
+    IDLE = "idle"
+    FRAME = "frame"
+    ENDED = "ended"
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +111,11 @@ class SoftwareRasterizer(RasterBackend):
 
     `samples` 只影响垂直方向的细腻度（水平永远是精确的）。
     默认 4 已经远超"每像素 16 点子采样"的质量。
+
+    实现的是 docs/03 §2 的帧生命周期（R3.1 重塑）：
+    `begin_frame → execute → end_frame → screenshot`。
+    帧缓冲归后端所有，跨 `execute` 调用**保持内容**——这样 `clip` 才能真正
+    当脏矩形用（区域外保留上一帧）。想整幅重画就传 `clip=None`。
     """
 
     def __init__(
@@ -101,6 +123,8 @@ class SoftwareRasterizer(RasterBackend):
         *,
         samples: int = 4,
         glyph_provider: GlyphProvider | None = None,
+        subpixel_glyphs: bool = False,
+        fast_paths: bool = True,
     ) -> None:
         if samples < 1:
             raise ValueError(f"垂直采样数必须 ≥ 1，收到 {samples}")
@@ -113,14 +137,104 @@ class SoftwareRasterizer(RasterBackend):
         self._glyphs: GlyphProvider = (
             glyph_provider if glyph_provider is not None else BuiltinGlyphProvider()
         )
+        # 字形落位是否保留亚像素相位（见 `_blit_mask` 的说明）。
+        # **默认关**，因为默认的字形源是位图掩码：它本来就按像素栅格生成，
+        # 用小数相位去重采样只会让笔画变软（实测：text_block 5.6% 的像素变化，
+        # 其中 2799 个是"变亮"，也就是笔画被摊到邻像素上）。
+        # R4 换上 FreeType 的**轮廓**掩码后，掩码本身按相位生成、不会变软，
+        # 那时把它打开才是收益。
+        self._subpixel_glyphs = subpixel_glyphs
+        # 快路径开关（R3.5）。默认开；关掉是为了**证明快慢两条路径等价**
+        # （测试里逐像素比对），也方便在"某张图变了"时二分定位是不是快路径的锅。
+        self._fast_paths = fast_paths
+        # ---- 帧状态 ----
+        self._phase = _FramePhase.IDLE
+        self._width = 0
+        self._height = 0
+        self._buffer: bytearray | None = None
 
-    def rasterize(self, display_list: DisplayList) -> FrameBuffer:
-        width, height = display_list.width, display_list.height
-        buffer = bytearray(width * height * 4)
-        row = [0.0] * width
+    # ------------------------------------------------------------ 帧生命周期
+
+    def begin_frame(self, size: Size, scale: float) -> None:
+        """按 `size × scale` 准备帧缓冲。
+
+        尺寸没变时**复用**上一帧的缓冲（不清空）——脏矩形的语义就建立在这上面：
+        `execute` 只覆盖 `clip` 内的像素，区域外必须留着上一帧的内容。
+
+        上一帧已经 `end_frame` 过（或还没开始）都是合法的；只有"上一帧没结束"
+        才报错——那才是真的漏了配对。
+        """
+        if self._phase is _FramePhase.FRAME:
+            raise RasterError(
+                f"begin_frame 时上一帧还没结束（当前处于 {self._phase.value} 阶段）",
+                suggestion="检查 begin_frame / end_frame 是否成对；一帧里可以多次 execute",
+            )
+        if scale <= 0.0:
+            raise ValueError(f"设备像素比必须为正，收到 {scale}")
+        width = max(1, math.ceil(size.width * scale))
+        height = max(1, math.ceil(size.height * scale))
+        if self._buffer is None or self._width != width or self._height != height:
+            self._buffer = bytearray(width * height * 4)
+        self._width = width
+        self._height = height
+        self._phase = _FramePhase.FRAME
+
+    def execute(self, display_list: DisplayList, clip: Rect | None = None) -> None:
+        """把显示列表画进当前帧缓冲，只更新 `clip` 区域。
+
+        内部先做**全量**光栅（进一块临时缓冲），再按 `clip` 合成进帧缓冲。
+        这样"裁剪语义"是对的，代价是暂时没有省下计算量——快路径见 R3.5，
+        真正的脏矩形增量光栅留给后续（它要的是显示列表分段，不是重绘策略）。
+        """
+        if self._phase is not _FramePhase.FRAME:
+            raise RasterError(
+                f"execute 必须在 begin_frame 之后、end_frame 之前调用"
+                f"（当前处于 {self._phase.value} 阶段）",
+                suggestion="补一次 begin_frame(Size(...), scale)",
+            )
+        if display_list.width != self._width or display_list.height != self._height:
+            raise ValueError(
+                f"显示列表尺寸 {display_list.width}×{display_list.height} "
+                f"与帧缓冲 {self._width}×{self._height} 不一致。"
+                f"帧尺寸由 begin_frame(size, scale) 决定，显示列表应当在**设备像素**下录制"
+                f"（recorder.finish 也要用同一组数字）"
+            )
+        assert self._buffer is not None
+
+        frame = bytearray(len(self._buffer))
+        row = [0.0] * self._width
         for op in display_list.ops:
-            self._rasterize_op(buffer, width, height, row, op)
-        return FrameBuffer(width, height, buffer)
+            self._rasterize_op(frame, self._width, self._height, row, op)
+        _composite(self._buffer, frame, self._width, self._height, clip)
+
+    def end_frame(self) -> None:
+        if self._phase is not _FramePhase.FRAME:
+            raise RasterError(
+                f"end_frame 没有配对的 begin_frame（当前处于 {self._phase.value} 阶段）",
+                suggestion="begin_frame / execute* / end_frame 必须按顺序成组",
+            )
+        self._phase = _FramePhase.ENDED
+
+    def screenshot(self) -> FrameBuffer:
+        """读回像素**拷贝**（帧缓冲仍归后端所有，改拷贝不影响下一帧）。"""
+        if self._phase is not _FramePhase.ENDED or self._buffer is None:
+            raise RasterError(
+                f"screenshot 必须在 end_frame 之后调用（当前处于 {self._phase.value} 阶段）",
+                suggestion="正常路径是交换到屏幕；读回只用于截图、黄金图与调试",
+            )
+        return FrameBuffer(self._width, self._height, bytearray(self._buffer))
+
+    # ------------------------------------------------------------ 位图资源
+
+    def create_image(self, width: int, height: int, pixels: bytes) -> int:
+        raise NotImplementedError(
+            "软件光栅暂未实现位图上传。协议里留着这两个方法，是因为 GL/Skia 的纹理"
+            "资源不在 Python 的 GC 管辖内、没有显式释放就会稳定泄漏；"
+            "软件端等「位图与图标」落地时再实现（那之前没有消费者）"
+        )
+
+    def destroy_image(self, handle: int) -> None:
+        raise NotImplementedError("软件光栅暂未实现位图上传，见 create_image 的说明")
 
     # ------------------------------------------------------------ 指令分派
 
@@ -131,6 +245,18 @@ class SoftwareRasterizer(RasterBackend):
             self._stroke(buf, w, h, row, op)
         elif isinstance(op, TextRunOp):
             self._text(buf, w, h, op)
+        elif isinstance(op, (PathFillOp, PathStrokeOp)):
+            # **响亮地未实现**，不静默跳过。
+            # 静默跳过会让"图标没画出来"变成一个要查半天的问题，
+            # 而这里一句话就能说清是"还没做"。
+            kind = "PathFillOp" if isinstance(op, PathFillOp) else "PathStrokeOp"
+            raise NotImplementedError(
+                f"软件光栅还没有实现路径指令（{kind}）。路径的**数据形状**已定"
+                f"（display_list.py 的扁平 verb 数组），光栅实现随 `icons/stroke.py`"
+                f"（docs/13 承诺的 SVG 图标）一起做——那之前没有消费者。"
+            )
+        else:  # pragma: no cover - 新增指令类型时这里会拦住
+            raise TypeError(f"未知的绘制指令：{type(op).__name__}")
 
     # ------------------------------------------------------------ 填充
 
@@ -146,6 +272,19 @@ class SoftwareRasterizer(RasterBackend):
         clip: Rect | None,
     ) -> None:
         if color.a == 0.0 or rect.width <= 0.0 or rect.height <= 0.0:
+            return
+        # 快路径：不透明 + 直角 + **像素对齐** → 整行切片直通（R3.5）。
+        #
+        # "像素对齐"是判据里最关键的一条：边缘落在像素中间时那一列/行需要
+        # 部分覆盖，而切片赋值给不出部分覆盖。对齐时两条路径的输出
+        # **逐比特相同**，所以这不是"为了快牺牲正确"，而是
+        # "对齐时没必要做逐像素的垂直采样"。
+        if (
+            self._fast_paths
+            and radius <= 0.0
+            and color.a >= 1.0
+            and _fill_aligned_opaque(buf, w, h, rect, color, clip)
+        ):
             return
         shape = _RoundedBox.of(rect, radius)
         # 注意两个上限各归其位：行范围按**画布高度**夹，列范围按**画布宽度**夹。
@@ -230,11 +369,13 @@ class SoftwareRasterizer(RasterBackend):
 
         for glyph in op.glyphs:
             glyph_x = op.origin.dx + glyph.x
+            # 每个字形自己的基线：y_offset 向上为正，屏幕坐标向下为正
+            glyph_baseline = baseline_y - glyph.y_offset
             # 只对"有实际形状"的字形取掩码：空格没有字形，
             # 但它的 advance 照样推进笔位置（否则词间距会塌掉）
             if glyph.text.strip():
                 mask = self._glyphs.mask_for(glyph.text, op.size, glyph.family, glyph.advance)
-                self._blit_mask(buf, w, h, mask, glyph_x, baseline_y, op.color, op.clip)
+                self._blit_mask(buf, w, h, mask, glyph_x, glyph_baseline, op.color, op.clip)
             pen_x = glyph_x + glyph.advance
             last_x = max(last_x, pen_x)
 
@@ -270,15 +411,37 @@ class SoftwareRasterizer(RasterBackend):
     ) -> None:
         """把一个字形掩码按覆盖度 source-over 合成到缓冲区。
 
-        掩码落位是**整数像素**（字形天然对齐像素栅格），
-        所以这里不需要抗锯齿采样——抗锯齿信息已经在掩码的覆盖度里了。
+        **掩码落位**有两种口径，由 `subpixel_glyphs` 选（R3.2）：
+
+        - 关（默认）：把原点 `round()` 到整数像素。这是**位图掩码**的正确选择
+          ——掩码本来就是按像素栅格生成的，再拿小数相位去重采样只会把笔画摊薄。
+        - 开：保留小数相位，按双线性权重把每个掩码像素的覆盖度摊到相邻 4 个
+          目标像素上。这是**轮廓掩码**（FreeType/真实字体）的正确选择：掩码按
+          相位生成、不会变软，而笔位置的小数部分不再被丢弃。
+
+        为什么需要"不丢弃相位"这条路：笔位置几乎从来不是整数——字距调整、居中、
+        两端对齐、标点悬挂都会产生小数。落位时 `round()` 等于把文本层算出来的
+        排版精度在最后一步扔掉，表现是"整行字一会儿挤一会儿松"，只在某些字号下可见。
+
+        实测（内置位图字形、text_block 黄金图）：打开亚像素后 5.6% 的像素变化，
+        其中 2799 个"变亮"——笔画被摊到邻像素，文字整体变软。这就是它默认关掉的
+        原因：对位图源是倒退，对轮廓源才是收益（R4 落地时打开）。
         """
         from ..glyphs import GlyphMask
 
         assert isinstance(mask, GlyphMask)
         rect = rect_of_mask(mask, pen_x, baseline_y)
-        left = round(rect.left)
-        top = round(rect.top)
+        if self._subpixel_glyphs:
+            base_x = math.floor(rect.left)
+            base_y = math.floor(rect.top)
+            fx = rect.left - base_x
+            fy = rect.top - base_y
+        else:
+            base_x = round(rect.left)
+            base_y = round(rect.top)
+            fx = fy = 0.0
+        wx = (1.0 - fx, fx)
+        wy = (1.0 - fy, fy)
 
         # 裁剪边界：用 ceil 而不是 `int(...) + 1`。
         # 像素 x 覆盖 [x, x+1)。裁剪矩形 `clip` 覆盖 [clip.left, clip.right)。
@@ -294,28 +457,34 @@ class SoftwareRasterizer(RasterBackend):
             cy1 = min(cy1, math.ceil(clip.bottom))
 
         for my in range(mask.height):
-            py = top + my
-            if py < cy0 or py >= cy1:
-                continue
             row_off = my * mask.width
-            row_start = max(0, cx0 - left)
-            row_end = min(mask.width, cx1 - left)
-            if row_start >= row_end:
-                continue
-            for mx in range(row_start, row_end):
+            for mx in range(mask.width):
                 coverage = mask.coverage[row_off + mx]
                 if coverage == 0:
                     continue
                 alpha = color.a * (coverage / 255.0)
                 if alpha <= 0.0:
                     continue
-                _blend_pixel(
-                    buf,
-                    w,
-                    left + mx,
-                    py,
-                    color if alpha >= 1.0 else color.with_alpha(alpha),
-                )
+                for dy in (0, 1):
+                    weight_y = wy[dy]
+                    if weight_y <= 0.0:
+                        continue
+                    py = base_y + my + dy
+                    if py < cy0 or py >= cy1:
+                        continue
+                    for dx in (0, 1):
+                        weight_x = wx[dx]
+                        if weight_x <= 0.0:
+                            continue
+                        px = base_x + mx + dx
+                        if px < cx0 or px >= cx1:
+                            continue
+                        sample = alpha * weight_x * weight_y
+                        if sample <= 0.0:
+                            continue
+                        _blend_pixel(
+                            buf, w, px, py, color if sample >= 1.0 else color.with_alpha(sample)
+                        )
 
     # ------------------------------------------------------------ 上色
 
@@ -373,8 +542,73 @@ def _accumulate(
 
 
 def _clear(row: list[float], x_lo: int, x_hi: int) -> None:
-    for x in range(x_lo, x_hi):
-        row[x] = 0.0
+    """把行缓冲的一段清零。切片赋值走 C 速度，比逐元素循环快一个量级。"""
+    if x_hi > x_lo:
+        row[x_lo:x_hi] = _ZEROS[: x_hi - x_lo]
+
+
+#: 供 `_clear` 切片用的零值池（比每次 `[0.0] * n` 少一次分配）
+_ZEROS: list[float] = [0.0] * 4096
+
+
+def _fill_aligned_opaque(
+    buf: bytearray, w: int, h: int, rect: Rect, color: Color, clip: Rect | None
+) -> bool:
+    """不透明直角矩形且**边缘落在整数像素上**时，整行切片直通。
+
+    返回 `True` 表示"已经处理完了"（包括"完全在画布外，什么都不用做"），
+    调用方不必再走通用路径；返回 `False` 表示对齐条件不满足，请走通用路径。
+
+    为什么值得单独开这条路：1280×800 的全屏填充在通用路径下要跑
+    80 万次"逐像素垂直采样"，实测 749ms（预算 14ms/帧）。
+    对齐时每一行的覆盖度**恒为 1.0**，那 80 万次采样全是白算的。
+
+    为什么要求**精确**对齐（不用容差）：容差会让"10.0000001 走快路径、
+    10.0 走通用路径"这种边界上的两张图差一个像素的覆盖度。
+    精确判据下快慢两条路径的输出逐比特相同，快路径永远可以关掉而不改变画面。
+    """
+    left = max(rect.left, clip.left if clip is not None else 0.0, 0.0)
+    right = min(rect.right, clip.right if clip is not None else float(w), float(w))
+    top = max(rect.top, clip.top if clip is not None else 0.0, 0.0)
+    bottom = min(rect.bottom, clip.bottom if clip is not None else float(h), float(h))
+    if right <= left or bottom <= top:
+        return True  # 完全在画布/裁剪区外
+    for value in (left, right, top, bottom):
+        if value != math.floor(value):
+            return False
+    x0, x1 = int(left), int(right)
+    y0, y1 = int(top), int(bottom)
+    span = bytes((color.r, color.g, color.b, 255)) * (x1 - x0)
+    width_bytes = (x1 - x0) * 4
+    for y in range(y0, y1):
+        start = (y * w + x0) * 4
+        buf[start : start + width_bytes] = span
+    return True
+
+
+def _composite(dst: bytearray, src: bytearray, width: int, height: int, clip: Rect | None) -> None:
+    """把 `src` 的 `clip` 区域**整块覆盖**到 `dst`。
+
+    是覆盖（replace）而不是 alpha 合成：`src` 已经是这一帧的完整光栅结果，
+    再合一次会让半透明像素叠两层。区域外一个字节都不动——那正是脏矩形的意义。
+
+    裁剪边界用 `floor(left)` / `ceil(right)`：部分覆盖的像素也算在内（保守取大），
+    与形状裁剪那边的"半开区间"口径不同，因为这里问的是"哪些像素需要被更新"，
+    而不是"哪些像素与形状有交集"。
+    """
+    if clip is None:
+        dst[:] = src
+        return
+    x0 = max(0, math.floor(clip.left))
+    x1 = min(width, math.ceil(clip.right))
+    y0 = max(0, math.floor(clip.top))
+    y1 = min(height, math.ceil(clip.bottom))
+    if x0 >= x1 or y0 >= y1:
+        return
+    for y in range(y0, y1):
+        start = (y * width + x0) * 4
+        end = (y * width + x1) * 4
+        dst[start:end] = src[start:end]
 
 
 def _row_range(rect: Rect, clip: Rect | None, h: int) -> tuple[int, int]:

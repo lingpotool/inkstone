@@ -27,6 +27,7 @@ from inkstone.devtools import render_to_png
 from inkstone.gfx import (
     DisplayList,
     DisplayListRecorder,
+    FrameBuffer,
     PositionedGlyph,
     SoftwareRasterizer,
     TextRunOp,
@@ -34,7 +35,7 @@ from inkstone.gfx import (
 from inkstone.gfx.color import Color
 from inkstone.gfx.glyphs import BuiltinGlyphProvider, GlyphMask, rect_of_mask
 from inkstone.layout import BoxConstraints
-from inkstone.layout.types import Offset, Rect
+from inkstone.layout.types import Offset, Rect, Size
 from inkstone.style import Theme
 from inkstone.text import TextAlign, TextEngine
 from inkstone.widgets import Card, Column, Text
@@ -213,9 +214,180 @@ class TestBuiltinGlyphProvider:
 # ================================================================ 光栅层
 
 
+def _raster_op(op: TextRunOp, w: int = 40, h: int = 40, **kwargs: object) -> FrameBuffer:
+    """走一遍帧生命周期，把单条文本指令光栅化（R3.1 之后光栅的唯一入口）。"""
+    raster = SoftwareRasterizer(**kwargs)  # type: ignore[arg-type]
+    raster.begin_frame(Size(float(w), float(h)), 1.0)
+    raster.execute(DisplayList(w, h, (op,)))
+    raster.end_frame()
+    return raster.screenshot()
+
+
+def _inked_rows(fb: FrameBuffer) -> list[int]:
+    """有墨迹的行号（背景是透明的，所以 alpha > 0 即墨迹）。"""
+    return [y for y in range(fb.height) if any(fb.pixel(x, y)[3] != 0 for x in range(fb.width))]
+
+
+def _inked_columns(fb: FrameBuffer) -> list[int]:
+    return [x for x in range(fb.width) if any(fb.pixel(x, y)[3] != 0 for y in range(fb.height))]
+
+
+class TestGlyphVerticalOffset:
+    """R3.2：`PositionedGlyph.y_offset` —— HarfBuzz 四元组里的那个 y。
+
+    没有它，上下标、组合符、CJK 标点悬挂、多字体回退的基线差全都表达不出来
+    （R4 落地即撞墙）。有它之后还要证明"真的画上去了"，不只是数据在流转。
+    """
+
+    @staticmethod
+    def _op(y_offset: float) -> TextRunOp:
+        glyph = PositionedGlyph(
+            text="A", x=0.0, advance=14.0, family="sans-serif", y_offset=y_offset
+        )
+        return TextRunOp(Offset(2.0, 2.0), 20.0, (glyph,), 14.0, BLACK)
+
+    def test_zero_offset_is_the_default(self) -> None:
+        """默认值让老调用点一行不改（向后兼容）。"""
+        assert PositionedGlyph("A", 0.0, 14.0).y_offset == 0.0
+
+    def test_positive_offset_moves_the_glyph_up(self) -> None:
+        base = _inked_rows(_raster_op(self._op(0.0)))
+        raised = _inked_rows(_raster_op(self._op(4.0)))
+        assert base and raised
+        assert min(raised) < min(base), "y_offset 向上为正：字形顶边应当上移"
+        assert max(raised) < max(base)
+
+    def test_negative_offset_moves_the_glyph_down(self) -> None:
+        base = _inked_rows(_raster_op(self._op(0.0)))
+        lowered = _inked_rows(_raster_op(self._op(-3.0)))
+        assert min(lowered) > min(base), "负的 y_offset 应当把字形压到基线下"
+
+    def test_offset_actually_changes_pixels(self) -> None:
+        """不许"算了但没画"——上下标必须落在不同的像素行上。"""
+        assert _raster_op(self._op(0.0)).data != _raster_op(self._op(5.0)).data
+
+    def test_offset_applies_per_glyph_not_per_run(self) -> None:
+        """同一 run 里不同字形可以有不同的 y_offset（组合符就是这么来的）。"""
+        plain = PositionedGlyph(text="A", x=0.0, advance=14.0, family="sans-serif")
+        raised = PositionedGlyph(text="B", x=14.0, advance=14.0, family="sans-serif", y_offset=6.0)
+        op = TextRunOp(Offset(2.0, 2.0), 20.0, (plain, raised), 14.0, BLACK)
+        rows = _inked_rows(_raster_op(op))
+        assert min(rows) < 20, "抬高的那个字形应当越到基线之上"
+
+
+class TestSubpixelGlyphPlacement:
+    """R3.2：亚像素落位——**能力就位，默认关**。
+
+    理由见 `SoftwareRasterizer` 的说明：内置字形是**位图掩码**，本来就按像素
+    栅格生成，拿小数相位去重采样只会把笔画摊薄（实测 text_block 5.6% 像素变化、
+    其中 2799 个"变亮"）。R4 换上 FreeType 的轮廓掩码后，掩码按相位生成、
+    不会变软，那时打开才是收益。
+    """
+
+    @staticmethod
+    def _op(pen_x: float) -> TextRunOp:
+        glyph = PositionedGlyph(text="A", x=pen_x, advance=14.0, family="sans-serif")
+        return TextRunOp(Offset(0.0, 0.0), 20.0, (glyph,), 14.0, BLACK)
+
+    def test_default_is_snapped(self) -> None:
+        """默认必须是不变软的那条路，否则内置字形的观感会倒退。"""
+        assert (
+            _raster_op(self._op(4.5)).data == _raster_op(self._op(4.5), subpixel_glyphs=False).data
+        )
+
+    def test_integer_position_is_identical_either_way(self) -> None:
+        """笔位是整数时权重退化为 (1,0,0,0)：两条路径必须逐比特相同。"""
+        snapped = _raster_op(self._op(4.0), subpixel_glyphs=False)
+        subpixel = _raster_op(self._op(4.0), subpixel_glyphs=True)
+        assert snapped.data == subpixel.data
+
+    def test_fractional_position_spreads_coverage(self) -> None:
+        snapped = _raster_op(self._op(4.5), subpixel_glyphs=False)
+        subpixel = _raster_op(self._op(4.5), subpixel_glyphs=True)
+        assert subpixel.data != snapped.data, "小数相位应当改变落位"
+        assert len(_inked_columns(subpixel)) > len(_inked_columns(snapped)), (
+            "覆盖度被摊到相邻像素上，着墨的列应当变多"
+        )
+
+    def test_snapped_and_subpixel_agree_on_the_inked_rows(self) -> None:
+        """水平相位不该影响纵向落位（除非垂直相位也非零）。"""
+        assert _inked_rows(_raster_op(self._op(4.5), subpixel_glyphs=False)) == _inked_rows(
+            _raster_op(self._op(4.5), subpixel_glyphs=True)
+        )
+
+    def test_fractional_baseline_spreads_rows_too(self) -> None:
+        """垂直相位同样要保留：基线不是整数时，行方向也会摊开。"""
+        glyph = PositionedGlyph(text="A", x=0.0, advance=14.0, family="sans-serif")
+        op = TextRunOp(Offset(0.0, 0.0), 20.5, (glyph,), 14.0, BLACK)
+        snapped = _raster_op(op, subpixel_glyphs=False)
+        subpixel = _raster_op(op, subpixel_glyphs=True)
+        assert len(_inked_rows(subpixel)) > len(_inked_rows(snapped))
+
+
+class TestTextUnderTransform:
+    """R3.3：变换下的文本——**框放大了，字也要放大**。
+
+    字形度量（位置、advance、y_offset、em）与字号、基线一起跟着等比缩放走。
+    只缩放外框不缩放字，会出现"卡片变大了、字还是那么小"这种一眼假的画面。
+    """
+
+    @staticmethod
+    def _record(scale: float) -> TextRunOp:
+        recorder = DisplayListRecorder()
+        if scale != 1.0:
+            recorder.scale(scale)
+        glyph = PositionedGlyph(text="A", x=0.0, advance=14.0, family="sans-serif", em=14.0)
+        recorder.text_run(Offset(0.0, 0.0), 12.0, (glyph,), 14.0, BLACK)
+        op = recorder.finish(80, 80).ops[0]
+        assert isinstance(op, TextRunOp)
+        return op
+
+    def test_scale_scales_size_baseline_and_metrics(self) -> None:
+        op = self._record(2.0)
+        assert op.size == pytest.approx(28.0)
+        assert op.baseline == pytest.approx(24.0)
+        assert op.glyphs[0].advance == pytest.approx(28.0)
+        assert op.glyphs[0].em == pytest.approx(28.0)
+
+    def test_scale_moves_the_run_origin(self) -> None:
+        """run 原点是局部坐标，缩放后跟着走（这里局部原点就是 0，所以不动）。"""
+        assert self._record(2.0).origin.dx == pytest.approx(0.0)
+
+    def test_translate_does_not_scale_metrics(self) -> None:
+        recorder = DisplayListRecorder()
+        recorder.translate(10.0, 5.0)
+        glyph = PositionedGlyph(text="A", x=2.0, advance=14.0, family="sans-serif")
+        recorder.text_run(Offset(1.0, 1.0), 12.0, (glyph,), 14.0, BLACK)
+        op = recorder.finish(80, 80).ops[0]
+        assert isinstance(op, TextRunOp)
+        assert (op.origin.dx, op.origin.dy) == (11.0, 6.0)
+        assert op.size == pytest.approx(14.0)
+        assert op.glyphs[0].x == pytest.approx(2.0), "平移不该改变字形相对 run 原点的位置"
+
+    def test_scale_one_leaves_everything_alone(self) -> None:
+        plain = self._record(1.0)
+        scaled = self._record(1.0)
+        assert plain == scaled
+
+    def test_non_uniform_scale_keeps_metrics_unscaled(self) -> None:
+        """非等比缩放下的文本缩放需要光栅层参与——明确不做，而不是画个错的。"""
+        recorder = DisplayListRecorder()
+        recorder.scale(2.0, sy=3.0)
+        glyph = PositionedGlyph(text="A", x=0.0, advance=14.0, family="sans-serif")
+        recorder.text_run(Offset(0.0, 0.0), 12.0, (glyph,), 14.0, BLACK)
+        op = recorder.finish(80, 80).ops[0]
+        assert isinstance(op, TextRunOp)
+        assert op.size == pytest.approx(14.0), "非等比缩放不缩放字形度量（有意的限制）"
+
+
 class TestTextRasterization:
-    def _render(self, op: TextRunOp, w: int = 120, h: int = 24) -> object:
-        return SoftwareRasterizer().rasterize(DisplayList(w, h, (op,)))
+    def _render(self, op: TextRunOp, w: int = 120, h: int = 24) -> FrameBuffer:
+        """走一遍帧生命周期（R3.1 之后光栅的唯一入口）。"""
+        raster = SoftwareRasterizer()
+        raster.begin_frame(Size(float(w), float(h)), 1.0)
+        raster.execute(DisplayList(w, h, (op,)))
+        raster.end_frame()
+        return raster.screenshot()
 
     def _op(self, text: str, size: float = 14.0) -> TextRunOp:
         glyphs = tuple(

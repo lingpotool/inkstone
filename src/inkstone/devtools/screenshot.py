@@ -23,7 +23,7 @@ from ..gfx import (
     encode_png,
 )
 from ..layout import BoxConstraints
-from ..layout.types import Rect
+from ..layout.types import Rect, Size
 
 __all__ = ["render_to_display_list", "render_to_framebuffer", "render_to_png"]
 
@@ -62,12 +62,21 @@ def render_to_framebuffer(
     为什么不能各自独立挑：度量用确定性表、字形用系统字体的话，
     排版按 14px 排、字形按 13.2px 画，中英混排时会出现
     "有的字挤在一起、有的字之间留缝"，而且只在真机上才看得见。
+
+    走的是 docs/03 §2 的帧生命周期（R3.1 之后）：
+    `begin_frame → execute → end_frame → screenshot`。
+    截图是**读回**操作，不是后端的唯一出口——`scale=1.0` 是因为
+    设备像素比的接线属 DPI 那一项工作（docs/03 §5），届时这里会带上真实比例。
     """
     display_list = render_to_display_list(owner, constraints, background=background)
     provider = glyph_provider if glyph_provider is not None else _provider_from(owner)
-    if provider is None:
-        return SoftwareRasterizer().rasterize(display_list)
-    return SoftwareRasterizer(glyph_provider=provider).rasterize(display_list)  # type: ignore[arg-type]
+    raster = (
+        SoftwareRasterizer() if provider is None else SoftwareRasterizer(glyph_provider=provider)  # type: ignore[arg-type]
+    )
+    raster.begin_frame(Size(float(display_list.width), float(display_list.height)), 1.0)
+    raster.execute(display_list)
+    raster.end_frame()
+    return raster.screenshot()
 
 
 def _provider_from(owner: BuildOwner) -> object | None:

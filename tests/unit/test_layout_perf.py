@@ -22,8 +22,6 @@
 from __future__ import annotations
 
 import os
-import statistics
-import time
 
 import pytest
 
@@ -36,6 +34,7 @@ from inkstone.layout import (
     Sizing,
     collect_descendants,
 )
+from perf_support import measure_best
 
 # 增量预算：docs/05 §8 的原值。断言的就是文档里那个数，不额外收紧——
 # 墙上时钟断言在共享 CI runner 上天生会抖，紧阈值会变成"偶尔红一次"，
@@ -73,39 +72,18 @@ def mark_tree_dirty(root: RenderBox) -> None:
 def measure_layout(root: RenderBox, *, full: bool, runs: int = 20) -> tuple[float, float]:
     """跑 `runs` 轮，返回 (最快一次, 中位数)，单位毫秒。
 
-    **断言用最快一次，不用平均。** 这不是为了让数字好看，而是因为
-    墙上时钟的噪声是**单向的**：别的进程抢 CPU、GC、调度抖动只会让某一次
-    变慢，绝不会让它比真实成本更快。所以 N 次里的最小值是对真实成本最稳的
-    估计，也把"偶尔被干扰"这个失败模式从根上消掉。
-
-    用平均会怎样（R2 收尾时实测到的）：200 次采样 p50=16.2ms、p99=30.8ms、
-    max=35.4ms，**有 2 次越过 30ms 预算**。20 次取平均虽然把单次抖动摊薄了
-    20 倍，但一次上百毫秒的抖动照样能把平均拉过线——于是门禁"偶尔红一次"。
-    而一个偶尔红的门禁比没有更糟：它会训练所有人忽略 CI（AGENT.md 的既有结论）。
-
-    代价要说清楚：min 口径下典型值是 13ms，对 30ms 预算有 2.3 倍余量，
-    所以它抓的是 **≥2.3 倍**的回归，不是 2 倍。这正是性能门禁该干的事
-    （抓数量级回归），文档也是这么定的。
-
-    中位数照常返回并打印：趋势比门槛有价值。
+    计时口径（用最快一次而不是平均）见 `tests/perf_support.py`——
+    那里也记录了"为什么"的实测证据，别在这里重复一遍。
     """
-    for _ in range(3):  # 预热：避开首次执行的导入与分支预测开销
+
+    def one_round() -> None:
         if full:
             mark_tree_dirty(root)
         else:
             root.mark_needs_layout()
         root.layout(CONSTRAINTS)
 
-    samples: list[float] = []
-    for _ in range(runs):
-        if full:
-            mark_tree_dirty(root)
-        else:
-            root.mark_needs_layout()
-        start = time.perf_counter()
-        root.layout(CONSTRAINTS)
-        samples.append((time.perf_counter() - start) * 1000)
-    return min(samples), statistics.median(samples)
+    return measure_best(one_round, runs=runs)
 
 
 CONSTRAINTS = BoxConstraints(max_width=1200, max_height=800)
@@ -176,16 +154,12 @@ def test_cached_layout_is_effectively_free():
     root = build_tree()
     root.layout(CONSTRAINTS)
 
-    runs = 200
-    start = time.perf_counter()
-    for _ in range(runs):
+    def dirty_relayout() -> None:
+        mark_tree_dirty(root)
         root.layout(CONSTRAINTS)
-    cached_ms = (time.perf_counter() - start) / runs * 1000
 
-    mark_tree_dirty(root)
-    start = time.perf_counter()
-    root.layout(CONSTRAINTS)
-    full_ms = (time.perf_counter() - start) * 1000
+    cached_ms, _ = measure_best(lambda: root.layout(CONSTRAINTS), runs=50)
+    full_ms, _ = measure_best(dirty_relayout, runs=5)
 
     assert cached_ms * 50 < full_ms, (
         f"缓存路径没有明显更快：cached={cached_ms:.4f}ms full={full_ms:.4f}ms"
