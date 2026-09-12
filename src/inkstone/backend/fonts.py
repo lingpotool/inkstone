@@ -162,6 +162,13 @@ class GlyphPlacement:
     advance: float
     #: 实际承载它的字体族（回退链可能让同一行的字来自不同字体）。
     family: str
+    #: 该簇在字体里的**字形 id**（整形结果，R4.3）。
+    #:
+    #: 连字是"一个字形覆盖多个字素簇"，那个 id 落在第一个被覆盖的簇上。
+    #: 光栅层据此画连字字形，而不是按文本逐簇重新整形——后者会得到分开的
+    #: f/f/i，与排版算出来的连字宽度对不上。
+    #: 空元组 = 后端没有字形 id 概念（内置确定性后端）。
+    glyph_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

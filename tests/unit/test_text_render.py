@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from font_fixtures import build_kerned_font
 from inkstone.backend import FontWeight, HeadlessBackend
 from inkstone.core import BuildOwner
 from inkstone.devtools import render_to_png
@@ -711,3 +712,93 @@ class TestTextDeterminism:
         )
         png = render_to_png(owner, BoxConstraints(max_width=200, max_height=220))
         _assert_or_update_golden("text_wrapping", png)
+
+
+# ================================================================ R4.3：连字
+
+
+class TestLigatureRasterization:
+    """R4.3：连字必须**画成连字**，而不是分开的字母。
+
+    连字在显示列表里被切成多个字素簇（"ffi" → 三个 `PositionedGlyph`）。
+    光栅层若按文本逐簇取掩码，会拿到 f / f / i 三个独立字形——
+    **排版按连字宽度算、画出来却是分开的字母**，两者对不上。
+    正解是整形时把字形 id 带下来，光栅层按 id 取掩码。
+
+    这条测试用合成字体（手写 GSUB `liga` 规则）走完整链路：
+    HarfBuzz 整形 → 显示列表 → 软件光栅。
+
+    **必须显式注入字形源**：`SoftwareRasterizer()` 默认用内置确定性字形
+    （ADR-0007：验证后端要的是跨平台逐比特一致）。不注入的话两边画的是
+    同一套位图，"有没有修好"根本测不出来——这一点是这次踩到的。
+    """
+
+    @staticmethod
+    def _engine_and_run(tmp_path: Path) -> tuple[object, TextRunOp]:
+        from inkstone.backend import FontLibrary, FontSpec, HbFtFontEngine
+
+        font = build_kerned_font(tmp_path / "k.ttf")
+        library = FontLibrary(directories=())
+        library.register_file(font)
+        engine = HbFtFontEngine(library)
+        run = engine.shape_line("ffi", FontSpec(families=("Kern Test",), size=20.0))
+        return engine, run
+
+    @staticmethod
+    def _op(run: object, *, use_ids: bool) -> TextRunOp:
+        glyphs = tuple(
+            PositionedGlyph(
+                text="ffi"[p.start : p.end],
+                x=p.x,
+                advance=p.advance,
+                family=p.family,
+                glyph_ids=p.glyph_ids if use_ids else (),
+            )
+            for p in run.placements  # type: ignore[attr-defined]
+        )
+        return TextRunOp(Offset(2.0, 2.0), 16.0, glyphs, 20.0, BLACK)
+
+    @staticmethod
+    def _raster(op: TextRunOp, engine: object) -> FrameBuffer:
+        raster = SoftwareRasterizer(glyph_provider=engine)  # type: ignore[arg-type]
+        raster.begin_frame(Size(40.0, 40.0), 1.0)
+        raster.execute(DisplayList(40, 40, (op,)))
+        raster.end_frame()
+        return raster.screenshot()
+
+    def test_the_ligature_glyph_id_is_carried_on_the_first_cluster(self, tmp_path: Path):
+        _engine, run = self._engine_and_run(tmp_path)
+        assert run.placements[0].glyph_ids, "连字的字形 id 应当落在第一个簇上"
+        assert not run.placements[1].glyph_ids, "后两个簇不该重复记同一个字形"
+
+    def test_drawing_by_id_differs_from_drawing_by_text(self, tmp_path: Path):
+        """按 id 画（连字）与按文本画（三个字母）必须是不同的像素。"""
+        engine, run = self._engine_and_run(tmp_path)
+        with_ids = self._raster(self._op(run, use_ids=True), engine)
+        without_ids = self._raster(self._op(run, use_ids=False), engine)
+        assert with_ids.data != without_ids.data
+
+    def test_ligature_inks_fewer_columns_than_three_separate_letters(self, tmp_path: Path):
+        """连字是一个字形，占的列数应当少于三个字母排开。"""
+        engine, run = self._engine_and_run(tmp_path)
+        with_ids = self._raster(self._op(run, use_ids=True), engine)
+        without_ids = self._raster(self._op(run, use_ids=False), engine)
+        assert len(_inked_columns(with_ids)) < len(_inked_columns(without_ids)), (
+            f"连字 {_inked_columns(with_ids)} vs 三个字母 {_inked_columns(without_ids)}"
+        )
+
+    def test_the_three_way_glyph_plan(self):
+        """单字形簇走 id、多字形簇走文本、被连字覆盖的簇不画。"""
+        plan = SoftwareRasterizer._glyph_plan
+        single = PositionedGlyph("A", 0.0, 10.0, "F", glyph_ids=(7,))
+        multiple = PositionedGlyph("Á", 0.0, 10.0, "F", glyph_ids=(7, 8))
+        covered = PositionedGlyph("f", 4.0, 10.0, "F")
+
+        assert plan(single, run_has_ids=True) == (7,)
+        assert plan(multiple, run_has_ids=True) == ()
+        assert plan(covered, run_has_ids=True) is None, "被连字覆盖的簇必须不画"
+
+    def test_without_any_ids_every_cluster_uses_text(self):
+        """内置后端一个 id 都不给 → 全部走文本路径（它本来就没有整形）。"""
+        glyph = PositionedGlyph("A", 0.0, 10.0, "F")
+        assert SoftwareRasterizer._glyph_plan(glyph, run_has_ids=False) == ()

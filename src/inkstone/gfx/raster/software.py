@@ -44,6 +44,7 @@ from ..display_list import (
     Op,
     PathFillOp,
     PathStrokeOp,
+    PositionedGlyph,
     StrokeRectOp,
     TextRunOp,
 )
@@ -366,15 +367,19 @@ class SoftwareRasterizer(RasterBackend):
         baseline_y = op.origin.dy + op.baseline
         pen_x = op.origin.dx
         last_x = pen_x
+        # 整个 run 有没有字形 id：有就说明字形源是整形器（HB+FT），
+        # 于是"空 id"有确定含义——被前面的连字覆盖了。见 `_glyph_plan`。
+        run_has_ids = any(g.glyph_ids for g in op.glyphs)
 
         for glyph in op.glyphs:
             glyph_x = op.origin.dx + glyph.x
             # 每个字形自己的基线：y_offset 向上为正，屏幕坐标向下为正
             glyph_baseline = baseline_y - glyph.y_offset
+            plan = self._glyph_plan(glyph, run_has_ids=run_has_ids)
             # 只对"有实际形状"的字形取掩码：空格没有字形，
             # 但它的 advance 照样推进笔位置（否则词间距会塌掉）
-            if glyph.text.strip():
-                mask = self._glyphs.mask_for(glyph.text, op.size, glyph.family, glyph.advance)
+            if plan is not None and glyph.text.strip():
+                mask = self._glyphs.mask_for(glyph.text, op.size, glyph.family, glyph.advance, plan)
                 self._blit_mask(buf, w, h, mask, glyph_x, glyph_baseline, op.color, op.clip)
             pen_x = glyph_x + glyph.advance
             last_x = max(last_x, pen_x)
@@ -397,6 +402,30 @@ class SoftwareRasterizer(RasterBackend):
             height=thickness,
         )
         self._fill(buf, w, h, [0.0] * w, rect, op.color, 0.0, op.clip)
+
+    @staticmethod
+    def _glyph_plan(glyph: PositionedGlyph, *, run_has_ids: bool) -> tuple[int, ...] | None:
+        """本簇该怎么取字形（R4.3）。三种结果，各有各的理由：
+
+        - `(id,)` → **按字形 id 取**。连字的正解：连字在显示列表里被切成多个
+          字素簇，按文本逐簇取掩码会拿到分开的 f/f/i，与排版算出的连字宽度对不上。
+        - `()` → **按文本重新整形**。组合符的正解：GPOS 会把标记摆到基字符上，
+          而簇内逐字形的偏移不在显示列表里（只带簇级偏移）。
+        - `None` → **本簇不画**。它被前面的连字覆盖了。
+
+        第三种结果是必需的：连字的字形 id 只落在第一个簇上，后两个簇若退回
+        按文本取掩码，就会在连字上再叠一个 f 和一个 i——**比不修还糟**。
+        区分"被连字覆盖"与"字形源根本不提供 id"靠 `run_has_ids`：
+        一个 run 里只要有任何簇带 id，就说明字形源是整形器，于是"空 id"
+        有确定含义；内置确定性后端一个 id 都不给，全部走文本路径。
+        """
+        if not run_has_ids:
+            return ()
+        if len(glyph.glyph_ids) == 1:
+            return (glyph.glyph_ids[0],)
+        if glyph.glyph_ids:
+            return ()
+        return None
 
     def _blit_mask(
         self,

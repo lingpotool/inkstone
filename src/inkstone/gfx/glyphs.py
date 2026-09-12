@@ -72,7 +72,14 @@ class GlyphMask:
 class GlyphProvider(Protocol):
     """字形来源。光栅器只依赖这个协议，不依赖任何字体实现。"""
 
-    def mask_for(self, text: str, size: float, family: str, advance: float) -> GlyphMask:
+    def mask_for(
+        self,
+        text: str,
+        size: float,
+        family: str,
+        advance: float,
+        glyph_ids: tuple[int, ...] = (),
+    ) -> GlyphMask:
         """给出某字符的覆盖度掩码。
 
         `advance` 是文本层分配给这个字形的**水平空间**——这是本方法
@@ -84,6 +91,16 @@ class GlyphProvider(Protocol):
 
         所以 provider 的职责是"在给定宽度内画一个像样的形状"，
         而**不是**重新决定这个字形该多宽——宽度是文本层的事。
+
+        `glyph_ids` 是整形结果里的字形 id（R4.3）。给了它就**按 id 取掩码**，
+        不再按文本重新整形——这是连字能正确渲染的唯一路径（见
+        `PositionedGlyph.glyph_ids` 的说明）。空元组表示调用方不知道 id
+        （内置确定性后端没有这个概念），实现应当退回按文本取。
+
+        docs/18 把这个能力写成"新增可选方法 `masks_for_run`"。这里做成
+        `mask_for` 的一个可选参数，是为了**不引入第二个协议方法**：
+        多一个方法就多一处"实现方漏了它"的可能，而缓存/合成逻辑本来就在
+        `mask_for` 里，扩参数比复制一份干净。
 
         实现必须**可缓存且确定性**：同一组参数永远同一结果。
         """
@@ -280,8 +297,19 @@ class BuiltinGlyphProvider:
     def is_placeholder_only(self, text: str) -> bool:
         return not all(ch in _GLYPHS for ch in text)
 
-    def mask_for(self, text: str, size: float, family: str, advance: float) -> GlyphMask:
+    def mask_for(
+        self,
+        text: str,
+        size: float,
+        family: str,
+        advance: float,
+        glyph_ids: tuple[int, ...] = (),
+    ) -> GlyphMask:
         """给出一个字符的覆盖度掩码。
+
+        `glyph_ids` 在这里**被忽略**：内置后端按文本查 5×7 点阵表，
+        没有"字形 id"这个概念（它连字体文件都没有）。这不是偷懒——
+        连字是整形器的产物，而内置后端不做整形。真字形后端会用它。
 
         **字形画进 `advance` 给定的宽度里**（见协议说明）——宽度由文本层
         决定，provider 只负责在里头放一个像样的形状。

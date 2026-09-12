@@ -99,7 +99,9 @@ class HbFtFontEngine:
         self._data: dict[str, bytes] = {}
         self._faces: dict[tuple[str, int, int], _Face] = {}
         self._shape_cache: dict[tuple[str, FontSpec], GlyphRun] = {}
-        self._mask_cache: dict[tuple[str, int, str], GlyphMask] = {}
+        # 键的「文本位」可能是 str（按文本取）或 tuple[int, ...]（按字形 id 取）：
+        # 两条路径的结果不能互相顶掉（同一个字形 id 序列与某段文本可能不同）
+        self._mask_cache: dict[tuple[object, int, str], GlyphMask] = {}
         self._glyph_coverage: dict[tuple[str, int], int] = {}
 
     # ------------------------------------------------------------ 字体发现
@@ -182,6 +184,7 @@ class HbFtFontEngine:
         # （R4.2 初版就是这么错的，靠合成字体的连字测试抓出来。）
         advances = [0.0] * len(clusters)
         y_offsets = [0.0] * len(clusters)
+        ids: list[list[int]] = [[] for _ in clusters]
         for index, (info, pos) in enumerate(zip(infos, positions, strict=True)):
             first = _grapheme_index(clusters, info.cluster)
             if first < 0:
@@ -201,10 +204,15 @@ class HbFtFontEngine:
                 # 连字的 advance 均分给簇内每个字素簇（见模块顶部的说明）
                 advances[target] += advance / count
                 y_offsets[target] = pos.y_offset / _POSITION_SCALE
+            # 字形 id 只记在**第一个**被覆盖的簇上：连字只有一个字形，
+            # 记三份会让光栅层把它画三遍
+            ids[first].append(info.codepoint)
 
         placements: list[GlyphPlacement] = []
         x = 0.0
-        for (start, end), advance, y_offset in zip(clusters, advances, y_offsets, strict=True):
+        for (start, end), advance, y_offset, glyph_ids in zip(
+            clusters, advances, y_offsets, ids, strict=True
+        ):
             placements.append(
                 GlyphPlacement(
                     start=start,
@@ -213,6 +221,7 @@ class HbFtFontEngine:
                     y=y_offset,
                     advance=advance,
                     family=record.family,
+                    glyph_ids=tuple(glyph_ids),
                 )
             )
             x += advance
@@ -244,12 +253,31 @@ class HbFtFontEngine:
         del text
         return False
 
-    def mask_for(self, text: str, size: float, family: str, advance: float) -> GlyphMask:
+    def mask_for(
+        self,
+        text: str,
+        size: float,
+        family: str,
+        advance: float,
+        glyph_ids: tuple[int, ...] = (),
+    ) -> GlyphMask:
         """把一个簇的字形用 FreeType 光栅化成灰度覆盖度。
 
-        一个簇可能有多个字形（组合符、基字符 + 变体选择符），所以这里
-        **先整形再合成**：把簇内所有字形的位图按各自偏移叠进一张掩码，
-        取覆盖度最大值。分开画的话，重叠部分的 alpha 会被叠加两次，笔画变粗。
+        两条取字形路径：
+
+        - **给了 `glyph_ids`（且只有一个）→ 直接按 id 光栅化**。这是连字的唯一
+          正解：连字在显示列表里被切成多个字素簇，按文本逐簇取掩码会拿到
+          分开的 f/f/i，而排版算的是连字宽度——两者对不上。
+        - 否则**按文本重新整形**。这条路对**组合符**是对的（GPOS 会把标记摆到
+          基字符上），而 id 路径做不到：显示列表只带簇级的 x/y 偏移，
+          不带簇内逐字形的偏移。
+
+        所以调用方的规则是"**单字形簇走 id、多字形簇走文本**"——
+        两条路各自覆盖自己擅长的情形，见 `software.py` 的 `_text`。
+
+        一个簇可能有多个字形，这里**先整形再合成**：把簇内所有字形的位图按
+        各自偏移叠进一张掩码，取覆盖度最大值。分开画的话，重叠部分的 alpha
+        会被叠加两次，笔画变粗。
 
         `advance` 参数在这里不参与计算（字形由字体决定），但**必须收下**：
         内置后端靠它把位图画进给定宽度，协议要求两个实现签名一致。
@@ -263,13 +291,19 @@ class HbFtFontEngine:
         if record is None:
             return GlyphMask(0, 0, 0, 0, b"")
 
-        key = (text, round(size * _POSITION_SCALE), record.family)
+        key: tuple[object, int, str] = (
+            glyph_ids if glyph_ids else text,
+            round(size * _POSITION_SCALE),
+            record.family,
+        )
         hit = self._mask_cache.get(key)
         if hit is not None:
             return hit
 
         face = self._face_for(record, size)
-        infos, positions = self._shape(text, face)
+        infos, positions = (
+            self._shape(text, face) if not glyph_ids else self._shape_glyph_ids(glyph_ids, face)
+        )
         boxes: list[tuple[float, float, Any]] = []
         min_left = max_right = 0.0
         min_top = max_bottom = 0
@@ -404,6 +438,20 @@ class HbFtFontEngine:
         hb.shape(face.hb, buffer, {})
         return list(buffer.glyph_infos), list(buffer.glyph_positions)
 
+    def _shape_glyph_ids(
+        self, glyph_ids: tuple[int, ...], face: _Face
+    ) -> tuple[list[Any], list[Any]]:
+        """把已知的字形 id 包成"整形结果"的形状（位置全零）。
+
+        位置为零是**正确的**：显示列表只带簇级的 x/y 偏移，簇内逐字形的偏移
+        不在里面。而这条路径只用于**单字形簇**（见 `mask_for` 的说明），
+        单字形簇本来就没有簇内偏移可言。
+        """
+        return (
+            [_GlyphInfo(glyph_id=glyph_id, cluster=0) for glyph_id in glyph_ids],
+            [_GlyphPosition() for _ in glyph_ids],
+        )
+
     def _render_glyph(self, face: _Face, glyph_id: int) -> tuple[Any, int, int] | None:
         """把一个字形光栅化成灰度位图。没有轮廓（如空格）返回 `None`。"""
         import freetype
@@ -414,6 +462,29 @@ class HbFtFontEngine:
         if not bitmap.width or not bitmap.rows:
             return None
         return bitmap, slot.bitmap_left, slot.bitmap_top
+
+
+@dataclass(frozen=True, slots=True)
+class _GlyphInfo:
+    """`hb.GlyphInfo` 的最小替身：只要 `codepoint` 与 `cluster`。"""
+
+    glyph_id: int
+    cluster: int = 0
+
+    @property
+    def codepoint(self) -> int:
+        """HarfBuzz 把它叫 codepoint，其实是字形 id（历史命名）。"""
+        return self.glyph_id
+
+
+@dataclass(frozen=True, slots=True)
+class _GlyphPosition:
+    """`hb.GlyphPosition` 的最小替身：位置全零（簇内偏移不在显示列表里）。"""
+
+    x_offset: int = 0
+    y_offset: int = 0
+    x_advance: int = 0
+    y_advance: int = 0
 
 
 def _read_font_data(path: str) -> bytes:

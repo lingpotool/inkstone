@@ -63,6 +63,10 @@ class ShapedCluster:
     #: 上下标、组合符、CJK 标点悬挂、多字体回退的基线差全靠它——
     #: 没有它，这些字形只能全部压在基线上。
     y: float = 0.0
+    #: 本簇在字体里的字形 id（整形结果）。连字是"一个字形覆盖多个字素簇"，
+    #: 那个 id 落在**第一个**被覆盖的簇上；光栅层据此画连字字形，
+    #: 而不是按文本逐簇重新整形（那会画出分开的字母）。
+    glyph_ids: tuple[int, ...] = ()
 
     @property
     def right(self) -> float:
@@ -155,6 +159,7 @@ class ShapedLine:
                 advance=cluster.advance,
                 family=cluster.family,
                 y_offset=cluster.y,
+                glyph_ids=cluster.glyph_ids,
             )
             for cluster in self.clusters
         )
@@ -223,6 +228,7 @@ class Shaper:
                         advance=placement.advance,
                         family=placement.family,
                         y=placement.y,
+                        glyph_ids=placement.glyph_ids,
                         script=script_of(run_text[placement.start]),
                         ascent=glyph_run.metrics.ascent,
                         descent=glyph_run.metrics.descent,

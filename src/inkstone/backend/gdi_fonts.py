@@ -753,7 +753,14 @@ class GdiFontEngine:
         """真字体引擎渲染真字形，不存在"只有占位形状"的字符。"""
         return False
 
-    def mask_for(self, text: str, size: float, family: str, advance: float) -> object:
+    def mask_for(
+        self,
+        text: str,
+        size: float,
+        family: str,
+        advance: float,
+        glyph_ids: tuple[int, ...] = (),
+    ) -> object:
         """把一个字符画进内存 DIB，读回灰度作为覆盖度掩码。
 
         为什么不用 `GetGlyphOutline`：那个 API 在字体链接、颜色 emoji、
