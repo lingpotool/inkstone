@@ -29,7 +29,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 
-from ..layout import BoxConstraints, RenderBox, Size
+from ..backend.base import PointerEvent
+from ..events.pointer import HitTestResult, PointerRouter
+from ..layout import BoxConstraints, Offset, Rect, RenderBox, Size
 from ..style import Theme, default_theme
 from ..text import TextEngine
 from .element import Element
@@ -150,6 +152,14 @@ class BuildOwner:
         # 失效的 Effect 队列：下一帧 build 之前统一重跑（docs/20 R6.2）。
         # 信号写 → effect 失效 → 入队 → 同帧结算，UI 与副作用不差一拍。
         self._pending_effects: list[Effect] = []
+        # 指针路由（R7.1）：命中链的三阶段分发与 hover 差分。
+        # 一个 owner 一棵树，所以 router 的 hover 状态也归它。
+        self.pointer_router = PointerRouter()
+        # 文本输入通道：输入框获焦时经这两个钩子通知后端（R5.7 的协议已就位）。
+        # 为什么不直接调 backend：core 不应该认识平台对象；App 组装时把
+        # `backend.start_text_input` / `set_ime_rect` 接进来即可。
+        self.on_text_input: Callable[[bool], None] | None = None
+        self.on_ime_rect: Callable[[Rect], None] | None = None
 
     # ------------------------------------------------------------ 查询
 
@@ -273,6 +283,30 @@ class BuildOwner:
             )
         self._pending_effects.append(effect)
         self.request_frame()
+
+    # ------------------------------------------------------------ 输入分发（R7.1）
+
+    def dispatch_pointer(self, event: PointerEvent) -> bool:
+        """把一个指针事件路由到组件树。返回是否命中。
+
+        做两件事：从根渲染对象算命中链（layout 的 `hit_test`），
+        再把链交给 router 做三阶段分发与 hover 差分。
+        事件回调在 IDLE 阶段执行，所以回调里 `set_state` 是合法的；
+        但**在 layout / paint 阶段派发事件会抛 `FrameError`**——
+        那意味着某个绘制/布局代码在偷偷制造输入，属于时序 bug
+        （与 `schedule_build_for` 的阶段守卫同一套标准，不开洞）。
+        """
+        if self._phase in (FramePhase.LAYOUT, FramePhase.PAINT):
+            raise FrameError(
+                f"在 {self._phase.value} 阶段不允许派发指针事件",
+                phase=self._phase.value,
+            )
+        root = self.root_render_object
+        if root is None:
+            return False
+        result = HitTestResult()
+        root.hit_test(Offset(event.x, event.y), result)
+        return self.pointer_router.dispatch(result, event)
 
     def flush_effects(self) -> None:
         """在 build 之前重跑失效的 Effect。

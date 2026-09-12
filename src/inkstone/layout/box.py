@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from ..events.pointer import HitTestResult, PointerDispatch
 from .protocol import (
     INF,
     Axis,
@@ -329,6 +330,65 @@ class RenderBox:
         self._needs_paint = False
         for child in self.children:
             child.paint_tree(context)
+
+    # ------------------------------------------------------------ 命中测试（R7.1）
+
+    # 命中测试是"绘制顺序的逆运算"：paint 从前往后画，命中就得从后往前找，
+    # 否则被盖在下面的控件会先接住事件。整个算法就这一条直觉。
+
+    def hit_test(self, position: Offset, result: HitTestResult) -> bool:
+        """把 `position`（本节点局部坐标）处的命中链写进 `result`。
+
+        自顶向下、**子级逆序**（后画的在上层）。命中链 target 优先：
+        先递归子级、后把自身加入，于是 `result.target` 是最深（最上层）的那个。
+
+        滚动容器不需要额外代码：它给子级的偏移是 `-scroll`，而自身尺寸就是
+        视口——点落在视口外时**本节点的 bounds 检查先失败**，根本不会递归子级，
+        "滚出视口的子级点不到"于是成为结构保证，而不是某处特判（docs/21 R7.1）。
+        """
+        if self._size.is_empty:
+            return False
+        if not self._hit_test_bounds().contains(position.dx, position.dy):
+            return False
+
+        for child in reversed(self.children):
+            local = Offset(position.dx - child.offset.dx, position.dy - child.offset.dy)
+            if child.hit_test(local, result):
+                # 只走最上面命中的那一个子级分支：下层兄弟不该同时收到事件。
+                break
+
+        result.add(self, position.dx, position.dy)
+        return True
+
+    def _hit_test_bounds(self) -> Rect:
+        """本节点的可命中矩形（局部坐标）。默认就是自身 bounds。
+
+        留成钩子是为了将来的裁剪型容器（overlay、圆角裁剪）——
+        但**不要**把渲染裁剪 `paint_clip` 直接搬过来：两者语义不同，
+        滚动容器的裁剪已经由"offset + 视口尺寸"自动成立。
+        """
+        return Rect(0.0, 0.0, self._size.width, self._size.height)
+
+    def handle_pointer_event(self, dispatch: PointerDispatch) -> None:
+        """接收一次指针分发。默认不处理（普通布局节点对输入无感）。
+
+        需要响应输入的节点（按钮、输入框）覆写它，或在 `paint` 之外
+        由元素把回调写进渲染对象（"元素写、渲染对象读"）。
+        """
+
+    def local_to_global(self, point: Offset) -> Offset:
+        """把本节点局部坐标换算成窗口（根）坐标。沿父链累加 offset。
+
+        输入框上报 IME 候选框位置时要的是窗口坐标，而组件只知道局部坐标——
+        这个换算必须由布局层给，组件自己拼会漏掉中间任何一层容器。
+        """
+        dx, dy = point.dx, point.dy
+        node: RenderBox | None = self
+        while node is not None:
+            dx += node._offset.dx
+            dy += node._offset.dy
+            node = node._parent
+        return Offset(dx, dy)
 
     # ------------------------------------------------------------ 调试
 

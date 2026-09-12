@@ -74,10 +74,16 @@
 > 全变体×全状态过 WCAG AA 断言（顺手修掉暗色 `primary_press` 3.6:1 的
 > 违规令牌）；`resolve` 引入 `UNSET` 哨兵。
 >
-> **下一个该动的是 R7「交互闭环与 Phase 1 收尾」（docs/21）**：
-> 命中测试与事件路由、手势竞技场、DPI 接线、样板 App、
-> 性能基准驱动 GL 后端决策。这是 Phase 1 的最后一块——
-> 做完它，界面从"能画"变成"能点、能滚、能打字"。
+> **R7「交互闭环与 Phase 1 收尾」（docs/21）已开工：R7.1 命中测试与指针
+> 事件路由已完成**（`RenderBox.hit_test` 逆序命中 + 滚动视口裁剪；三阶段
+> `PointerRouter` + `stop_propagation`；ENTER/LEAVE 命中链差分；Button 的
+> HOVER/ACTIVE/FOCUS 与 `on_tap`；Input 聚焦经 owner 钩子打开 IME 通道并
+> 上报候选框）。无头单测 **888 → 908** 全绿，覆盖率 89.9%。
+>
+> **下一个该动的是 R7.2「手势竞技场」**（docs/21）：tap / double-tap /
+> long-press / drag / scroll 在竞技场里竞争；8px 阈值进令牌；
+> 长按计时用注入的 `time_ms` 排帧推进，不读墙上时钟。
+> 之后是 R7.3 DPI 接线 → R7.4 样板 App → R7.5 性能基准 → GL 后端决策。
 >
 
 ---
@@ -147,8 +153,9 @@ d3baffd feat(text,widgets,gfx): 文本接入渲染管线，Text 组件落地
 ## 三、下一步（按 ROADMAP 顺序，别跳）
 
 > **⚠️ 先看这里**：地基整改 R1–R6（docs/14–20）**已全部完成**（888 测试全绿）。
-> 当前该动的是 **R7「交互闭环与 Phase 1 收尾」（docs/21）**——
-> 它就是下面这几节（中文输入 / DPI / 样板 App）的正式施工版，以 docs/21 为准。
+> R7「交互闭环与 Phase 1 收尾」（docs/21）进行中：**R7.1 已完成**（908 测试全绿），
+> 当前该动的是 **R7.2 手势竞技场**。docs/21 是下面这几节（中文输入 / DPI /
+> 样板 App）的正式施工版，以它为准。
 
 ### ① 中文输入与文本编辑 —— Phase 1 最大的剩余缺口
 

@@ -76,6 +76,11 @@
      layout 阶段改状态抛 FrameError。
    - signals（docs/06 §3 状态双轨）已在 R6.2 落地：`Signal` / `Computed` / `Effect`，
      与 Inherited 环境传播（R6.1 `ThemeScope`）共用依赖追踪内核。
+   - **事件路由已在 R7.1 接上**（docs/21）：`RenderBox.hit_test` 逆序命中 +
+     滚动视口裁剪，`events/pointer.py` 的三阶段路由（捕获/目标/冒泡 +
+     `stop_propagation`）与 ENTER/LEAVE 命中链差分；Button 由路由驱动
+     HOVER/ACTIVE/FOCUS 与 `on_tap`，Input 聚焦打开 IME 通道并上报候选框。
+     手势竞技场、DPI 接线、样板 App、性能基准是 R7.2–R7.5。
    - 未实现：semantics 阶段（Phase 3 无障碍）。
 6. **样式**：设计系统三层令牌（含阴影/动效令牌，规格见 `docs/13`）+ 明暗主题 + 组件变体解析
    - **进度（部分完成）**：`gfx/color.py`（含 WCAG 对比度计算）、

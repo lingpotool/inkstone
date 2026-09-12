@@ -31,6 +31,7 @@ Phase 1 · 地基。真实代码覆盖布局、组件树、样式、渲染、**�
 | `gfx/`（display_list / paint / transform / **glyphs** / raster.base / raster.software） | ✅ 显示列表（`TextRunOp` + `PathFillOp`/`PathStrokeOp`）+ 录制器（**仿射变换栈**）+ 软件光栅（**帧生命周期协议** + 不透明矩形快路径）+ PNG |
 | `devtools/screenshot.py` | ✅ 确定性截图 + 黄金图基线（10 张）+ **字形源自动配对** |
 | `events/ime.py` | ✅ IME 组合态模型（`ImeSession`：事件流 → text+composition 状态） |
+| `events/pointer.py` | ✅ 指针路由：`HitTestResult` + 三阶段 `PointerRouter`（捕获/目标/冒泡、`stop_propagation`）+ ENTER/LEAVE 命中链差分；`layout.RenderBox.hit_test` 逆序命中 |
 | `examples/hello.py` | ✅ 可运行示例（`--dark` / `--deterministic`），进 CI 冒烟测试 |
 | 其余模块（gfx GL+Skia / events 其余 / primitives …） | ⬜ 占位桩 |
 
@@ -55,9 +56,14 @@ R6 落地环境传播与状态双轨：`InheritedWidget` / `ThemeScope` 子树�
 顺手修掉暗色 `primary_press` 3.6:1 的违规令牌）。
 每条都带"修复前必红"的回归测试。地基整改 R1–R6 全部完成，
 后补清单见 docs/20 §R6.4。
+收官包 **R7「交互闭环与 Phase 1 收尾」（docs/21）正在进行**：
+R7.1 命中测试与指针事件路由已完成（`RenderBox.hit_test` 逆序命中 +
+滚动视口裁剪、三阶段路由与 `stop_propagation`、ENTER/LEAVE 差分、
+Button 的 HOVER/ACTIVE/FOCUS 状态与 `on_tap`、Input 聚焦经 owner 钩子
+打开 IME 通道并上报候选框位置），测试 888 → 908 全绿。
 
-按 ROADMAP 顺序，Phase 1 剩下：② 自研 GL 后端、输入事件路由与组件接线
-（`events/` 其余模块）、DPI 缩放、样板 App。
+按 ROADMAP 顺序，Phase 1 剩下：R7.2 手势竞技场、R7.3 DPI 接线、
+R7.4 样板 App、R7.5 性能基准 → GL 后端决策（docs/21）。
 渲染与文本这几块已经能出**看起来像正经软件**的界面。
 
 **字体有三种来源，各司其职（ADR-0007 / ADR-0011）**：
@@ -355,6 +361,7 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 | ADR-0011 | **文本栈自带 HarfBuzz + FreeType，内嵌兜底字体，删除 GDI 路线** | 三套平台原生引擎在数学上不可能达成"三平台行宽一致"（Flutter/Chrome/Android 的答案一致：自带 HB+FT）。uharfbuzz / freetype-py / fonttools 为运行时依赖（合计约 22MB，有预编译轮子）；包内嵌 Inkstone Sans（Noto Sans SC 子集，OFL，约 1.8MB）做回退链终点——**中文永不出豆腐块**是结构保证。字号走 26.6 定点，17.5px 不取整。黄金图用只装内嵌字体的引擎（`tests/real_font.py`），跨平台逐比特一致 |
 | ADR-0008 | **`text_run` 指令只吃字形不吃字符串** | docs/03 的约定落地：整形与断行在 L3 完成，渲染层只接收"哪些字形、画在哪"。换行规则、回退链、字素簇的知识不渗进渲染层。光栅层**按 `glyph.x` 画，不自己累加 advance**——否则字距调整/两端对齐/标点悬挂的决策会被静默丢掉 |
 | ADR-0012 | **MetricsProvider 拆出 Backend 协议；协议符合性用显式遍历测试** | SDL2Backend 自称实现 Backend 却缺全部度量方法——`runtime_checkable` 不查方法体，假保证比没保证更危险。拆分后：窗口后端管窗口/输入/帧边界，度量引擎（HB+FT）由 App 组装时注入。符合性由 `tests/unit/test_backend_protocol.py` 逐成员断言，且测试自身能红。同批：事件模型加 `window_id`、IME 拆 TextEvent/ImeEvent 双通道、呈现帧边界（begin/end_frame）进协议 |
+| ADR-0013 | **命中链的"顺序与分发"归 events（L1），"坐标与几何"归 layout（L4）** | L1 不能 import L4，所以 `HitTestResult` / `PointerTarget` / 三阶段 `PointerRouter` 定义在 `events/pointer.py` 且不含任何几何类型；`layout.RenderBox.hit_test` 反向（L4→L1 合法）填充命中链、逐层扣掉子级 offset，局部坐标因此随链传递。命中链 **target 优先**（逆序递归子级 = 后画的在上层），滚动裁剪由"视口 bounds 检查先于递归"结构成立，不写特判。**ENTER/LEAVE 不信后端**（SDL 的是窗口级），由 MOVE/DOWN/UP/WHEEL 的命中链差分生成——把 DOWN 也算进来是为触屏（无悬停）。事件派发在 layout/paint 阶段一律抛 `FrameError` |
 
 ## 已知待办
 
