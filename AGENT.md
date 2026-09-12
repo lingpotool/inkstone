@@ -28,16 +28,18 @@ Phase 1 · 地基。真实代码覆盖布局、组件树、样式、渲染、**�
 | `style/`（tokens / theme / resolve / variants） | ✅ 三层令牌 + 明暗主题 + 变体解析 |
 | `text/`（font / fallback / shaping / linebreak / paragraph / engine） | ✅ 字体度量、CJK 回退链、整形、断行（含禁则）、段落排版 |
 | `widgets/`（basic / layout / form） | ✅ Box / Card / **Text** / Row / Column / Flexible / Button / Input |
-| `gfx/`（display_list / paint / **glyphs** / raster.base / raster.software） | ✅ 显示列表（含 **`TextRunOp`**）+ 录制器 + 软件光栅（含文本）+ PNG |
+| `gfx/`（display_list / paint / transform / **glyphs** / raster.base / raster.software） | ✅ 显示列表（`TextRunOp` + `PathFillOp`/`PathStrokeOp`）+ 录制器（**仿射变换栈**）+ 软件光栅（**帧生命周期协议** + 不透明矩形快路径）+ PNG |
 | `devtools/screenshot.py` | ✅ 确定性截图 + 黄金图基线（7 张）+ **字形源自动配对** |
 | `examples/hello.py` | ✅ 可运行示例（`--dark` / `--deterministic`），进 CI 冒烟测试 |
 | 其余模块（gfx GL+Skia / events / primitives …） | ⬜ 占位桩 |
 
-662 个无头单测全绿，**黄金图像素级比对**也跑通。
-**地基整改 R1（正确性止血，docs/15）与 R2（测试求真，docs/16）已完成**：
-R1 修掉 11 处静默断链与崩溃级 bug；R2 让门禁本身说真话（黄金图改像素比对、
-基线缺失即失败、真全量性能基准、数值硬编码扫描）。每条都带"修复前必红"的回归测试。
-下一步是 R3–R6（docs/17–20）。
+746 个无头单测全绿，**黄金图像素级比对**也跑通。
+**地基整改 R1（正确性止血，docs/15）、R2（测试求真，docs/16）、
+R3（渲染协议重塑，docs/17）已完成**：R1 修掉 11 处静默断链与崩溃级 bug；
+R2 让门禁本身说真话（黄金图改像素比对、基线缺失即失败、真全量性能基准、
+数值硬编码扫描）；R3 趁消费者少把渲染协议改对（帧生命周期、
+`PositionedGlyph.y_offset`、仿射变换栈、path 指令形状、光栅快路径）。
+每条都带"修复前必红"的回归测试。下一步是 R4–R6（docs/18–20）。
 
 按 ROADMAP 顺序，Phase 1 剩下：② 自研 GL 后端、中文输入（`events/`）、
 DPI 缩放、样板 App。渲染与文本这几块已经能出**看起来像正经软件**的界面。
@@ -242,6 +244,34 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 - **换主题 = 整棵树标脏重建。** `BuildOwner.theme` 是 property，setter 里
   全树 `mark_needs_build`。样式只在 mount / update 时写进渲染对象，
   不标脏的话换主题会静默保留旧色（正式机制见 docs/20）。
+- **光栅后端是一帧的四个阶段，不是一次函数调用。**
+  `begin_frame(size, scale) → execute(display_list, clip)* → end_frame() → screenshot()`。
+  帧缓冲**归后端所有**：`screenshot()` 是显式读回，不是后端的唯一出口——
+  GL/Skia 的正常路径是"画进 GPU 表面再交换"，把像素读回内存是异常操作。
+  早期的 `rasterize() -> FrameBuffer` 让这两个后端在结构上无法实现，
+  已删除（R3.1）。顺序用错抛 `RasterError`，不猜。
+- **脏矩形是 `execute` 的参数，不进显示列表。** 显示列表保持"纯图纸"：
+  同样的组件树永远产出同样的指令序列，黄金图的比对语义不被重绘策略污染。
+- **`PositionedGlyph` 的四个偏移与 HarfBuzz 一一对应**
+  （`x / y_offset / advance / y_advance`）。`y_offset` 向上为正，缺了它
+  上下标、组合符、CJK 标点悬挂、多字体回退的基线差全都表达不出来（R4 会撞墙）。
+- **变换是 2×3 仿射矩阵，不是"累计平移"。** `Affine` 不可变、可比较、
+  可序列化；`A.then(B)` = 先 A 后 B。录制器用
+  `op.then(current)`（新操作套在已有变换**外面**），所以"先定位再缩放"
+  = 绕自己的原点放大，元素不会一边变大一边跑掉。
+  等比缩放下线宽、圆角、字形度量一起缩放；非等比下**不缩放**（圆角会变成
+  椭圆角，当前指令形状表达不了）——明确不支持好过半个实现悄悄画错。
+- **路径用扁平 verb 数组，不接受 SVG path 字符串。** `(verb, *coords)`，
+  verb ∈ {M,L,Q,C,Z}；形状在构造时校验（非法路径当场抛，不在光栅时画一半）。
+  字符串会让"同样的路径"有两种写法，显示列表的逐指令等值比对立刻失效。
+  软件光栅暂未实现 → **抛 `NotImplementedError`**，不静默跳过。
+- **软件光栅的快路径必须与通用路径逐比特相同。** 判据是
+  "不透明 + 直角 + **精确**像素对齐"（不用容差：容差会让边界上的两张图
+  差一个像素的覆盖度）。`SoftwareRasterizer(fast_paths=False)` 可以关掉它，
+  测试就是靠这个证明等价的。全屏填充因此从 749ms 降到 3ms。
+- **亚像素字形落位默认关。** 默认字形源是**位图**掩码，本来就按像素栅格生成，
+  用小数相位重采样只会把笔画摊薄（实测 text_block 5.6% 像素变化、多数"变亮"）。
+  R4 换上 FreeType 的**轮廓**掩码后打开才是收益（`subpixel_glyphs=True`）。
 
 ## 测试怎么写
 
