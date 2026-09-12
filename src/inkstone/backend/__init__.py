@@ -55,7 +55,6 @@ from .fontfiles import (
     generic_candidates,
     order_weights,
 )
-from .gdi_fonts import GdiFontEngine, gdi_font_engine
 from .hbft_fonts import HbFtFontEngine, hbft_font_engine
 from .headless import HeadlessBackend
 from .headless_fonts import FontTable, HeadlessMetrics, default_font_table
@@ -76,7 +75,6 @@ __all__ = [
     "FontSpec",
     "FontTable",
     "FontWeight",
-    "GdiFontEngine",
     "GlyphPlacement",
     "GlyphRun",
     "HbFtFontEngine",
@@ -99,7 +97,6 @@ __all__ = [
     "default_font_library",
     "default_font_table",
     "embedded_font_path",
-    "gdi_font_engine",
     "generic_candidates",
     "hbft_font_engine",
     "normalize_key_name",

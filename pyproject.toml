@@ -37,7 +37,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# 核心包零依赖；平台与渲染能力按需安装，保证最小化部署可行。
+# 平台窗口与 GPU 渲染能力按需安装。核心包自带文本栈（上面三个依赖 +
+# 内嵌字体约 1.8MB，安装合计约 24MB，仍低于 docs/00 的 <40MB 目标）。
 sdl2 = ["PySDL2>=0.9.16"]
 skia = ["skia-python>=132.0"]
 dev = [

@@ -42,20 +42,21 @@ def _resolve_metrics(
 ) -> MetricsProvider:
     """按优先级挑一个度量提供方。
 
-    显式注入 > 系统真字体（若可用）> 确定性表。
+    显式注入 > 系统真字体（HarfBuzz + FreeType，若可用）> 确定性表。
 
-    "系统真字体不可用就静默退回确定性表"是有意为之：CI 上没有 GDI，
-    单元测试仍要能跑；而**渲染出真中文**只在真机上才会发生，
-    这正是我们要的（黄金图用确定性源，真机预览用系统源）。
+    "系统真字体不可用就静默退回确定性表"是有意为之：uharfbuzz / freetype-py
+    是运行时依赖，理论上一定在，但极简环境（嵌入解释器、裁剪过的部署）
+    可能缺 wheel——这时单元测试仍要能跑，而不是直接起不来。
     """
     if font_engine is not None:
         return font_engine
     if system_fonts:
-        from .gdi_fonts import gdi_font_engine
+        try:
+            from .hbft_fonts import hbft_font_engine
 
-        engine = gdi_font_engine()
-        if engine is not None:
-            return engine
+            return hbft_font_engine()
+        except ImportError:
+            pass
     return HeadlessMetrics(font_table)
 
 
@@ -241,8 +242,8 @@ class HeadlessBackend:
     def font_metrics(self) -> MetricsProvider:
         """当前的度量提供方。
 
-        可能是确定性的 `HeadlessMetrics`，也可能是系统真字体引擎
-        （`GdiFontEngine`）。**它同时也可能是字形提供方**——
+        可能是确定性的 `HeadlessMetrics`，也可能是真字体引擎
+        （`HbFtFontEngine`）。**它同时也可能是字形提供方**——
         如果它实现了 `mask_for`，光栅层就应当用它取字形，
         这样度量与字形必然同源。`devtools` 就是这么自动配对的。
         """

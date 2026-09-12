@@ -23,35 +23,43 @@ Phase 1 · 地基。真实代码覆盖布局、组件树、样式、渲染、**�
 | `layout/stack.py` | ✅ Stack / Positioned / Align |
 | `layout/scroll.py` | ✅ ScrollView（向子级派发无限主轴约束） |
 | `core/`（key / widget / element / render_object / binding） | ✅ 三棵树 + 帧调度 + `text_engine` 环境服务 |
-| `backend/`（base / headless / sdl2 / **fonts** / **headless_fonts** / **gdi_fonts**） | ✅ 平台抽象层 + **字体度量契约**（`MetricsProvider`）+ **Windows 真字体引擎** |
+| `backend/`（base / headless / sdl2 / **fonts** / **headless_fonts** / **fontfiles** / **hbft_fonts** / **fonts_data**） | ✅ 平台抽象层 + **字体度量契约**（`MetricsProvider`）+ **跨平台真字体引擎（HarfBuzz + FreeType）** + **内嵌兜底字体** |
 | `gfx/color.py` | ✅ Color（hex 解析、插值、WCAG 对比度） |
 | `style/`（tokens / theme / resolve / variants） | ✅ 三层令牌 + 明暗主题 + 变体解析 |
 | `text/`（font / fallback / shaping / linebreak / paragraph / engine） | ✅ 字体度量、CJK 回退链、整形、断行（含禁则）、段落排版 |
 | `widgets/`（basic / layout / form） | ✅ Box / Card / **Text** / Row / Column / Flexible / Button / Input |
 | `gfx/`（display_list / paint / transform / **glyphs** / raster.base / raster.software） | ✅ 显示列表（`TextRunOp` + `PathFillOp`/`PathStrokeOp`）+ 录制器（**仿射变换栈**）+ 软件光栅（**帧生命周期协议** + 不透明矩形快路径）+ PNG |
-| `devtools/screenshot.py` | ✅ 确定性截图 + 黄金图基线（7 张）+ **字形源自动配对** |
+| `devtools/screenshot.py` | ✅ 确定性截图 + 黄金图基线（10 张）+ **字形源自动配对** |
 | `examples/hello.py` | ✅ 可运行示例（`--dark` / `--deterministic`），进 CI 冒烟测试 |
 | 其余模块（gfx GL+Skia / events / primitives …） | ⬜ 占位桩 |
 
-746 个无头单测全绿，**黄金图像素级比对**也跑通。
+815 个无头单测全绿，**黄金图像素级比对**也跑通。
 **地基整改 R1（正确性止血，docs/15）、R2（测试求真，docs/16）、
-R3（渲染协议重塑，docs/17）已完成**：R1 修掉 11 处静默断链与崩溃级 bug；
+R3（渲染协议重塑，docs/17）、R4（跨平台文本栈，docs/18）已完成**：
+R1 修掉 11 处静默断链与崩溃级 bug；
 R2 让门禁本身说真话（黄金图改像素比对、基线缺失即失败、真全量性能基准、
 数值硬编码扫描）；R3 趁消费者少把渲染协议改对（帧生命周期、
-`PositionedGlyph.y_offset`、仿射变换栈、path 指令形状、光栅快路径）。
-每条都带"修复前必红"的回归测试。下一步是 R4–R6（docs/18–20）。
+`PositionedGlyph.y_offset`、仿射变换栈、path 指令形状、光栅快路径）；
+R4 把文本栈换成 Flutter/Chrome 同路线（HarfBuzz 整形 + FreeType 光栅化 +
+内嵌 Inkstone Sans 兜底字体），删掉 GDI 路线，黄金图全部切真字体。
+每条都带"修复前必红"的回归测试。下一步是 R5–R6（docs/19–20）。
 
 按 ROADMAP 顺序，Phase 1 剩下：② 自研 GL 后端、中文输入（`events/`）、
 DPI 缩放、样板 App。渲染与文本这几块已经能出**看起来像正经软件**的界面。
 
-**字体有两种来源，各司其职（ADR-0007 / ADR-0009）**：
+**字体有三种来源，各司其职（ADR-0007 / ADR-0011）**：
 
-- **确定性字形**（默认）：内置 5×7 位图 + 非拉丁占位块，无字体文件，
-  跨平台逐比特一致 → 黄金图与 CI 用这条。
-- **系统真字体**（`HeadlessBackend(system_fonts=True)` 或注入
-  `GdiFontEngine`）：中文渲染成**真正的汉字** → 真机预览与 App 用这条。
+- **真字体引擎**（`HbFtFontEngine`，生产与示例默认）：HarfBuzz 整形 +
+  FreeType 光栅化，三平台同一套；系统字体缺失时由**内嵌 Inkstone Sans**
+  兜底（中文永不出豆腐块）→ App、示例、真机预览用这条。
+- **黄金图真字体**（`tests/real_font.py` 的 `golden_owner`）：同一套 HB+FT，
+  但 `FontLibrary(directories=())` 只装内嵌字体 → 黄金图与 CI 用这条，
+  跨平台逐比特一致。
+- **确定性字形表**（`HeadlessMetrics`，测试默认）：内置 5×7 位图 +
+  非拉丁占位块 → 文本层逻辑断言（advance、断行位置）用这条，
+  断言数值与任何真字体无关。
 
-两者都是"度量与字形同源"，区别只在源头。`devtools` 会**自动配对**：
+三者都是"度量与字形同源"，区别只在源头。`devtools` 会**自动配对**：
 组件树用哪个度量源，光栅就用哪个字形源，配错了会立刻看出来（字形叠字）。
 示例：`python examples/hello.py`（真字体）／`--deterministic`（确定性）。
 
@@ -119,10 +127,11 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 **踩过的坑（值得记住）**：
 1. 最初 `test` 任务跑全量测试（含 `slow`），结果 py3.10 的共享 runner 上
    性能断言以 2.10ms 对 2.0ms 挂了。墙上时钟断言天生会抖——正确性任务必须排除它。
-2. 覆盖率任务原本在 Ubuntu 上跑，但 `backend/gdi_fonts.py` 是 Windows 专有的
-   真字体引擎，在 Linux 上只能整段跳过，于是 800 行全被算成"未覆盖"
-   （89% → 83%）。**与其 omit 掉（等于对自己最核心的代码闭眼），
-   不如在能跑它的平台上量。** 将来有 macOS/Linux 字体引擎时同理。
+2. 覆盖率任务原本在 Ubuntu 上跑，但当时 Windows 专有的真字体引擎在 Linux 上
+   只能整段跳过，于是 800 行全被算成"未覆盖"（89% → 83%）。**与其 omit 掉
+   （等于对自己最核心的代码闭眼），不如在能跑它的平台上量。**
+   该引擎已在 R4.6 被跨平台的 HB+FT 取代（GDI 路线删除），但原则保留：
+   将来再出现平台独占代码时，覆盖率仍要在能跑它的平台上量。
 
 黄金图的 CI 行为值得说清：**三平台像素级一致，已经在 CI 上验证过了**
 （`77fed3a` 首次推送即 8 个任务全绿）。无头度量表是纯数据、
@@ -328,20 +337,18 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 | ADR-0005 | 整形与断行复用成熟实现，不自己造 | HarfBuzz 级整形规则上千条，自写=两年换更差版本（docs/04 §2） |
 | ADR-0006 | **文本度量下沉到 L0 后端** | 度量是平台相关能力，放 L0 才不违反"平台差异不出 L0"；`Backend` 继承 `MetricsProvider` 让度量与绘制同源成为结构必然。`text/` 只面向协议说话，可 100% 无窗口测试 |
 | ADR-0007 | **软件光栅默认用内置确定性字形** | 验证后端要的是"跨平台逐比特一致"与"布局可验证"，不是字形美观。ASCII 用内置 5×7 真位图，非拉丁用按 advance 定宽的占位块。**字形宽度必须画进 `advance` 里**——按字号自由决定宽度会让相邻字形重叠 |
-| ADR-0009 | **真字形由 L0 平台引擎提供，度量与字形同一个对象** | `GdiFontEngine`（Windows）同时实现 `MetricsProvider` 与 `GlyphProvider`，共用一份 HFONT 缓存 → 字距与字形不可能分家。`devtools` 通过 `glyph_provider` 属性**自动配对**，杜绝"度量用一套、字形用另一套"（那会让字形叠字，且只在真机上可见）。度量归一化：逐簇 `GetCharABCWidthsFloatW` + 整串 `GetTextExtentPoint32W` 校正，避免整数累加漂移 |
-| ADR-0010 | **Win32 文本 API 的长度按 UTF-16 码元算，不按码点** | `len(str)` 数的是码点，W 系 API 数的是码元。emoji 是代理对（1 码点 = 2 码元），传 `len()` 会让 GDI 只量/只画半个代理对——宽度变成一个荒唐的小数、字形变成空方框，**而且不报错**。统一走 `_utf16_len()` |
+| ADR-0009 | ~~真字形由 L0 平台引擎提供~~（被 ADR-0011 取代） | "度量与字形同一个对象"的精神被 HB+FT 继承；GDI 实现已随 R4.6 删除 |
+| ADR-0010 | **Win32 文本 API 的长度按 UTF-16 码元算，不按码点** | 历史教训（GDI 已删）。emoji 是代理对（1 码点 = 2 码元），传 `len()` 会让 W 系 API 只量/只画半个代理对，**而且不报错**。将来再碰 Win32 文本 API 时这条仍然成立 |
+| ADR-0011 | **文本栈自带 HarfBuzz + FreeType，内嵌兜底字体，删除 GDI 路线** | 三套平台原生引擎在数学上不可能达成"三平台行宽一致"（Flutter/Chrome/Android 的答案一致：自带 HB+FT）。uharfbuzz / freetype-py / fonttools 为运行时依赖（合计约 22MB，有预编译轮子）；包内嵌 Inkstone Sans（Noto Sans SC 子集，OFL，约 1.8MB）做回退链终点——**中文永不出豆腐块**是结构保证。字号走 26.6 定点，17.5px 不取整。黄金图用只装内嵌字体的引擎（`tests/real_font.py`），跨平台逐比特一致 |
 | ADR-0008 | **`text_run` 指令只吃字形不吃字符串** | docs/03 的约定落地：整形与断行在 L3 完成，渲染层只接收"哪些字形、画在哪"。换行规则、回退链、字素簇的知识不渗进渲染层。光栅层**按 `glyph.x` 画，不自己累加 advance**——否则字距调整/两端对齐/标点悬挂的决策会被静默丢掉 |
 
 ## 已知待办
 
-- **真字形目前只有 Windows 一份**（`GdiFontEngine`）。macOS（CoreText）与
-  Linux（FreeType）需要各自实现，接口（`MetricsProvider` + `GlyphProvider`）
-  已经固定，照着 `gdi_fonts.py` 的结构写即可，上层零改动。
-- **颜色 emoji 会退化成单色轮廓**：GDI 的灰度抗锯齿路径画不了 COLR/CBDT
-  彩色字体，emoji 出来是黑白剪影。要真彩色需要 Direct2D/DirectWrite，
-  属后续工作。宽度与位置是对的，不影响排版。
-- **字号是整数像素**：GDI 的 `lfHeight` 只有整数，所以字号带小数时会被取整。
-  想让 1.25 倍缩放等场景精确，得配合 DPI 那套（见 ROADMAP DoD）一起做。
+- **颜色 emoji 目前是灰度轮廓**：FreeType 的 `FT_LOAD_RENDER` 走灰度抗锯齿，
+  画不了 COLR/CBDT 彩色位图。要真彩色需接入彩色字形格式，属后续工作。
+  宽度与位置是对的，不影响排版。
+- **内嵌兜底字体是 GB2312 6763 字 + 拉丁/希腊/西里尔/假名**：生僻字与韩文
+  不在覆盖内（口径与加档方法见 `tools/build_embedded_font.py` 头注释）。
 - **架构上有 4 处已登记的反向依赖**（`test_architecture.py` 的
   `KNOWN_EXCEPTIONS`）：gfx/text → layout（几何原语，属共享内核）、
   backend → gfx、core → style。登记表不允许留失效条目，消除了就要删掉。

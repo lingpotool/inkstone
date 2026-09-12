@@ -5,9 +5,10 @@
     python examples/hello.py --dark            # 暗色主题
     python examples/hello.py --deterministic   # 内置确定性字形（跨平台同字节）
 
-默认走**系统真字体**（Windows 上用 GDI）：中英文都渲染成真字形。
+默认走**真字体引擎**（HarfBuzz 整形 + FreeType 光栅化，三平台同一套）：
+中英文都渲染成真字形，系统字体缺失时由内嵌兜底字体接住（中文永不出豆腐块）。
 加 `--deterministic` 换成内置确定性字形（5×7 位图 + 非拉丁占位块），
-用于在任何机器上得到逐字节相同的结果——黄金图走的就是这条路。
+用于在任何机器上得到逐字节相同的结果。
 
 这个示例要证明三件事：
 
@@ -23,7 +24,7 @@ import sys
 from pathlib import Path
 
 from inkstone import __version__
-from inkstone.backend import HeadlessBackend, gdi_font_engine
+from inkstone.backend import HeadlessBackend, hbft_font_engine
 from inkstone.core import BuildOwner
 from inkstone.devtools import render_to_png
 from inkstone.layout import BoxConstraints
@@ -84,27 +85,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--deterministic",
         action="store_true",
-        help="用内置确定性字形（跨平台逐字节一致），而不是系统真字体",
+        help="用内置确定性字形（跨平台逐字节一致），而不是真字体引擎",
     )
     parser.add_argument("--dark", action="store_true", help="用暗色主题")
     args = parser.parse_args(argv)
 
     theme = Theme.dark() if args.dark else Theme.light()
 
-    # 字体来源：默认系统真字体，拿不到就退回确定性度量表。
+    # 字体来源：默认真字体引擎（HB+FT，三平台同一套；uharfbuzz / freetype-py
+    # 是运行时依赖，随包安装）。系统字体缺失时由内嵌兜底字体接住。
     # 光栅的字形会**自动跟随**这里的度量来源（devtools 负责配对），
     # 所以字距与字形必然出自同一份字体，不会出现"排得对但画歪了"。
     if args.deterministic:
         backend = HeadlessBackend()
         font_note = "内置确定性字形"
     else:
-        engine = gdi_font_engine()
-        if engine is None:
-            backend = HeadlessBackend()
-            font_note = "系统字体不可用，已退回内置确定性字形"
-        else:
-            backend = HeadlessBackend(font_engine=engine)
-            font_note = "系统真字体"
+        backend = HeadlessBackend(font_engine=hbft_font_engine())
+        font_note = "真字体（HarfBuzz + FreeType）"
 
     owner = BuildOwner(theme=theme, text_engine=TextEngine(backend))
     build(owner)

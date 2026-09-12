@@ -197,7 +197,7 @@ def _is_windows() -> bool:
     mypy 会按 `sys.platform` 的**字面量**做平台收窄：在 Windows 上跑 mypy 时，
     `if sys.platform == "win32": return ...` 之后的 darwin / linux 分支会被判成
     "不可达"（我们开了 `warn_unreachable`），于是三平台代码只能在**自己**那个
-    平台上通过类型检查。这是本仓库踩过的坑，处理方式与 `gdi_fonts.py` 一致。
+    平台上通过类型检查。这是本仓库踩过的坑（`Makefile type-all` 存在的理由）。
     """
     return sys.platform == "win32"
 

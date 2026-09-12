@@ -66,13 +66,18 @@ inkstone/
 ## 先看一眼它能做什么
 
 ```bash
-python examples/hello.py                 # 渲染成 hello.png（用系统真字体）
+python examples/hello.py                 # 渲染成 hello.png（真字体：HarfBuzz + FreeType）
 python examples/hello.py --dark          # 暗色主题
 python examples/hello.py --deterministic # 内置确定性字形（跨平台像素级一致）
 ```
 
 示例里没有一处硬编码宽度——按钮宽度由标签文字**自己量出来**。
 这不是演示技巧，而是"文字宽度只度量、不估算"这条纪律的直接结果。
+
+字体栈（R4 起）与 Flutter / Chrome 同一条路线：自带 HarfBuzz 整形 +
+FreeType 光栅化，三平台渲染结果一致；包内嵌一份 Inkstone Sans 兜底字体
+（Noto Sans SC 子集，OFL 许可，约 1.8MB），**系统上一个字体都没有时
+中文也不会出豆腐块**。
 
 ---
 
@@ -88,8 +93,8 @@ make check                          # lint + 类型检查 + 测试
 现在能跑的：
 
 ```bash
-python examples/hello.py            # 打印版本与当前阶段
-python -m pytest tests/unit -q      # 布局基础类型的单元测试（无需窗口）
+python examples/hello.py            # 渲染一张真实界面图（真字体，中文一等公民）
+python -m pytest tests/unit -q      # 全部单元测试（无需窗口）
 ```
 
 想看已跑通的原型效果（Phase 0 探针，不参与打包）：
