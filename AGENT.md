@@ -30,6 +30,7 @@ Phase 1 · 地基。真实代码覆盖布局、组件树、样式、渲染、**�
 | `widgets/`（basic / layout / form） | ✅ Box / Card / **Text** / Row / Column / Flexible / **ScrollView** / Button / Input |
 | `gfx/`（display_list / paint / transform / **glyphs** / raster.base / raster.software） | ✅ 显示列表（`TextRunOp` + `PathFillOp`/`PathStrokeOp`）+ 录制器（**仿射变换栈**）+ 软件光栅（**帧生命周期协议** + 不透明矩形快路径）+ PNG |
 | `devtools/screenshot.py` | ✅ 确定性截图 + 黄金图基线（12 张）+ **字形源自动配对** + DPI 档位 |
+| `benchmarks/run.py` | ✅ 帧耗时基准（长列表滚动 / 全屏重绘 / 文本密集，p50/p95，GL 决策依据） |
 | `events/ime.py` | ✅ IME 组合态模型（`ImeSession`：事件流 → text+composition 状态） |
 | `events/pointer.py` | ✅ 指针路由：`HitTestResult` + 三阶段 `PointerRouter`（捕获/目标/冒泡、`stop_propagation`）+ ENTER/LEAVE 命中链差分；`layout.RenderBox.hit_test` 逆序命中 |
 | `events/gestures.py` | ✅ 手势竞技场：`GestureArena` + `GestureRecognizer` 基类 + Tap / DoubleTap / LongPress / Drag；按 pointer_id 竞争裁决、取消是一等公民、超时用注入时间轴推进 |
@@ -71,9 +72,14 @@ DPI_CHANGED 下一帧生效不拉伸；150% 黄金图）；
 R7.4 样板 App「墨记」（`examples/notes.py`）已完成：侧栏 + 滚动列表 +
 表单 + 明暗主题切换，`ScrollView` widget 补齐，headless 黄金图进 CI、
 `--sdl2` 真窗口交互；它逼出并修掉一个文本栈真 bug（多字重下光栅选错字体面
-→ 粗体整行画成别的字，见 ADR-0016）。测试 888 → 944 全绿。
+→ 粗体整行画成别的字，见 ADR-0016）；
+R7.5 性能基准已完成（`benchmarks/run.py` 三场景出 p50/p95，规则先写死），
+数据触发 GL 后端子包（ADR-0017 / docs/22）。测试 888 → 944 全绿。
 
-按 ROADMAP 顺序，Phase 1 剩下：R7.5 性能基准 → GL 后端决策（docs/21）。
+**R7 整包完成，Phase 1 的"交互闭环"闭合**（能点、能滚、能打字的前半程：
+聚焦与 IME 通道、能切主题、能缩放）。Phase 1 剩余 DoD：文本编辑模型
+（可输入/可删除/光标，Phase 2 首项）、macOS/Linux 真机字体验证、
+三平台 SDL2 交互验证，以及按 docs/22 启动的 GL 后端子包。
 渲染与文本这几块已经能出**看起来像正经软件**的界面。
 
 **字体有三种来源，各司其职（ADR-0007 / ADR-0011）**：
@@ -348,13 +354,16 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 - `04` 文本与字体 · `05` **布局系统** · `06` 组件树状态事件 · `07` 样式与主题
 - `08` 组件清单 · `09` 无障碍 · `10` 工程体系 · `11` 风险与取舍
 - `12` 架构审查（诚实回答"能不能交给 AI 做成企业级"）· `13` **设计系统规格书**
-- **`14`–`20` 地基整改系列（施工中优先读）**：`14` 施工总纲（含执行协议与已拍板决策）、
+- **`14`–`22` 地基整改与收尾系列（施工中优先读）**：`14` 施工总纲（含执行协议与已拍板决策）、
   `15` R1 正确性止血 · `16` R2 测试求真 · `17` R3 渲染协议重塑 ·
-  `18` R4 文本栈替换（HarfBuzz+FreeType）· `19` R5 事件与 IME · `20` R6 主题传播与依赖追踪
+  `18` R4 文本栈替换（HarfBuzz+FreeType）· `19` R5 事件与 IME · `20` R6 主题传播与依赖追踪 ·
+  `21` R7 交互闭环与 Phase 1 收尾 · `22` GL 后端子包（R7.5 数据驱动的决策与范围）
 - `ROADMAP.md` 分阶段 DoD
 
-**当前优先级**：Phase 1 的其余功能开发让位于地基整改（docs/14–20）。
-整改期间任何新功能开发前，先确认对应分包文档里该领域没有未完成的条目。
+**当前优先级**：地基整改（docs/14–20）与收官包 R7（docs/21）均已完成。
+按 R7.5 的数据驱动决策，当前主线是 **GL 后端子包（docs/22）**；
+Phase 1 其余 DoD（文本编辑模型、macOS/Linux 真机字体验证、三平台 SDL2 验证）
+并行推进。任何新功能开发前，先确认对应分包文档里该领域没有未完成的条目。
 
 ## 明确不做（1.x 范围外）
 
@@ -380,6 +389,7 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 | ADR-0014 | **tap/double-tap/long-press/drag 是竞技场里的竞争，不是各自判断；单击与双击必须在同一个识别器里裁决** | 滚动列表里放按钮时"按钮 ACTIVE + 列表一起滚"是两个都赢的经典 bug——`GestureArena` 按 pointer_id 收集命中链上的识别器并显式裁决，输家收 `on_reject`（取消），组件据此退回 ACTIVE。单击与双击**不能**拆成两个识别器：第一击抬起时 Tap 无法知道第二击来不来，Tap 先赢则双击永不出现，Tap 等待则无法在第二击时撤回已发的单击；`DoubleTapGestureRecognizer` 用"延迟的单击 + 双击"一个状态机闭合。识别器只吃构造时传入的令牌阈值（8px / 500ms / 300ms），时间一律用事件 `time_ms` + `begin_frame(now_ms=)` 推进，不读墙上时钟 |
 | ADR-0015 | **DPI 换算只在录制/光栅层：布局与事件恒为逻辑像素，物理 = 逻辑 × dpi_scale** | 组件里乘缩放因子会让几何、命中、事件坐标三处口径分叉（改一处漏两处）。档位经 `BuildOwner.begin_frame(dpi_scale=…)` 进帧上下文，`flush_paint` 在根上压一个等比仿射变换，于是显示列表指令是设备像素、帧缓冲按逻辑尺寸×scale 分配，而组件代码一行不改。线宽/圆角/字形 em 随仿射一起缩放（R3.4），文字在物理分辨率上重新光栅化——掩码缓存键含生效字号，1.0 档的掩码不会被复用到 1.5 档。`DPI_CHANGED` 经 `handle_window_event` 更新档位，下一帧按新档重录，不拉伸旧帧 |
 | ADR-0016 | **字形 id 必须与"产生它的字体面"（face_key）同源，光栅不许按 family 重选面** | glyph id 只在它所属的 face 里有意义。同一 family 的 Regular 与 Bold 是两个文件、两套编号；整形按 `spec.weight` 选面，而 `mask_for` 曾按 family 用 REGULAR 重选——于是"用 Bold 的 id 查 Regular 的轮廓"，粗体中文整行画成别的字（R7.4 样板 App 的标题栏暴露）。修法：`GlyphPlacement.face_key`（path+index）经 `ShapedCluster` / `PositionedGlyph` 一路带到 `mask_for(face_key=…)`；掩码缓存键也改用 face_key（否则两个字重互相顶掉）。合成字体回归测试钉住（`TestGlyphsComeFromTheShapedFace`）。这条是"度量与字形同源"从"同一个对象"加强到"同一个面" |
+| ADR-0017 | **GL 后端由 R7.5 数据驱动启动：软件光栅只做确定性事实源，不做生产帧率** | 决策规则在施工前写死（`benchmarks/run.py`，p95 > 10ms = 60fps 预算六成）。实测三场景 p95 为预算的 40–300 倍（scroll 859ms / fullscreen 3125ms / text 576ms），热点是纯 Python 逐像素 SDF 与"整份显示列表全量光栅"。故启动 GL 后端子包（docs/22）：只实现现有 IR 指令集、沿用 R3.1 帧生命周期、不改 core、不引第二套文本栈、黄金图仍以软件光栅为准。**量完再调阈值等于给结论找理由**，数字与规则一并留在 docs/22 |
 
 ## 已知待办
 

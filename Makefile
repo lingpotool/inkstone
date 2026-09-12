@@ -20,12 +20,12 @@ golden:                     ## 更新黄金图基线（改过渲染相关代码�
 	INKSTONE_UPDATE_GOLDEN=1 $(RUN) -m pytest tests/unit/test_golden_form.py tests/unit/test_text_render.py -q
 
 lint:                       ## 静态检查
-	$(RUN) -m ruff check src tests examples
-	$(RUN) -m ruff format --check src tests examples
+	$(RUN) -m ruff check src tests examples benchmarks
+	$(RUN) -m ruff format --check src tests examples benchmarks
 
 fmt:                        ## 自动格式化
-	$(RUN) -m ruff check --fix src tests examples
-	$(RUN) -m ruff format src tests examples
+	$(RUN) -m ruff check --fix src tests examples benchmarks
+	$(RUN) -m ruff format src tests examples benchmarks
 
 type:                       ## 类型检查（严格模式）
 	$(RUN) -m mypy
@@ -46,8 +46,8 @@ perf:                       ## 性能预算（无插桩才准）
 arch:                       ## 架构约束：分层单向 / text 层无平台 API / 组件零硬编码
 	$(RUN) -m pytest tests/unit/test_architecture.py -q
 
-bench:                      ## 性能基准
-	$(RUN) -m pytest benchmarks -q --benchmark-only
+bench:                      ## 帧耗时基准（R7.5 三场景 p50/p95，驱动 GL 决策）
+	$(RUN) benchmarks/run.py
 
 clean:                      ## 清理构建与缓存产物
 	rm -rf build dist .pytest_cache .mypy_cache .ruff_cache
