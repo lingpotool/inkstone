@@ -129,6 +129,44 @@ class TestGoldenLoginForm:
         _assert_or_update_golden("login_form_dark", png)
 
 
+def _load_notes_module() -> object:
+    """加载 `examples/notes.py`（样板 App）。黄金图跑它 = App 的视觉回归门禁。"""
+    import importlib.util
+    import sys
+
+    path = Path(__file__).resolve().parents[2] / "examples" / "notes.py"
+    spec = importlib.util.spec_from_file_location("examples_notes_golden", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestGoldenNotesApp:
+    """R7.4：样板 App 的黄金图（侧栏 + 滚动列表 + 表单 + 明暗主题）。"""
+
+    def test_notes_light(self) -> None:
+        module = _load_notes_module()
+        owner = _owner(Theme.light())
+        module.build(owner)  # type: ignore[attr-defined]
+        png = render_to_png(
+            owner,
+            BoxConstraints(max_width=module.WIDTH, max_height=module.HEIGHT),  # type: ignore[attr-defined]
+        )
+        _assert_or_update_golden("notes_light", png)
+
+    def test_notes_dark(self) -> None:
+        module = _load_notes_module()
+        owner = _owner(Theme.dark())
+        module.build(owner, dark=True)  # type: ignore[attr-defined]
+        png = render_to_png(
+            owner,
+            BoxConstraints(max_width=module.WIDTH, max_height=module.HEIGHT),  # type: ignore[attr-defined]
+        )
+        _assert_or_update_golden("notes_dark", png)
+
+
 class TestGoldenDpiScale:
     """R7.3：同一棵树在 150% 档位下按设备像素出图（文字在物理分辨率上光栅化）。"""
 

@@ -169,6 +169,15 @@ class GlyphPlacement:
     #: f/f/i，与排版算出来的连字宽度对不上。
     #: 空元组 = 后端没有字形 id 概念（内置确定性后端）。
     glyph_ids: tuple[int, ...] = ()
+    #: 字形 id 所属**具体字体面**的稳定标识（R7.4 补）。
+    #:
+    #: 字形 id 只有配上它所在的 face 才有意义：同一个 family 可能装了多个
+    #: 字重（Regular / Bold 是两个文件、两套 glyph id 编号）。整形按
+    #: `spec.weight` 选面，光栅若只按 family 重新选面就可能选到另一个面，
+    #: 用甲的 id 去查乙的轮廓 → **画出完全不同的字**（实测：粗体中文整行乱码）。
+    #: 把整形选中的 face 标识一路带到 `mask_for`，光栅用同一个面，才是真正的
+    #: "度量与字形同源"。空串 = 后端没有字体面概念（内置确定性后端）。
+    face_key: str = ""
 
 
 @dataclass(frozen=True, slots=True)

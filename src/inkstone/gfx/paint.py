@@ -224,6 +224,7 @@ class DisplayListRecorder:
                 family=g.family,
                 em=g.em * scale,
                 y_offset=g.y_offset * scale,
+                face_key=g.face_key,
             )
             for g in glyphs
         )

@@ -379,7 +379,14 @@ class SoftwareRasterizer(RasterBackend):
             # 只对"有实际形状"的字形取掩码：空格没有字形，
             # 但它的 advance 照样推进笔位置（否则词间距会塌掉）
             if plan is not None and glyph.text.strip():
-                mask = self._glyphs.mask_for(glyph.text, op.size, glyph.family, glyph.advance, plan)
+                mask = self._glyphs.mask_for(
+                    glyph.text,
+                    op.size,
+                    glyph.family,
+                    glyph.advance,
+                    plan,
+                    face_key=glyph.face_key,
+                )
                 self._blit_mask(buf, w, h, mask, glyph_x, glyph_baseline, op.color, op.clip)
             pen_x = glyph_x + glyph.advance
             last_x = max(last_x, pen_x)

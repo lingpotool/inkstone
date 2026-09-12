@@ -27,14 +27,15 @@ Phase 1 · 地基。真实代码覆盖布局、组件树、样式、渲染、**�
 | `gfx/color.py` | ✅ Color（hex 解析、插值、WCAG 对比度） |
 | `style/`（tokens / theme / resolve / variants） | ✅ 三层令牌 + 明暗主题 + 变体解析 |
 | `text/`（font / fallback / shaping / linebreak / paragraph / engine） | ✅ 字体度量、CJK 回退链、整形、断行（含禁则）、段落排版 |
-| `widgets/`（basic / layout / form） | ✅ Box / Card / **Text** / Row / Column / Flexible / Button / Input |
+| `widgets/`（basic / layout / form） | ✅ Box / Card / **Text** / Row / Column / Flexible / **ScrollView** / Button / Input |
 | `gfx/`（display_list / paint / transform / **glyphs** / raster.base / raster.software） | ✅ 显示列表（`TextRunOp` + `PathFillOp`/`PathStrokeOp`）+ 录制器（**仿射变换栈**）+ 软件光栅（**帧生命周期协议** + 不透明矩形快路径）+ PNG |
-| `devtools/screenshot.py` | ✅ 确定性截图 + 黄金图基线（10 张）+ **字形源自动配对** |
+| `devtools/screenshot.py` | ✅ 确定性截图 + 黄金图基线（12 张）+ **字形源自动配对** + DPI 档位 |
 | `events/ime.py` | ✅ IME 组合态模型（`ImeSession`：事件流 → text+composition 状态） |
 | `events/pointer.py` | ✅ 指针路由：`HitTestResult` + 三阶段 `PointerRouter`（捕获/目标/冒泡、`stop_propagation`）+ ENTER/LEAVE 命中链差分；`layout.RenderBox.hit_test` 逆序命中 |
 | `events/gestures.py` | ✅ 手势竞技场：`GestureArena` + `GestureRecognizer` 基类 + Tap / DoubleTap / LongPress / Drag；按 pointer_id 竞争裁决、取消是一等公民、超时用注入时间轴推进 |
 | `examples/hello.py` | ✅ 可运行示例（`--dark` / `--deterministic`），进 CI 冒烟测试 |
-| 其余模块（gfx GL+Skia / events 其余 / primitives …） | ⬜ 占位桩 |
+| `examples/notes.py` | ✅ **样板 App「墨记」**：侧栏 + 滚动列表 + 表单 + 明暗主题切换；headless 出黄金图、`--sdl2` 真窗口交互，进 CI 冒烟 |
+| 其余模块（gfx GL+Skia / events 其余 / primitives / app …） | ⬜ 占位桩 |
 
 888 个无头单测全绿，**黄金图像素级比对**也跑通。
 **地基整改 R1（正确性止血，docs/15）、R2（测试求真，docs/16）、
@@ -66,9 +67,13 @@ R7.2 手势竞技场已完成（`GestureArena` + Tap/DoubleTap/LongPress/Drag，
 超时经 `begin_frame(now_ms=...)` 用注入时间推进）；
 R7.3 DPI 缩放接线已完成（档位经 `begin_frame(dpi_scale=…)` 进上下文，
 `flush_paint` 在根上压缩放 → 显示列表是设备像素，布局仍是逻辑像素；
-DPI_CHANGED 下一帧生效不拉伸；150% 黄金图）。测试 888 → 933 全绿。
+DPI_CHANGED 下一帧生效不拉伸；150% 黄金图）；
+R7.4 样板 App「墨记」（`examples/notes.py`）已完成：侧栏 + 滚动列表 +
+表单 + 明暗主题切换，`ScrollView` widget 补齐，headless 黄金图进 CI、
+`--sdl2` 真窗口交互；它逼出并修掉一个文本栈真 bug（多字重下光栅选错字体面
+→ 粗体整行画成别的字，见 ADR-0016）。测试 888 → 944 全绿。
 
-按 ROADMAP 顺序，Phase 1 剩下：R7.4 样板 App、R7.5 性能基准 → GL 后端决策（docs/21）。
+按 ROADMAP 顺序，Phase 1 剩下：R7.5 性能基准 → GL 后端决策（docs/21）。
 渲染与文本这几块已经能出**看起来像正经软件**的界面。
 
 **字体有三种来源，各司其职（ADR-0007 / ADR-0011）**：
@@ -374,6 +379,7 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 | ADR-0013 | **命中链的"顺序与分发"归 events（L1），"坐标与几何"归 layout（L4）** | L1 不能 import L4，所以 `HitTestResult` / `PointerTarget` / 三阶段 `PointerRouter` 定义在 `events/pointer.py` 且不含任何几何类型；`layout.RenderBox.hit_test` 反向（L4→L1 合法）填充命中链、逐层扣掉子级 offset，局部坐标因此随链传递。命中链 **target 优先**（逆序递归子级 = 后画的在上层），滚动裁剪由"视口 bounds 检查先于递归"结构成立，不写特判。**ENTER/LEAVE 不信后端**（SDL 的是窗口级），由 MOVE/DOWN/UP/WHEEL 的命中链差分生成——把 DOWN 也算进来是为触屏（无悬停）。事件派发在 layout/paint 阶段一律抛 `FrameError` |
 | ADR-0014 | **tap/double-tap/long-press/drag 是竞技场里的竞争，不是各自判断；单击与双击必须在同一个识别器里裁决** | 滚动列表里放按钮时"按钮 ACTIVE + 列表一起滚"是两个都赢的经典 bug——`GestureArena` 按 pointer_id 收集命中链上的识别器并显式裁决，输家收 `on_reject`（取消），组件据此退回 ACTIVE。单击与双击**不能**拆成两个识别器：第一击抬起时 Tap 无法知道第二击来不来，Tap 先赢则双击永不出现，Tap 等待则无法在第二击时撤回已发的单击；`DoubleTapGestureRecognizer` 用"延迟的单击 + 双击"一个状态机闭合。识别器只吃构造时传入的令牌阈值（8px / 500ms / 300ms），时间一律用事件 `time_ms` + `begin_frame(now_ms=)` 推进，不读墙上时钟 |
 | ADR-0015 | **DPI 换算只在录制/光栅层：布局与事件恒为逻辑像素，物理 = 逻辑 × dpi_scale** | 组件里乘缩放因子会让几何、命中、事件坐标三处口径分叉（改一处漏两处）。档位经 `BuildOwner.begin_frame(dpi_scale=…)` 进帧上下文，`flush_paint` 在根上压一个等比仿射变换，于是显示列表指令是设备像素、帧缓冲按逻辑尺寸×scale 分配，而组件代码一行不改。线宽/圆角/字形 em 随仿射一起缩放（R3.4），文字在物理分辨率上重新光栅化——掩码缓存键含生效字号，1.0 档的掩码不会被复用到 1.5 档。`DPI_CHANGED` 经 `handle_window_event` 更新档位，下一帧按新档重录，不拉伸旧帧 |
+| ADR-0016 | **字形 id 必须与"产生它的字体面"（face_key）同源，光栅不许按 family 重选面** | glyph id 只在它所属的 face 里有意义。同一 family 的 Regular 与 Bold 是两个文件、两套编号；整形按 `spec.weight` 选面，而 `mask_for` 曾按 family 用 REGULAR 重选——于是"用 Bold 的 id 查 Regular 的轮廓"，粗体中文整行画成别的字（R7.4 样板 App 的标题栏暴露）。修法：`GlyphPlacement.face_key`（path+index）经 `ShapedCluster` / `PositionedGlyph` 一路带到 `mask_for(face_key=…)`；掩码缓存键也改用 face_key（否则两个字重互相顶掉）。合成字体回归测试钉住（`TestGlyphsComeFromTheShapedFace`）。这条是"度量与字形同源"从"同一个对象"加强到"同一个面" |
 
 ## 已知待办
 

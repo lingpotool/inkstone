@@ -25,7 +25,7 @@ owner.begin_frame(BoxConstraints(max_width=320, max_height=600))
 
 from .basic import Box, Card, Text
 from .form import Button, ButtonState, Input, InputState
-from .layout import Column, Flex, Flexible, Row
+from .layout import Column, Flex, Flexible, Row, ScrollView
 
 __all__ = [
     "Box",
@@ -38,5 +38,6 @@ __all__ = [
     "Input",
     "InputState",
     "Row",
+    "ScrollView",
     "Text",
 ]

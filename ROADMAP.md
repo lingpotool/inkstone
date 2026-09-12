@@ -87,7 +87,12 @@
    - **DPI 缩放已在 R7.3 接上**：档位经 `begin_frame(dpi_scale=…)` 进帧上下文，
      `flush_paint` 在根上压等比仿射变换 → 显示列表是设备像素、帧缓冲按
      逻辑尺寸×scale；布局与命中恒为逻辑像素；`DPI_CHANGED` 下一帧生效。
-     150% 黄金图（`login_form_light_150`）进 CI。样板 App、性能基准是 R7.4–R7.5。
+     150% 黄金图（`login_form_light_150`）进 CI。
+   - **样板 App「墨记」已在 R7.4 落地**（`examples/notes.py`）：侧栏导航 +
+     可滚动笔记列表 + 表单 + 明暗主题切换，`ScrollView` widget 补齐，
+     headless 黄金图（`notes_light` / `notes_dark`）进 CI，`--sdl2` 真窗口交互。
+     它逼出并修掉文本栈一个真 bug（多字重下光栅选错字体面，见 ADR-0016）。
+     剩余：性能基准 → GL 决策（R7.5）。
    - 未实现：semantics 阶段（Phase 3 无障碍）。
 6. **样式**：设计系统三层令牌（含阴影/动效令牌，规格见 `docs/13`）+ 明暗主题 + 组件变体解析
    - **进度（部分完成）**：`gfx/color.py`（含 WCAG 对比度计算）、
@@ -160,6 +165,8 @@
 - [ ] 100%/125%/150% 缩放下无模糊、无错位
 - [x] 布局引擎 100% 无窗口可测，单测覆盖 ≥ 85%（实测 89%）
 - [ ] 样板 App（一个真实小工具）在三平台可用
+      —— R7.4 已交付 `examples/notes.py`（headless 出图 + SDL2 路径）；
+      SDL2 真机交互尚待在 Windows/macOS/Linux 上各验一遍
 - [ ] 帧时间 p95 < 8ms（200 节点界面）
 
 ### 主要风险

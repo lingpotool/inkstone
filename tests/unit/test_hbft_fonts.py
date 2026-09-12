@@ -394,3 +394,81 @@ class TestEmbeddedFontRendering:
             assert mask.height > 0, f"{ch} 没有墨迹"
             bottoms.append(mask.top + mask.height)
         assert max(bottoms) - min(bottoms) <= 1, f"平底汉字底沿不齐: {bottoms}"
+
+
+class TestGlyphsComeFromTheShapedFace:
+    """R7.4 抓到的真 bug：同一 family 装了多个字重时，光栅选错了面。
+
+    字形 id 只有配上它所在的 face 才有意义。整形按 `spec.weight` 选面
+    （Regular / Bold 是两个文件、两套 id），而 `mask_for` 曾经只按 family
+    重新选面、永远拿到 Regular——于是"用 Bold 的 id 查 Regular 的轮廓"，
+    粗体中文整行画成别的字（示例 App 的标题栏就是这么暴露的）。
+
+    回归判据：`mask_for` 传了 `face_key` 就必须用**那个面**。
+    合成字体把 Bold 的轮廓造得比 Regular 宽（advance 900 vs 600），
+    选错面时两者宽度会相等。
+    """
+
+    def _engine(self, tmp_path: Path) -> HbFtFontEngine:
+        regular = build_font(
+            tmp_path / "regular.ttf",
+            family="Weight Face",
+            subfamily="Regular",
+            weight=400,
+            advance=600,
+        )
+        bold = build_font(
+            tmp_path / "bold.ttf",
+            family="Weight Face",
+            subfamily="Bold",
+            weight=700,
+            advance=900,
+        )
+        return engine_for(regular, bold)
+
+    def test_mask_uses_the_face_that_produced_the_glyph_ids(self, tmp_path: Path) -> None:
+        engine = self._engine(tmp_path)
+        size = 20.0
+        regular = engine.shape_line("A", FontSpec(families=("Weight Face",), size=size))
+        bold = engine.shape_line(
+            "A", FontSpec(families=("Weight Face",), size=size, weight=FontWeight.BOLD)
+        )
+
+        reg_cluster = regular.placements[0]
+        bold_cluster = bold.placements[0]
+        assert reg_cluster.face_key, "整形必须把选中的字体面记下来"
+        assert bold_cluster.face_key != reg_cluster.face_key, "前提：两个字重是两个面"
+
+        reg_mask = engine.mask_for(
+            "A",
+            size,
+            reg_cluster.family,
+            reg_cluster.advance,
+            reg_cluster.glyph_ids,
+            face_key=reg_cluster.face_key,
+        )
+        bold_mask = engine.mask_for(
+            "A",
+            size,
+            bold_cluster.family,
+            bold_cluster.advance,
+            bold_cluster.glyph_ids,
+            face_key=bold_cluster.face_key,
+        )
+
+        assert bold_mask.width > reg_mask.width, (
+            "Bold 的字形必须来自 Bold 面（轮廓更宽）——"
+            "宽度相等说明 mask_for 又按 family 选回了 Regular 面"
+        )
+        # 自验证：丢掉 face_key（修复前的行为）会退回 Regular 面，
+        # 宽度与 Regular 相同——这正是"粗体画出别的字"的成因。
+        wrong = engine.mask_for(
+            "A", size, bold_cluster.family, bold_cluster.advance, bold_cluster.glyph_ids
+        )
+        assert wrong.width == reg_mask.width
+
+    def test_without_face_key_it_still_falls_back_to_family(self, tmp_path: Path) -> None:
+        """没有 face_key 的旧调用方不能被弄坏（退回按 family 选，行为如旧）。"""
+        engine = self._engine(tmp_path)
+        mask = engine.mask_for("A", 20.0, "Weight Face", 12.0)
+        assert mask.width > 0

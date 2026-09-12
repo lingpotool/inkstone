@@ -176,6 +176,12 @@ class PositionedGlyph:
     #: 只有 `x` 的话，R4（HarfBuzz 文本栈）落地即撞墙——
     #: 表现是"组合符全跑到基线上、上下标不会上下"。
     y_offset: float = 0.0
+    #: `glyph_ids` 所属**具体字体面**的标识（R7.4）。
+    #:
+    #: 同一 family 的 Regular 与 Bold 是两个文件、两套字形编号；光栅若只按
+    #: `family` 重选面，就可能用甲的 id 查乙的轮廓、画出完全不同的字。
+    #: 整形把选中的面记在这里，一路传到 `GlyphProvider.mask_for(face_key=...)`。
+    face_key: str = ""
 
 
 @dataclass(frozen=True, slots=True)

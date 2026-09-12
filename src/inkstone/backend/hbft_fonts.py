@@ -124,6 +124,11 @@ class HbFtFontEngine:
         # 覆盖探测的缓存：(族, 基字符) → 能不能画。
         # 排版每行都要问几次，而 cmap 查询虽快也不该重复做
         self._glyph_coverage: dict[tuple[str, str], bool] = {}
+        # face 标识 → 具体的字体面记录（R7.4）。整形把选中的面记进
+        # GlyphPlacement.face_key，光栅按同一个 key 取回**同一个面**——
+        # 只按 family 重选会在多字重字体上选错面，用甲的 glyph id 查乙的
+        # 轮廓，画出完全不同的字。
+        self._records: dict[str, FontRecord] = {}
 
     # ------------------------------------------------------------ 字体发现
 
@@ -245,6 +250,7 @@ class HbFtFontEngine:
                     advance=advance,
                     family=record.family,
                     glyph_ids=tuple(glyph_ids),
+                    face_key=self._record_key(record),
                 )
             )
             x += advance
@@ -283,6 +289,8 @@ class HbFtFontEngine:
         family: str,
         advance: float,
         glyph_ids: tuple[int, ...] = (),
+        *,
+        face_key: str = "",
     ) -> GlyphMask:
         """把一个簇的字形用 FreeType 光栅化成灰度覆盖度。
 
@@ -304,20 +312,29 @@ class HbFtFontEngine:
 
         `advance` 参数在这里不参与计算（字形由字体决定），但**必须收下**：
         内置后端靠它把位图画进给定宽度，协议要求两个实现签名一致。
+
+        `face_key` 是整形选中的**具体字体面**标识（`GlyphPlacement.face_key`）。
+        必须用它取面而不是按 family 重选：同一 family 的 Regular 与 Bold 是
+        两个文件、两套 glyph id，选错面就会画出别的字（R7.4 的真 bug）。
         """
         del advance
         from ..gfx.glyphs import GlyphMask  # 延迟导入：不让 backend 在模块级依赖 gfx
 
         if not text or not text.strip():
             return GlyphMask(0, 0, 0, 0, b"")
-        record = self._find(family)
+        # 优先用整形选中的那个 face（face_key）——只有它才能正确解释 glyph_ids。
+        # 没有 face_key（旧调用方 / 内置确定性后端）才退回按 family 选，
+        # 那条路在多字重字体上可能选错面。
+        record = self._records.get(face_key) if face_key else None
+        if record is None:
+            record = self._find(family)
         if record is None:
             return GlyphMask(0, 0, 0, 0, b"")
 
         key: tuple[object, int, str] = (
             glyph_ids if glyph_ids else text,
             round(size * _POSITION_SCALE),
-            record.family,
+            face_key or self._record_key(record),
         )
         hit = self._mask_cache.get(key)
         if hit is not None:
@@ -390,11 +407,25 @@ class HbFtFontEngine:
         self._shape_cache.clear()
         self._mask_cache.clear()
         self._glyph_coverage.clear()
+        self._records.clear()
 
     # ------------------------------------------------------------ 内部
 
     def _find(self, family: str) -> FontRecord | None:
         return self.library.find(family, weight=FontWeight.REGULAR, slant=FontSlant.NORMAL)
+
+    def _record_key(self, record: FontRecord) -> str:
+        """一个字体面的稳定标识（文件路径 + 子面下标）。
+
+        同一 family 的不同字重是不同文件/子面，`family` 名分不开它们，
+        所以 face 的标识必须落到 path/index 上（R7.4）。
+        """
+        return f"{record.path}\x00{record.index}"
+
+    def _remember(self, record: FontRecord) -> FontRecord:
+        """登记 face 标识，供 `mask_for(face_key=...)` 取回同一个面。"""
+        self._records[self._record_key(record)] = record
+        return record
 
     def _library_or_fallback(self, spec: FontSpec, text: str = "") -> FontRecord:
         """按回退链挑字体；链上全无命中时用内嵌兜底字体。
@@ -415,9 +446,9 @@ class HbFtFontEngine:
         for family in spec.families:
             hit = library.find(family, weight=spec.weight, slant=spec.slant)
             if hit is not None and (not sample or self.has_glyph(hit.family, sample)):
-                return hit
+                return self._remember(hit)
         if library._fallback is not None:
-            return library._fallback
+            return self._remember(library._fallback)
         raise FontMetricsError(
             f"回退链里一个族都没找到：{list(spec.families)}；"
             f"内嵌兜底字体（{DEFAULT_FALLBACK_FAMILY}）也还没注册。"

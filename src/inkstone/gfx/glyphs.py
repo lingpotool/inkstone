@@ -79,6 +79,8 @@ class GlyphProvider(Protocol):
         family: str,
         advance: float,
         glyph_ids: tuple[int, ...] = (),
+        *,
+        face_key: str = "",
     ) -> GlyphMask:
         """给出某字符的覆盖度掩码。
 
@@ -304,6 +306,8 @@ class BuiltinGlyphProvider:
         family: str,
         advance: float,
         glyph_ids: tuple[int, ...] = (),
+        *,
+        face_key: str = "",
     ) -> GlyphMask:
         """给出一个字符的覆盖度掩码。
 

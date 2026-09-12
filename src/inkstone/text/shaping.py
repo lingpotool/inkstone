@@ -67,6 +67,9 @@ class ShapedCluster:
     #: 那个 id 落在**第一个**被覆盖的簇上；光栅层据此画连字字形，
     #: 而不是按文本逐簇重新整形（那会画出分开的字母）。
     glyph_ids: tuple[int, ...] = ()
+    #: `glyph_ids` 所属的具体字体面标识（R7.4）。光栅必须用同一个面解释这些
+    #: id，否则多字重字体会"用甲的 id 查乙的轮廓"，画出别的字。
+    face_key: str = ""
 
     @property
     def right(self) -> float:
@@ -160,6 +163,7 @@ class ShapedLine:
                 family=cluster.family,
                 y_offset=cluster.y,
                 glyph_ids=cluster.glyph_ids,
+                face_key=cluster.face_key,
             )
             for cluster in self.clusters
         )
@@ -229,6 +233,7 @@ class Shaper:
                         family=placement.family,
                         y=placement.y,
                         glyph_ids=placement.glyph_ids,
+                        face_key=placement.face_key,
                         script=script_of(run_text[placement.start]),
                         ascent=glyph_run.metrics.ascent,
                         descent=glyph_run.metrics.descent,
