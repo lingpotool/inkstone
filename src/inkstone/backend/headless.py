@@ -12,20 +12,20 @@
 2. **事件是注入的。** 测试用 `inject()` 塞事件，然后 `pump_events()` 取。
    不需要真的去移动鼠标，也不需要系统提供输入设备。
 
-DPI 也可以直接设（`set_dpi_scale`），用来验证 125% / 150% 缩放下的行为，
-这在真窗口上很难自动化。
+DPI 按窗口设置（`set_dpi_scale(window_id, value)`），用来验证 125% / 150%
+缩放下单个窗口的行为——真机上把窗口拖到另一块显示器就是这种语义。
 
 状态：已实现。
 """
 
 from __future__ import annotations
 
-from ..gfx.color import Color
-from ..gfx.display_list import DisplayList
 from .base import (
     BackendError,
     Cursor,
     Event,
+    ImeRect,
+    WindowEvent,
     WindowKind,
     WindowSpec,
 )
@@ -80,18 +80,24 @@ class HeadlessBackend:
         self._pending: list[Event] = []
         self._windows: dict[int, WindowSpec] = {}
         self._next_id = 1
-        self._dpi_scale = 1.0
+        # DPI 是 per-window 的（R5.10）：真机上每个显示器缩放可以不同，
+        # 拖到另一块屏只该影响那一个窗口。
+        self._dpi_scales: dict[int, float] = {}
         self._cursor: Cursor = Cursor.DEFAULT
         self._clipboard = ""
         self._initialized = False
         self._redraw_requests = 0
+        # IME 状态（R5.7）：记录哪些窗口开着文本输入、候选框在哪。
+        # 上层测试靠这两个断言"输入框聚焦时真的打开了 IME 通道"。
+        self._text_input_windows: set[int] = set()
+        self._ime_rects: dict[int, ImeRect] = {}
+        # 帧接缝（R5.8）：记录帧边界，测试可以断言"这帧真的上过屏"。
+        self._frames_presented = 0
+        self._in_frame = False
         # 字体度量：默认走确定性表（跨平台一致，黄金图才能逐字节比对）。
         # `font_engine` 允许注入任意 MetricsProvider；`system_fonts=True`
         # 是"尽量用系统真字体"的糖，拿不到引擎时静默退回确定性表。
         self._metrics: MetricsProvider = _resolve_metrics(font_table, system_fonts, font_engine)
-        # 最近一次光栅结果留在内存里，测试可以直接取像素做断言
-        self.last_frame: DisplayList | None = None
-        self.last_pixels: bytes | None = None
 
     # ------------------------------------------------------------ 身份
 
@@ -107,6 +113,9 @@ class HeadlessBackend:
     def shutdown(self) -> None:
         self._initialized = False
         self._windows.clear()
+        self._dpi_scales.clear()
+        self._text_input_windows.clear()
+        self._ime_rects.clear()
         self._pending.clear()
 
     # ------------------------------------------------------------ 窗口
@@ -119,11 +128,15 @@ class HeadlessBackend:
         window_id = self._next_id
         self._next_id += 1
         self._windows[window_id] = spec
+        self._dpi_scales[window_id] = 1.0
         return window_id
 
     def destroy_window(self, window_id: int) -> None:
         self._require_window(window_id)
         del self._windows[window_id]
+        self._dpi_scales.pop(window_id, None)
+        self._text_input_windows.discard(window_id)
+        self._ime_rects.pop(window_id, None)
 
     def window_spec(self, window_id: int) -> WindowSpec:
         self._require_window(window_id)
@@ -141,15 +154,14 @@ class HeadlessBackend:
             min_width=spec.min_width,
             min_height=spec.min_height,
         )
-        from .base import WindowEvent
-
         self._pending.append(
             WindowEvent(
                 kind=WindowKind.RESIZED,
+                window_id=window_id,
                 time_ms=self.now_ms(),
                 width=width,
                 height=height,
-                dpi_scale=self._dpi_scale,
+                dpi_scale=self._dpi_scales[window_id],
             )
         )
 
@@ -182,25 +194,29 @@ class HeadlessBackend:
 
     def dpi_scale(self, window_id: int) -> float:
         self._require_window(window_id)
-        return self._dpi_scale
+        return self._dpi_scales[window_id]
 
-    def set_dpi_scale(self, value: float) -> None:
-        """改 DPI 并广播事件——用来测 125% / 150% 缩放。"""
+    def set_dpi_scale(self, window_id: int, value: float) -> None:
+        """改某个窗口的 DPI 并给它发事件——用来测 125% / 150% 缩放。
+
+        R5.10 起是 per-window 的：真机上把窗口拖到另一块显示器，
+        只影响那个窗口（SDL 那边是 `WINDOWEVENT_MOVED` 触发轮询）。
+        """
+        self._require_window(window_id)
         if value <= 0.0:
             raise BackendError(f"DPI 缩放必须为正，收到 {value}")
-        self._dpi_scale = value
-        from .base import WindowEvent
-
-        for _window_id, spec in self._windows.items():
-            self._pending.append(
-                WindowEvent(
-                    kind=WindowKind.DPI_CHANGED,
-                    time_ms=self.now_ms(),
-                    width=spec.width,
-                    height=spec.height,
-                    dpi_scale=value,
-                )
+        self._dpi_scales[window_id] = value
+        spec = self._windows[window_id]
+        self._pending.append(
+            WindowEvent(
+                kind=WindowKind.DPI_CHANGED,
+                window_id=window_id,
+                time_ms=self.now_ms(),
+                width=spec.width,
+                height=spec.height,
+                dpi_scale=value,
             )
+        )
 
     def set_cursor(self, window_id: int, cursor: Cursor) -> None:
         self._require_window(window_id)
@@ -232,6 +248,45 @@ class HeadlessBackend:
     @property
     def redraw_requests(self) -> int:
         return self._redraw_requests
+
+    # ------------------------------------------------------------ 文本输入 / IME（R5.7）
+
+    def start_text_input(self, window_id: int) -> None:
+        self._require_window(window_id)
+        self._text_input_windows.add(window_id)
+
+    def stop_text_input(self, window_id: int) -> None:
+        self._require_window(window_id)
+        self._text_input_windows.discard(window_id)
+        self._ime_rects.pop(window_id, None)
+
+    def set_ime_rect(self, window_id: int, rect: ImeRect) -> None:
+        self._require_window(window_id)
+        self._ime_rects[window_id] = rect
+
+    def text_input_active(self, window_id: int) -> bool:
+        """该窗口的文本输入是否开着——上层测试断言 IME 通道就靠它。"""
+        return window_id in self._text_input_windows
+
+    def ime_rect(self, window_id: int) -> ImeRect | None:
+        return self._ime_rects.get(window_id)
+
+    # ------------------------------------------------------------ 呈现接缝（R5.8）
+
+    def begin_frame(self, window_id: int) -> None:
+        self._require_window(window_id)
+        self._in_frame = True
+
+    def end_frame(self, window_id: int, *, present: bool = True) -> None:
+        self._require_window(window_id)
+        self._in_frame = False
+        if present:
+            self._frames_presented += 1
+
+    @property
+    def frames_presented(self) -> int:
+        """上过屏的帧数。测试断言"这一帧真的 present 了"就靠它。"""
+        return self._frames_presented
 
     # ------------------------------------------------------------ 字体度量
     #
@@ -281,16 +336,13 @@ class HeadlessBackend:
             return self._metrics
         return None
 
-    def font_stats(self) -> dict[str, int]:
-        """度量缓存统计。"""
+    def stats(self) -> dict[str, int]:
+        """度量缓存统计（`MetricsProvider` 协议成员）。"""
         return self._metrics.stats()
 
-    # ------------------------------------------------------------ 渲染占位
-
-    def present(self, display_list: DisplayList, clear_color: Color) -> None:
-        """记录本帧结果。`clear_color` 在无头后端只作记录，不产生像素。"""
-        self.last_frame = display_list
-        self.last_pixels = None
+    def font_stats(self) -> dict[str, int]:
+        """`stats()` 的别名（沿用旧名）。"""
+        return self._metrics.stats()
 
     # ------------------------------------------------------------ 内部
 

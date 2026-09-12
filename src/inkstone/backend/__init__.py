@@ -30,16 +30,20 @@ from .base import (
     FontSlant,
     FontSpec,
     FontWeight,
+    FrameRenderer,
     GlyphPlacement,
     GlyphRun,
     ImeEvent,
     ImeKind,
+    ImeRect,
     KeyEvent,
     KeyKind,
     MetricsProvider,
     Modifiers,
     PointerEvent,
     PointerKind,
+    PointerType,
+    TextEvent,
     TextMetrics,
     WindowEvent,
     WindowKind,
@@ -58,7 +62,7 @@ from .fontfiles import (
 from .hbft_fonts import HbFtFontEngine, hbft_font_engine
 from .headless import HeadlessBackend
 from .headless_fonts import FontTable, HeadlessMetrics, default_font_table
-from .sdl2 import SDL2Backend, normalize_key_name, sdl2_library_name
+from .sdl2 import SDL2Backend, normalize_key_name, normalize_key_value, sdl2_library_name
 
 __all__ = [
     "DEFAULT_FALLBACK_FAMILY",
@@ -75,6 +79,7 @@ __all__ = [
     "FontSpec",
     "FontTable",
     "FontWeight",
+    "FrameRenderer",
     "GlyphPlacement",
     "GlyphRun",
     "HbFtFontEngine",
@@ -82,13 +87,16 @@ __all__ = [
     "HeadlessMetrics",
     "ImeEvent",
     "ImeKind",
+    "ImeRect",
     "KeyEvent",
     "KeyKind",
     "MetricsProvider",
     "Modifiers",
     "PointerEvent",
     "PointerKind",
+    "PointerType",
     "SDL2Backend",
+    "TextEvent",
     "TextMetrics",
     "WindowEvent",
     "WindowKind",
@@ -100,6 +108,7 @@ __all__ = [
     "generic_candidates",
     "hbft_font_engine",
     "normalize_key_name",
+    "normalize_key_value",
     "order_weights",
     "sdl2_library_name",
 ]

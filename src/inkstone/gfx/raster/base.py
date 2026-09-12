@@ -139,3 +139,35 @@ class RasterBackend(Protocol):
     def destroy_image(self, handle: int) -> None:
         """释放 `create_image` 返回的句柄。对未知句柄的处理由实现决定（幂等为宜）。"""
         ...
+
+
+class RasterFrameRenderer:
+    """把 `RasterBackend` 适配成后端协议的 `FrameRenderer`（R5.8）。
+
+    为什么需要这层：`backend` 是 L0，不能 import gfx（L2）的
+    `Size` / `DisplayList`——`FrameRenderer` 的签名只能是裸数字。
+    而 `RasterBackend.begin_frame` 收的是 `Size`。适配就是把
+    `(width, height, scale)` 拼回 `Size`，方向是 gfx → backend（向下），
+    架构上合法。
+
+    用法（应用组装层）：
+
+        backend = SDL2Backend(renderer=RasterFrameRenderer(SoftwareRasterizer()))
+
+    帧的**内容**仍由应用层直接调用 `raster.execute(display_list)`——
+    显示列表不经过后端。
+    """
+
+    def __init__(self, raster: RasterBackend) -> None:
+        self._raster = raster
+
+    @property
+    def raster(self) -> RasterBackend:
+        """被包装的光栅器——execute/screenshot 由应用层直接找它。"""
+        return self._raster
+
+    def begin_frame(self, width: float, height: float, scale: float) -> None:
+        self._raster.begin_frame(Size(width, height), scale)
+
+    def end_frame(self) -> None:
+        self._raster.end_frame()

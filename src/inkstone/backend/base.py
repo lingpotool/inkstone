@@ -52,16 +52,20 @@ __all__ = [
     "FontSlant",
     "FontSpec",
     "FontWeight",
+    "FrameRenderer",
     "GlyphPlacement",
     "GlyphRun",
     "ImeEvent",
     "ImeKind",
+    "ImeRect",
     "KeyEvent",
     "KeyKind",
     "MetricsProvider",
     "Modifiers",
     "PointerEvent",
     "PointerKind",
+    "PointerType",
+    "TextEvent",
     "TextMetrics",
     "WindowEvent",
     "WindowKind",
@@ -113,13 +117,27 @@ class PointerKind(Enum):
     LEAVE = "leave"
 
 
+class PointerType(Enum):
+    """指针设备类型。触屏与鼠标的交互模型不同（没有悬停），必须分得开。"""
+
+    MOUSE = "mouse"
+    TOUCH = "touch"
+    PEN = "pen"
+
+
 class KeyKind(Enum):
     DOWN = "down"
     UP = "up"
 
 
 class ImeKind(Enum):
-    """输入法事件。中文输入必须走这一套，否则组合态会丢字。"""
+    """输入法**组合态**事件。中文输入必须走这一套，否则组合态会丢字。
+
+    注意与普通文本上屏（`TextEvent`）的区别（R5.7 拆开的两条通道）：
+    按字母键出字走 `TextEvent`；拼音组合中/取消走这里。
+    `COMMIT` 留给能区分"IME 上屏"与"普通上屏"的平台（如 Win32 IMM），
+    SDL2 的上屏统一走 `TextEvent`。
+    """
 
     COMPOSE = "compose"  # 组合中（拼音还没上屏）
     COMMIT = "commit"  # 上屏
@@ -136,24 +154,40 @@ class WindowKind(Enum):
 
 @dataclass(frozen=True, slots=True)
 class PointerEvent:
-    """鼠标 / 触控 / 触控笔统一模型。坐标是**窗口内的逻辑像素**。"""
+    """鼠标 / 触控 / 触控笔统一模型。坐标是**窗口内的逻辑像素**。
+
+    `window_id` 标明事件属于哪个窗口（R5.1）——多窗口是 docs/02 §2 的承诺，
+    没有它事件到手后无法路由。`clicks` 是双击信息（1=单击，2=双击）；
+    `pressure` 为压感预留（无压感设备恒为 1.0）。
+    """
 
     kind: PointerKind
     x: float
     y: float
+    window_id: int = 0
     time_ms: float = 0.0
     button: int = 0  # 0=无, 1=左, 2=中, 3=右
     wheel_dx: float = 0.0
     wheel_dy: float = 0.0
+    pointer_type: PointerType = PointerType.MOUSE
+    pointer_id: int = 0
+    clicks: int = 0
+    pressure: float = 1.0
     modifiers: Modifiers = field(default_factory=Modifiers.none)
 
 
 @dataclass(frozen=True, slots=True)
 class KeyEvent:
-    """键盘事件。`code` 是物理按键的稳定名字，`text` 是它产生的字符。"""
+    """键盘事件（R5.6：scancode 与 keysym 分离）。
+
+    `code` 是**物理键位**的稳定名字（W3C code，布局无关）——快捷键用它，
+    AZERTY 上也不漂。`key` 是**布局相关**的键值（W3C key），文本语义用它。
+    """
 
     kind: KeyKind
-    code: str  # "KeyA" / "Enter" / "Escape" / "ArrowLeft"
+    code: str  # "KeyA" / "Enter" / "NumpadEnter" / "ArrowLeft"
+    window_id: int = 0
+    key: str = ""  # "a" / "Enter" / "Shift"（布局相关）
     time_ms: float = 0.0
     text: str | None = None  # 可打印字符；功能键为 None
     repeat: bool = False
@@ -162,24 +196,43 @@ class KeyEvent:
 
 @dataclass(frozen=True, slots=True)
 class ImeEvent:
-    """输入法事件。`cursor_start/end` 标记组合串里正在编辑的那一段。"""
+    """输入法**组合态**事件。`cursor_start/end` 标记组合串里正在编辑的那一段。
+
+    只承载组合态（COMPOSE/COMMIT/CANCEL）；普通字符上屏是 `TextEvent`（R5.7）。
+    """
 
     kind: ImeKind
     text: str = ""
+    window_id: int = 0
     time_ms: float = 0.0
     cursor_start: int = 0
     cursor_end: int = 0
 
 
 @dataclass(frozen=True, slots=True)
+class TextEvent:
+    """普通文本上屏（R5.7 拆出的独立通道）。
+
+    按字母键直接出字、IME 选词后上屏，都是这个事件——对输入框来说
+    语义只有一个：把这段文字插进光标处。组合态的中间过程与它无关。
+    """
+
+    text: str
+    window_id: int = 0
+    time_ms: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
 class FocusEvent:
     focused: bool
+    window_id: int = 0
     time_ms: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
 class WindowEvent:
     kind: WindowKind
+    window_id: int = 0
     time_ms: float = 0.0
     width: float = 0.0
     height: float = 0.0
@@ -187,7 +240,7 @@ class WindowEvent:
 
 
 # 后端产出的事件联合类型。events/ 层负责消费它做路由与命中测试。
-Event = Union[PointerEvent, KeyEvent, ImeEvent, FocusEvent, WindowEvent]  # noqa: UP007
+Event = Union[PointerEvent, KeyEvent, ImeEvent, TextEvent, FocusEvent, WindowEvent]  # noqa: UP007
 
 
 # ---------------------------------------------------------------- 窗口
@@ -210,16 +263,48 @@ class WindowSpec:
     min_height: float = 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class ImeRect:
+    """IME 候选框的跟随位置（窗口内逻辑像素）。
+
+    为什么不用 `layout.types.Rect`：backend 是 L0，layout 是 L4，
+    import 它会是反向依赖（架构测试挡着）。这里只需要一份哑数据。
+    """
+
+    x: float
+    y: float
+    width: float
+    height: float
+
+
 # ---------------------------------------------------------------- 协议
 
 
-class Backend(MetricsProvider, Protocol):
+class FrameRenderer(Protocol):
+    """后端持有的呈现器接缝（R5.8）。
+
+    为什么签名里没有 `DisplayList`：显示列表类型住在 gfx（L2），
+    backend 是 L0，import 它会是反向依赖（架构测试拦着）。
+    所以帧的**内容**（`execute(display_list)`）由应用组装层直接交给
+    光栅器，后端只经手帧的**边界**——begin 时的平台准备（切换渲染目标）、
+    end 时的上屏动作（换链）。gfx 侧用 `RasterFrameRenderer` 适配进来。
+    """
+
+    def begin_frame(self, width: float, height: float, scale: float) -> None:
+        """开始一帧。尺寸是**逻辑像素**，`scale` 是设备像素比——
+        与 `RasterBackend.begin_frame(Size, scale)` 同一套语义。"""
+
+    def end_frame(self) -> None:
+        """结束一帧（光栅器侧收尾；swap 与否由后端按 present 决定）。"""
+
+
+class Backend(Protocol):
     """平台后端。实现者：`HeadlessBackend`（测试）、`SDL2Backend`（生产）。
 
-    它同时是 **MetricsProvider**（字体度量）。这不是顺手加的方法——
-    而是 docs/04 §3「测量与绘制同源」在类型系统里的落地：
-
-        渲染后端与度量后端是**同一个对象**，两套度量在结构上就无法出现。
+    **R5.9 起它不再是 MetricsProvider**：度量引擎（R4 的 HB+FT，三平台
+    同一个）由 App 组装时注入，窗口后端不再假装自己会量字。
+    协议符合性由 `tests/unit/test_backend_protocol.py` 显式断言——
+    不靠 `runtime_checkable` 的装饰器摆设。
     """
 
     @property
@@ -266,20 +351,28 @@ class Backend(MetricsProvider, Protocol):
     def request_redraw(self, window_id: int) -> None:
         """请求下一帧重绘。"""
 
-    # -------------------------------------------------------- 字体度量
-    #
-    # 以下四个方法来自 MetricsProvider。它们是全库唯一的文本度量入口，
-    # `text/` 与 `gfx/` 都必须经由它们取数字，不许各自估算或另开一路系统调用。
-    # 实现细节见 `backend/fonts.py` 的模块文档。
+    # -------------------------------------------------------- 文本输入 / IME
 
-    def resolve_font(self, spec: FontSpec) -> FontFace:
-        """把字体规格解析成具体字体（回退到系统默认）。"""
+    # 中文输入的三条命脉（R5.7）。SDL2 的 TEXTINPUT/TEXTEDITING 事件
+    # 在调用 start_text_input 之前**根本不产生**——不实现这三个方法，
+    # "中文 IME 深度控制"就是物理不通的。
 
-    def has_family(self, family: str) -> bool:
-        """系统里是否存在该字体族。"""
+    def start_text_input(self, window_id: int) -> None:
+        """开始接收文本输入（打开 IME 组合事件）。"""
 
-    def measure_text(self, text: str, spec: FontSpec) -> TextMetrics:
-        """测量单行文本——**全库唯一的文本度量入口**。"""
+    def stop_text_input(self, window_id: int) -> None:
+        """停止接收文本输入。"""
 
-    def shape_line(self, text: str, spec: FontSpec) -> GlyphRun:
-        """把一行文本整形为字形位置序列。"""
+    def set_ime_rect(self, window_id: int, rect: ImeRect) -> None:
+        """设置 IME 候选框位置（跟随光标，不遮住正在输入的文字）。"""
+
+    # -------------------------------------------------------- 呈现接缝（R5.8）
+
+    # "帧怎么上屏"是后端最核心的职责之一。帧的**内容**由应用层直接交给
+    # 光栅器（`RasterBackend.execute`）；这里只管帧的**边界**。
+
+    def begin_frame(self, window_id: int) -> None:
+        """开始一帧（平台侧准备：切换渲染目标、记录帧边界）。"""
+
+    def end_frame(self, window_id: int, *, present: bool = True) -> None:
+        """结束一帧。`present=False` 只算不画（离屏/测试），不触发上屏。"""

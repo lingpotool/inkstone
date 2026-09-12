@@ -44,7 +44,7 @@
 ```
 inkstone/
 ├── src/inkstone/              ← 真正的库（src 布局）
-│   ├── backend/             平台抽象层：SDL2 / GLFW / headless + 字体引擎（GDI）
+│   ├── backend/             平台抽象层：SDL2 / headless + 字体栈（HarfBuzz + FreeType + 内嵌兜底字体）
 │   ├── gfx/                 渲染管线：显示列表 + 光栅后端（软件光栅 / 规划中的 GL、Skia）
 │   ├── text/                文本与字体：整形 / 断行 / 回退 / 排版（已实现）
 │   ├── layout/              布局引擎：约束向下、尺寸向上

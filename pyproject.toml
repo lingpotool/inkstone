@@ -39,7 +39,8 @@ dependencies = [
 [project.optional-dependencies]
 # 平台窗口与 GPU 渲染能力按需安装。核心包自带文本栈（上面三个依赖 +
 # 内嵌字体约 1.8MB，安装合计约 24MB，仍低于 docs/00 的 <40MB 目标）。
-sdl2 = ["PySDL2>=0.9.16"]
+# 注意：SDL2 后端走 ctypes 直调动态库（见 backend/sdl2.py 的报错指引），
+# 不需要 PySDL2；这里只留真正要装的渲染后端。
 skia = ["skia-python>=132.0"]
 dev = [
     "pytest>=8.0",
@@ -96,7 +97,7 @@ strict = true
 warn_unreachable = true
 files = ["src"]
 [[tool.mypy.overrides]]
-module = ["skia.*", "sdl2.*", "glfw.*", "freetype.*", "uharfbuzz.*", "fontTools.*"]
+module = ["skia.*", "freetype.*", "uharfbuzz.*", "fontTools.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

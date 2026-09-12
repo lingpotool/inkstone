@@ -126,3 +126,49 @@ docs/02 §3 与 AGENT.md 的对应表述改为"SDL2 唯一窗口后端，headles
 - `wait_events` 丢事件的回归测试（构造注入事件序列）；
 - 协议符合性测试红绿可控：故意删一个方法会红；
 - `make check` 全绿；架构例外登记表减少（`backend → gfx` 消除后删条目）。
+
+---
+
+## 完工记录（2026-09-13，R5.1–R5.11 全部落地）
+
+**实现要点**（与上文设计有几处施工时的具体化，记录如下）：
+
+- **R5.1 window_id**：五个事件类全部加 `window_id`（默认 0 = 不属于任何窗口）。
+  SDL 侧补了 SDL windowID → 本库窗口 id 的映射表（`_by_sdl_id`）——没有它，
+  事件里带的是 SDL 内部 id，上层根本不认识；查不到映射的滞留事件置 0。
+- **R5.2 时间戳**：全部翻译函数读结构体自带的 `timestamp`，`SDL_GetTicks()`
+  只剩 `now_ms()` 一个合法用途。
+- **R5.3 wait_events**：唤醒事件先翻译、再泵干剩余，回归测试用假 lib 构造。
+- **R5.4 滚轮**：FLIPPED 取反、precise 增量优先（0 = 旧 SDL 没写该字段）、
+  坐标用 2.26+ 自带的 mouseX/Y，旧版由 `SDL_GetMouseState` 兜底。
+- **R5.5 指针**：补 `pointer_type` / `pointer_id` / `clicks` / `pressure`；
+  ENTER/LEAVE 进 `PointerEvent`。
+- **R5.6 键码**：`code` ← scancode 名（物理位）、`key` ← keysym 名（布局相关，
+  新增 `normalize_key_value`）；"Keypad Enter" → `NumpadEnter` 不再并入 Enter。
+- **R5.7 IME**：协议加 `start_text_input` / `stop_text_input` / `set_ime_rect`
+  （headless 记录调用供断言；SDL2 调真 API——不调它 SDL 根本不发 IME 事件）。
+  TEXTINPUT → 新事件类 `TextEvent`（普通上屏），TEXTEDITING → `ImeEvent`
+  （空串 = CANCEL）。`events/ime.py` 实现 `ImeSession`：事件流 →
+  `text + composition` 状态机（组合串不进正文，CANCEL 才免费）。
+- **R5.8 呈现契约**：`Backend` 协议加 `begin_frame(window_id)` /
+  `end_frame(window_id, present=)`；`FrameRenderer` 协议（裸数字签名，
+  不碰 gfx 类型）定义在 L0，gfx 侧用 `RasterFrameRenderer` 适配
+  （gfx → backend 是向下依赖，合法）。SDL2 组合注入呈现器。
+- **R5.9 协议拆分**：`Backend` 不再继承 `MetricsProvider`；
+  `tests/unit/test_backend_protocol.py` 逐成员断言两个后端的符合性，
+  并自带"检查器必须能红"的元测试。
+- **R5.10 杂项**：WINDOWPOS_CENTERED 特值、CLOSE=14、剪贴板 SDL_free、
+  死代码删除、MOVED → DPI 轮询（变了才发 DPI_CHANGED）、headless DPI
+  改 per-window（`set_dpi_scale(window_id, value)`，**签名变了**）。
+- **R5.11 GLFW**：删除空壳；pyproject 里顺带清掉从未被 import 的
+  `sdl2 = [PySDL2]` 可选依赖（SDL2 后端走 ctypes 直调动态库）。
+
+**与设计的偏差**：`backend → gfx` 例外条目**没有删除而是改写**——headless
+`present()` 那条消除了，但 `hbft_fonts.mask_for` 返回 gfx 的 `GlyphMask`
+（TYPE_CHECKING + 延迟导入）还在，消除它要等几何原语抽独立包那次重构。
+登记表保持诚实比清零重要。
+
+**验收核对**：863 测试全绿（含 48 个新增）；mypy strict 三平台干净；
+ruff 干净。验收清单逐条：IME 三方法有 headless 记录断言 ✓、IME 翻译纯函数
+测试 ✓、CANCEL 发射路径 ✓、window_id/时间戳/滚轮方向/precise 各有测试 ✓、
+wait_events 回归 ✓、协议符合性红绿可控 ✓。

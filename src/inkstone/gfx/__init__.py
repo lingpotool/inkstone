@@ -58,7 +58,7 @@ from .display_list import (
 )
 from .glyphs import BuiltinGlyphProvider, GlyphMask, GlyphProvider, rect_of_mask
 from .paint import DisplayListRecorder
-from .raster.base import FrameBuffer, RasterBackend, RasterError
+from .raster.base import FrameBuffer, RasterBackend, RasterError, RasterFrameRenderer
 from .raster.software import SoftwareRasterizer, encode_png
 from .transform import IDENTITY, Affine
 
@@ -87,6 +87,7 @@ __all__ = [
     "PositionedGlyph",
     "RasterBackend",
     "RasterError",
+    "RasterFrameRenderer",
     "SoftwareRasterizer",
     "StrokeRectOp",
     "TextRunOp",

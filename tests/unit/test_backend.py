@@ -125,25 +125,30 @@ class TestHeadlessBackend:
         window = backend.create_window(WindowSpec())
         assert backend.dpi_scale(window) == pytest.approx(1.0)
 
-    def test_changing_dpi_broadcasts_event(self):
-        """125% / 150% 缩放的自动化验证靠这个——真窗口上很难测。"""
+    def test_changing_dpi_targets_one_window(self):
+        """R5.10：DPI 是 per-window 的——拖到另一块显示器只影响那个窗口。"""
         backend = HeadlessBackend()
         backend.initialize()
-        backend.create_window(WindowSpec())
-        backend.create_window(WindowSpec())
+        first = backend.create_window(WindowSpec())
+        second = backend.create_window(WindowSpec())
 
-        backend.set_dpi_scale(1.5)
+        backend.set_dpi_scale(second, 1.5)
         events = backend.pump_events()
 
-        assert len(events) == 2, "每个窗口都该收到 DPI 变化"
-        assert all(isinstance(e, WindowEvent) for e in events)
-        assert all(e.kind is WindowKind.DPI_CHANGED for e in events)
-        assert all(e.dpi_scale == pytest.approx(1.5) for e in events)
+        assert len(events) == 1, "只改了一个窗口的 DPI，就只该它收到事件"
+        assert isinstance(events[0], WindowEvent)
+        assert events[0].kind is WindowKind.DPI_CHANGED
+        assert events[0].window_id == second
+        assert events[0].dpi_scale == pytest.approx(1.5)
+        assert backend.dpi_scale(second) == pytest.approx(1.5)
+        assert backend.dpi_scale(first) == pytest.approx(1.0), "另一个窗口不受影响"
 
     def test_rejects_bad_dpi(self):
         backend = HeadlessBackend()
+        backend.initialize()
+        window = backend.create_window(WindowSpec())
         with pytest.raises(BackendError):
-            backend.set_dpi_scale(0.0)
+            backend.set_dpi_scale(window, 0.0)
 
     # ------------------------------------------------------------ 杂项
 
@@ -194,7 +199,7 @@ class TestKeyNameNormalization:
         [
             ("Escape", "Escape"),
             ("Return", "Enter"),
-            ("Keypad Enter", "Enter"),
+            ("Keypad Enter", "NumpadEnter"),  # R5.6：物理键位不与主回车合并
             ("Left", "ArrowLeft"),
             ("Right", "ArrowRight"),
             ("Up", "ArrowUp"),

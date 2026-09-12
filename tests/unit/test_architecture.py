@@ -60,10 +60,10 @@ KNOWN_EXCEPTIONS: dict[tuple[str, str], str] = {
         "同上（text/paragraph.py 用 Rect 描述选区矩形）。消除方式与上一条一致：抽独立几何包。"
     ),
     ("backend", "gfx"): (
-        "headless 后端为 `present(display_list, clear_color)` 需要 gfx 的"
-        "DisplayList 与 Color 类型。这是**接口类型**依赖而非实现依赖，"
-        "但方向确实反了。待消除：把 DisplayList/Color 下移到 L0 "
-        "或定义一个 L0 侧的呈现描述协议。"
+        "R5.8 消除了 headless present() 那条；现存的是 hbft_fonts.py 的"
+        "`mask_for` 返回 gfx 的 GlyphMask 类型（TYPE_CHECKING + 延迟导入）。"
+        "这是**接口类型**依赖而非实现依赖。待消除：把 GlyphMask 下移到 L0 "
+        "（跟随几何原语抽独立包的那次重构一起做）。"
     ),
     ("core", "style"): (
         "core/element.py 与 binding.py 引用了 style 的类型。"
