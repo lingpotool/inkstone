@@ -353,7 +353,7 @@ class _TextRenderObject(RenderBox):
             return
 
         for layout in paragraph.lines:
-            glyphs = _glyphs_of(layout)
+            glyphs = glyphs_of_layout(layout)
             if not glyphs:
                 continue
             # 逐行提交。注意两个坐标：`origin` 是**行框左上角**，
@@ -368,29 +368,21 @@ class _TextRenderObject(RenderBox):
             )
 
 
-def _glyphs_of(layout: object) -> tuple[PositionedGlyph, ...]:
-    """把一行的整形结果转成显示列表要的字形序列。
+def glyphs_of_layout(layout: object) -> tuple[PositionedGlyph, ...]:
+    """排版结果 → 显示列表要的字形序列。**全组件共用一个入口。**
 
-    放在这里（而不是 gfx）是因为它是**跨层适配**：把 L3 的 `ShapedLine`
-    翻译成 L2 的指令数据。适配代码属于上层，gfx 不该认识 text 的类型。
+    真正的转换在 `ShapedLine.positioned_glyphs()`（L3 → L2 的唯一转换点）；
+    这里只负责"从排版结果里把那一行取出来"，并挡住"不是段落排版"的情形。
 
-    簇文本由 `ShapedCluster.start/end` 切平面字符串得到——簇本来就记着
-    自己在源文本里的下标，这里只是把它取出来。
+    为什么收成一个公开函数：`Text` 与 `Button`/`Input` 此前各写了一份一模一样的
+    适配代码，两份副本意味着加字段要改两处——R3.2 加的 `y_offset` 就是这么被
+    漏掉的（字段在、值永远是 0）。少一份副本，少一类这种 bug。
     """
     from ..text import ParagraphLayout
 
     if not isinstance(layout, ParagraphLayout):
         return ()
-    line = layout.line
-    return tuple(
-        PositionedGlyph(
-            text=line.text[cluster.start : cluster.end],
-            x=cluster.x,
-            advance=cluster.advance,
-            family=cluster.family,
-        )
-        for cluster in line.clusters
-    )
+    return layout.line.positioned_glyphs()
 
 
 class Text(RenderObjectWidget):

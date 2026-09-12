@@ -21,8 +21,11 @@ from inkstone.backend.headless_fonts import FontTable, grapheme_clusters
 from inkstone.text import (
     BreakOpportunity,
     EllipsisMode,
+    FallbackChain,
     FontResolver,
     FontScript,
+    ShapedCluster,
+    ShapedLine,
     Shaper,
     TextAlign,
     TextStyle,
@@ -748,3 +751,129 @@ class TestDeterminism:
         before = backend.measure_text("你好", spec)
         backend.advance(5000.0)
         assert backend.measure_text("你好", spec) == before
+
+
+# ================================================================ R4：覆盖探测与 y_offset
+
+
+class _CoverageResolver:
+    """只回答"族在不在"与"画不画得出"的假解析器。
+
+    用来验证回退链**真的去问了覆盖**——用真后端测不出这一点，
+    因为确定性度量表没有逐字符覆盖的概念（它一律回答"能画"）。
+    """
+
+    def __init__(self, families: set[str], coverage: set[tuple[str, str]]) -> None:
+        self._families = families
+        self._coverage = coverage
+        self.asked: list[tuple[str, str]] = []
+
+    def has_family(self, family: str) -> bool:
+        return family in self._families
+
+    def has_glyph(self, family: str, char: str) -> bool:
+        self.asked.append((family, char))
+        return (family, char) in self._coverage
+
+
+class TestCoverageAwareFallback:
+    """R4.2：回退链从"族存在"升级为"族覆盖该脚本"。
+
+    只按"族存在"判断的后果是**真字体栈下立刻显形**的：`Segoe UI` 在 Windows 上
+    确实存在，但它一个汉字都没有——于是中文 run 被分配给 Segoe UI，
+    渲染成一排豆腐块。内置后端至少还画占位块，所以这个坑一直没被发现。
+    """
+
+    def test_family_without_coverage_is_dropped_from_the_chain(self):
+        """存在但画不出汉字的族被剔除；能画的候选留下来。
+
+        候选来自三平台的中文链（docs/04 §4 的三张表），所以这里用表里真有的
+        族名——"CJK Font" 这种自造名字不在候选里，测不出这条逻辑。
+        """
+        resolver = _CoverageResolver(
+            families={"Latin Only", "Microsoft YaHei UI"},
+            coverage={("Latin Only", "A"), ("Microsoft YaHei UI", "中")},
+        )
+        chain = FallbackChain(primary=("Latin Only",)).chain_for(FontScript.HAN, resolver)
+        assert "Latin Only" not in chain, "存在但画不出汉字的族不该进汉字链"
+        assert "Microsoft YaHei UI" in chain, "能画出汉字的候选应当留下"
+
+    def test_primary_font_wins_when_it_does_cover(self):
+        """用户显式选的字体能画汉字时，它就该赢——回退链只在缺字时起作用。"""
+        resolver = _CoverageResolver(
+            families={"Source Han", "System CJK"},
+            coverage={("Source Han", "中"), ("System CJK", "中")},
+        )
+        chain = FallbackChain(primary=("Source Han",)).chain_for(FontScript.HAN, resolver)
+        assert chain[0] == "Source Han"
+
+    def test_coverage_is_probed_per_script_with_one_sample_char(self):
+        resolver = _CoverageResolver(families={"F"}, coverage={("F", "A"), ("F", "中")})
+        FallbackChain(primary=("F",)).chain_for(FontScript.HAN, resolver)
+        han_samples = {char for _, char in resolver.asked}
+        assert han_samples == {"中"}, "每个脚本只探一个代表字符（逐字符探测太贵）"
+
+    def test_common_script_does_not_probe_coverage(self):
+        """拉丁与基本符号任何字体都有，不必探测——省掉每行一次 cmap 查询。"""
+        resolver = _CoverageResolver(families={"F"}, coverage=set())
+        chain = FallbackChain(primary=("F",)).chain_for(FontScript.COMMON, resolver)
+        assert chain[0] == "F"
+        assert resolver.asked == []
+
+    def test_chain_still_ends_with_a_generic_name(self):
+        """候选全被否掉时仍然要有兜底终点，否则上层拿到空链只能自己兜底。"""
+        resolver = _CoverageResolver(families={"Latin Only"}, coverage={("Latin Only", "A")})
+        chain = FallbackChain(primary=("Latin Only",)).chain_for(FontScript.HAN, resolver)
+        assert "sans-serif" in chain
+
+
+class TestGlyphOffsetWiring:
+    """R4.2：`ShapedCluster.y` → `PositionedGlyph.y_offset`。
+
+    R3.2 加了 `y_offset` 字段，但当时**没有接线**——字形适配的两份副本
+    （`Text` 与 `Button`/`Input` 各一份）都没传它，于是字段永远是 0。
+    这类"字段在、值是死的"是 R3 留下的坑，这里钉住它真的接通了。
+    """
+
+    def test_positioned_glyphs_carry_the_vertical_offset(self):
+        cluster = ShapedCluster(
+            index=0,
+            start=0,
+            end=1,
+            x=0.0,
+            advance=10.0,
+            family="F",
+            script=FontScript.COMMON,
+            ascent=8.0,
+            descent=2.0,
+            y=3.5,
+        )
+        line = ShapedLine(text="A", clusters=(cluster,), line_height=20.0, ascent=8.0, descent=2.0)
+        glyph = line.positioned_glyphs()[0]
+        assert glyph.y_offset == 3.5
+
+    def test_positioned_glyphs_default_to_no_offset(self):
+        cluster = ShapedCluster(
+            index=0,
+            start=0,
+            end=1,
+            x=0.0,
+            advance=10.0,
+            family="F",
+            script=FontScript.COMMON,
+            ascent=8.0,
+            descent=2.0,
+        )
+        line = ShapedLine(text="A", clusters=(cluster,), line_height=20.0, ascent=8.0, descent=2.0)
+        assert line.positioned_glyphs()[0].y_offset == 0.0
+
+    def test_text_and_controls_share_one_adapter(self):
+        """`Text` 与 `Button`/`Input` 必须走同一个适配入口。
+
+        两份副本的代价是"加字段要改两处，漏一处就静默丢信息"——
+        `y_offset` 就是这么被漏掉的。
+        """
+        from inkstone.widgets.basic import glyphs_of_layout
+        from inkstone.widgets.form import glyphs_of_layout as control_adapter
+
+        assert control_adapter is glyphs_of_layout

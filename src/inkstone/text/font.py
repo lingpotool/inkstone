@@ -150,6 +150,7 @@ class FontResolver:
         self._metrics = metrics
         self._style_cache: dict[TextStyle, ResolvedTextStyle] = {}
         self._family_probe: dict[str, bool] = {}
+        self._glyph_probe: dict[tuple[str, str], bool] = {}
 
     # ------------------------------------------------------------ 解析
 
@@ -186,6 +187,23 @@ class FontResolver:
         if hit is None:
             hit = self._metrics.has_family(family)
             self._family_probe[family] = hit
+        return hit
+
+    def has_glyph(self, family: str, char: str) -> bool:
+        """这个族画不画得出这个字符。回退链的**逐字符覆盖探测**。
+
+        为什么要和 `has_family` 分开：`Segoe UI` 在 Windows 上确实存在，
+        但它一个汉字都没有。只看"族存在"的话，中文 run 会被分给 Segoe UI、
+        渲染成一排豆腐块——内置后端至少还画占位块，所以这个坑一直没显形。
+
+        缓存按 `(族, 字符)`：回退链对每个脚本只探一个代表字符，
+        所以缓存很小；而排版过程中同一对会被反复问到。
+        """
+        key = (family, char)
+        hit = self._glyph_probe.get(key)
+        if hit is None:
+            hit = self._metrics.has_glyph(family, char)
+            self._glyph_probe[key] = hit
         return hit
 
     # ------------------------------------------------------------ 度量

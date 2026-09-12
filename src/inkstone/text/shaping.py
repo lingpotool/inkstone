@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..gfx.display_list import PositionedGlyph
 from .fallback import FallbackChain, FontScript, script_of, split_by_script
 from .font import FontResolver, TextStyle
 
@@ -58,6 +59,10 @@ class ShapedCluster:
     script: FontScript
     ascent: float
     descent: float
+    #: 相对**基线**的纵向偏移，向上为正（对应 HarfBuzz 的 `y_offset`）。
+    #: 上下标、组合符、CJK 标点悬挂、多字体回退的基线差全靠它——
+    #: 没有它，这些字形只能全部压在基线上。
+    y: float = 0.0
 
     @property
     def right(self) -> float:
@@ -134,6 +139,26 @@ class ShapedLine:
                 return cluster
         return None
 
+    def positioned_glyphs(self) -> tuple[PositionedGlyph, ...]:
+        """转成显示列表要的**已定位字形**序列（L3 → L2 的唯一转换点）。
+
+        为什么收在这里：此前 `widgets/basic.py` 与 `widgets/form.py` 各写了
+        一份一模一样的转换，两份副本意味着"加一个字段要改两处，漏一处就静默
+        丢信息"——R3.2 加的 `y_offset` 就是这么被漏掉的（字段在、值永远是 0）。
+        放在 `ShapedLine` 上还顺带说清了一件事：`text/` 产出字形，
+        `gfx/` 只负责画（ADR-0008）。
+        """
+        return tuple(
+            PositionedGlyph(
+                text=self.text[cluster.start : cluster.end],
+                x=cluster.x,
+                advance=cluster.advance,
+                family=cluster.family,
+                y_offset=cluster.y,
+            )
+            for cluster in self.clusters
+        )
+
 
 class Shaper:
     """整形器：持有回退链与解析器，把文本变成 `ShapedLine`。
@@ -197,6 +222,7 @@ class Shaper:
                         x=x_cursor + placement.x,
                         advance=placement.advance,
                         family=placement.family,
+                        y=placement.y,
                         script=script_of(run_text[placement.start]),
                         ascent=glyph_run.metrics.ascent,
                         descent=glyph_run.metrics.descent,

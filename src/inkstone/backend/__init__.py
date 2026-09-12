@@ -45,19 +45,32 @@ from .base import (
     WindowKind,
     WindowSpec,
 )
+from .fontfiles import (
+    DEFAULT_FALLBACK_FAMILY,
+    FontLibrary,
+    FontRecord,
+    default_font_directories,
+    default_font_library,
+    generic_candidates,
+    order_weights,
+)
 from .gdi_fonts import GdiFontEngine, gdi_font_engine
+from .hbft_fonts import HbFtFontEngine, hbft_font_engine
 from .headless import HeadlessBackend
 from .headless_fonts import FontTable, HeadlessMetrics, default_font_table
 from .sdl2 import SDL2Backend, normalize_key_name, sdl2_library_name
 
 __all__ = [
+    "DEFAULT_FALLBACK_FAMILY",
     "Backend",
     "BackendError",
     "Cursor",
     "Event",
     "FocusEvent",
     "FontFace",
+    "FontLibrary",
     "FontMetricsError",
+    "FontRecord",
     "FontSlant",
     "FontSpec",
     "FontTable",
@@ -65,6 +78,7 @@ __all__ = [
     "GdiFontEngine",
     "GlyphPlacement",
     "GlyphRun",
+    "HbFtFontEngine",
     "HeadlessBackend",
     "HeadlessMetrics",
     "ImeEvent",
@@ -80,8 +94,13 @@ __all__ = [
     "WindowEvent",
     "WindowKind",
     "WindowSpec",
+    "default_font_directories",
+    "default_font_library",
     "default_font_table",
     "gdi_font_engine",
+    "generic_candidates",
+    "hbft_font_engine",
     "normalize_key_name",
+    "order_weights",
     "sdl2_library_name",
 ]

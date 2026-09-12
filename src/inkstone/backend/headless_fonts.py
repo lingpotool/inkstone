@@ -201,6 +201,20 @@ class HeadlessMetrics:
     def has_family(self, family: str) -> bool:
         return self._table.family_exists(family)
 
+    def has_glyph(self, family: str, char: str) -> bool:
+        """确定性度量表下的"覆盖"就是"族存在"。
+
+        **这是文档化的简化，不是静默假装**：`FontTable` 是一张统一的虚拟度量表，
+        没有"逐字符覆盖"这个概念——它的字形来源是内置确定性字形
+        （ASCII 真位图 + 非拉丁一律占位块），所以任何存在的族都"画得出"任何字符。
+
+        真字体栈（`HbFtFontEngine`）实现的是真正的 cmap 探测。
+        这个差异必须留在这里说清楚：回退链在两个后端下会有不同行为，
+        而那是**设计使然**（验证后端要的是确定性，不是覆盖率）。
+        """
+        del char
+        return self._table.family_exists(family)
+
     def resolve_font(self, spec: FontSpec) -> FontFace:
         """从优先列表里挑第一个存在的族；都不存在则退到 `sans-serif`。"""
         cached = self._resolve_cache.get(spec)

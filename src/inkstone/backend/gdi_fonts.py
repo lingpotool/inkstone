@@ -71,6 +71,9 @@ _LOGPIXELSY = 90
 _DEFAULT_CHARSET = 1
 _OUT_DEFAULT_PRECIS = 0
 _CLIP_DEFAULT_PRECIS = 0
+
+#: `GetGlyphIndicesW` 的标记位：缺字的槽位写成 0xFFFF（`has_glyph` 用它判覆盖）
+_GGI_MARK_NONEXISTING_GLYPHS = 0x0001
 # 用灰度抗锯齿而不是 ClearType：ClearType 生成的是亚像素 RGB 条纹，
 # 读回像素时无法还原成单一覆盖度（会在字形边缘出现红蓝边）。
 _ANTIALIASED_QUALITY = 4
@@ -232,6 +235,17 @@ def _load_gdi() -> tuple[Any, Any] | None:
 
     gdi32.GetTextMetricsW.argtypes = [wintypes.HDC, ctypes.POINTER(_TEXTMETRICW)]
     gdi32.GetTextMetricsW.restype = wintypes.BOOL
+
+    # 逐字符覆盖探测（has_glyph）。GGI_MARK_NONEXISTING_GLYPHS 会把
+    # 缺字的槽位写成 0xFFFF——这是 GDI 给出的"这个字体画不出这个字符"。
+    gdi32.GetGlyphIndicesW.argtypes = [
+        wintypes.HDC,
+        wintypes.LPCWSTR,
+        ctypes.c_int,
+        ctypes.POINTER(wintypes.WORD),
+        wintypes.DWORD,
+    ]
+    gdi32.GetGlyphIndicesW.restype = wintypes.DWORD
     gdi32.GetTextExtentPoint32W.argtypes = [
         wintypes.HDC,
         wintypes.LPCWSTR,
@@ -488,6 +502,38 @@ class GdiFontEngine:
         # 大小写不敏感匹配：GDI 的族名大小写不总是和 CSS 里写的一致
         lowered = family.casefold()
         return any(name.casefold() == lowered for name in self.families)
+
+    def has_glyph(self, family: str, char: str) -> bool:
+        """这个族画不画得出这个字符（`GetGlyphIndicesW` + 缺字标记）。
+
+        为什么值得为它写 GDI 代码（R4.6 就要删掉这个模块了）：
+        它是"族在、但画不出"这一类问题的唯一判据，而 R4.5 要拿它
+        与 HB+FT 的 cmap 探测**对照**——两套引擎对同一份字体给出不同的
+        覆盖答案，正是"换文本栈会改变观感"的量化证据。
+
+        用一个固定的小字号建 face：cmap 与字号无关，而 GDI 必须先有 HFONT
+        才能查字形。
+        """
+        if not char:
+            return False
+        try:
+            face = self._face_for(family, 12.0, FontWeight.REGULAR, italic=False)
+        except FontMetricsError:
+            return False
+        # UTF-16 码元：W 系 API 数的是码元，不是码点（ADR-0010）
+        utf16 = char[0].encode("utf-16-le")
+        count = len(utf16) // 2
+        indices = (wintypes.WORD * count)()
+        previous = self._gdi32.SelectObject(self._mem_dc, face.handle)
+        try:
+            written = self._gdi32.GetGlyphIndicesW(
+                self._mem_dc, char[0], count, indices, _GGI_MARK_NONEXISTING_GLYPHS
+            )
+        finally:
+            self._gdi32.SelectObject(self._mem_dc, previous)
+        if written != count:
+            return False
+        return all(indices[i] != 0xFFFF for i in range(count))
 
     def _canonical(self, family: str) -> str:
         """把请求的族名映射成 GDI 里真实存在的族名（处理大小写与通用名）。"""

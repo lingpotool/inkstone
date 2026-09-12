@@ -30,7 +30,6 @@ from ..core import (
 from ..core.element import _SLOT_UNCHANGED, Element
 from ..core.key import Key
 from ..gfx.color import Color
-from ..gfx.display_list import PositionedGlyph
 from ..layout import BoxConstraints, RenderBox, Size
 from ..layout.types import Offset, Rect
 from ..style import (
@@ -43,6 +42,7 @@ from ..style import (
     resolve_input_style,
 )
 from ..text import EllipsisMode, Paragraph, TextAlign, TextEngine, TextStyle
+from .basic import glyphs_of_layout
 
 __all__ = ["Button", "Input"]
 
@@ -197,7 +197,7 @@ class _ControlRenderObject(RenderBox):
 
         leading = max(0.0, (self.size.height - paragraph.height) / 2.0)
         for layout in paragraph.lines:
-            glyphs = _control_glyphs(layout)
+            glyphs = glyphs_of_layout(layout)
             if not glyphs:
                 continue
             text_run(
@@ -207,22 +207,6 @@ class _ControlRenderObject(RenderBox):
                 self.text_style.size if self.text_style else 0.0,
                 color,
             )
-
-
-def _control_glyphs(layout: object) -> tuple[PositionedGlyph, ...]:
-    """行的整形结果 → 显示列表字形序列（与 Text 组件同一套适配）。"""
-    line = getattr(layout, "line", None)
-    if line is None:
-        return ()
-    return tuple(
-        PositionedGlyph(
-            text=line.text[cluster.start : cluster.end],
-            x=cluster.x,
-            advance=cluster.advance,
-            family=cluster.family,
-        )
-        for cluster in line.clusters
-    )
 
 
 class _ControlBox(RenderObjectWidget):

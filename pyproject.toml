@@ -25,7 +25,16 @@ classifiers = [
     "Topic :: Software Development :: User Interfaces",
     "Typing :: Typed",
 ]
-dependencies = []
+# 文本栈自带整形与光栅化（R4 的决策，见 docs/18 §2）：
+#   uharfbuzz —— 整形（kerning / 连字 / 复杂脚本）
+#   freetype-py —— 字形光栅化（灰度掩码）
+#   fonttools —— 读 name/OS/2 表建字体索引、子集化内嵌字体
+# 三者都有三平台预编译轮子、无编译链，与"纯 pip、无构建步骤"的承诺相容。
+dependencies = [
+    "uharfbuzz>=0.56",
+    "freetype-py>=2.5",
+    "fonttools>=4.65",
+]
 
 [project.optional-dependencies]
 # 核心包零依赖；平台与渲染能力按需安装，保证最小化部署可行。
@@ -86,7 +95,7 @@ strict = true
 warn_unreachable = true
 files = ["src"]
 [[tool.mypy.overrides]]
-module = ["skia.*", "sdl2.*", "glfw.*"]
+module = ["skia.*", "sdl2.*", "glfw.*", "freetype.*", "uharfbuzz.*", "fontTools.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -251,6 +251,9 @@ class HeadlessBackend:
     def has_family(self, family: str) -> bool:
         return self._metrics.has_family(family)
 
+    def has_glyph(self, family: str, char: str) -> bool:
+        return self._metrics.has_glyph(family, char)
+
     def resolve_font(self, spec: FontSpec) -> FontFace:
         return self._metrics.resolve_font(spec)
 

@@ -240,10 +240,10 @@ class FallbackChain:
         if script in (FontScript.COMMON, FontScript.SYMBOL) or (
             script is FontScript.EMOJI and not self.emoji_enabled
         ):
-            chain = resolver_chain(self.primary, resolver)
+            chain = resolver_chain(self.primary, resolver, script=script)
         else:
             candidates = self._candidates_for(script)
-            chain = resolver_chain(self.primary + candidates, resolver)
+            chain = resolver_chain(self.primary + candidates, resolver, script=script)
 
         self._cache[script] = chain
         return chain
@@ -260,10 +260,47 @@ class FallbackChain:
         return tuple(out)
 
 
-def resolver_chain(desired: tuple[str, ...], resolver: FontResolver) -> tuple[str, ...]:
+#: 每个脚本的**代表字符**：回退链用它探测"这个族覆盖这个脚本吗"。
+#:
+#: 只探一个字符就够：字体对某个脚本的覆盖是**整块**来的（有汉字的字体必然有"中"），
+#: 而逐字符探测要在每次排版时跑几十次 cmap 查询。COMMON / SYMBOL 不在表里——
+#: 拉丁字母与基本符号任何字体都有，不必探测。
+_SCRIPT_SAMPLE: dict[FontScript, str] = {
+    FontScript.HAN: "中",
+    FontScript.KANA: "あ",
+    FontScript.HANGUL: "가",
+    FontScript.EMOJI: "😀",
+}
+
+
+def _covers(resolver: FontResolver, family: str, script: FontScript | None) -> bool:
+    """族存在 **且**（问的是具体脚本时）覆盖该脚本的代表字符。
+
+    只按"族存在"判断回退，会出现"族在、但画不出"：`Segoe UI` 在 Windows 上
+    确实存在，但它一个汉字都没有——于是中文 run 会被分配给 Segoe UI，
+    渲染成一排豆腐块。**真字体栈下这个问题立刻显形**（内置后端至少还画占位块，
+    所以一直没被发现）。这就是 `has_glyph` 存在的全部理由。
+    """
+    if not resolver.has_family(family):
+        return False
+    if script is None:
+        return True
+    sample = _SCRIPT_SAMPLE.get(script)
+    if sample is None:
+        return True
+    return resolver.has_glyph(family, sample)
+
+
+def resolver_chain(
+    desired: tuple[str, ...], resolver: FontResolver, *, script: FontScript | None = None
+) -> tuple[str, ...]:
     """过滤出系统里真有的族，保持顺序、去重。
 
-    通用名（`sans-serif` / `serif` / `mono`）永远保留——它们是兜底终点。
+    通用名（`sans-serif` / `serif` / `mono`）永远保留——它们是兜底终点，
+    由后端的通用族映射去挑具体字体（最后会落到内嵌兜底字体）。
+
+    `script` 给定时，候选还要**覆盖该脚本的代表字符**才算命中（见 `_covers`）。
+
     **若结果里一个通用名都没有，末尾补上 `sans-serif`**：
     否则用户给的字体全都没装时链会变空，回退就无路可走，
     上层拿到空链只能自己兜底，那是把责任推给了每个调用点。
@@ -274,7 +311,7 @@ def resolver_chain(desired: tuple[str, ...], resolver: FontResolver) -> tuple[st
             if family not in out:
                 out.append(family)
             continue
-        if resolver.has_family(family) and family not in out:
+        if _covers(resolver, family, script) and family not in out:
             out.append(family)
     if not any(g in out for g in ("sans-serif", "serif", "mono", "system-ui")):
         out.append("sans-serif")
