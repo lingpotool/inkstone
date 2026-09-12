@@ -32,15 +32,18 @@ from inkstone.gfx import (
     PositionedGlyph,
     SoftwareRasterizer,
     TextRunOp,
+    encode_png,
 )
 from inkstone.gfx.color import Color
 from inkstone.gfx.glyphs import BuiltinGlyphProvider, GlyphMask, rect_of_mask
 from inkstone.layout import BoxConstraints
 from inkstone.layout.types import Offset, Rect, Size
 from inkstone.style import Theme
-from inkstone.text import TextAlign, TextEngine
+from inkstone.text import TextAlign, TextEngine, TextStyle
 from inkstone.widgets import Card, Column, Text
+from inkstone.widgets.basic import glyphs_of_layout
 from png_compare import GoldenBaseline
+from real_font import embedded_engine, golden_owner
 
 GOLDEN_DIR = Path(__file__).resolve().parents[1] / "golden"
 FAILURES_DIR = GOLDEN_DIR / "failures"
@@ -672,8 +675,12 @@ class TestTextDeterminism:
             assert render() == first
 
     def test_golden_text_block(self) -> None:
-        """文本黄金图：ASCII 每个字形、字距、行高、对齐都要稳定。"""
-        owner = _owner()
+        """文本黄金图：真字体（内嵌 Inkstone Sans）下的字形、字距、行高、对齐。
+
+        R4.5 起黄金图用真字体引擎（见 `tests/real_font.py`）——方块字形
+        验证得了管线不变，验证不了用户看到的字。这里盯的就是后者。
+        """
+        owner = golden_owner(Theme.light())
         owner.mount(
             Card(
                 Column(
@@ -695,7 +702,7 @@ class TestTextDeterminism:
 
         用固定宽度逼出跨行，中文标点不得起行，超过 max_lines 后末尾出省略号。
         """
-        owner = _owner()
+        owner = golden_owner(Theme.light())
         owner.mount(
             Column(
                 gap=6,
@@ -703,7 +710,8 @@ class TestTextDeterminism:
                     Text("这是一段用来验证换行与标点禁则的中文文本，它足够长。", size="md"),
                     Text("超过两行就省略：", size="sm"),
                     Text(
-                        "这一段文字被限制为两行，多出来的部分应当以省略号结束而不是硬切。",
+                        "这一段文字被限制为两行，多出来的部分应当以省略号结束而不是硬切，"
+                        "否则用户根本看不出后面其实还有内容。",
                         size="sm",
                         max_lines=2,
                     ),
@@ -712,6 +720,98 @@ class TestTextDeterminism:
         )
         png = render_to_png(owner, BoxConstraints(max_width=200, max_height=220))
         _assert_or_update_golden("text_wrapping", png)
+
+
+class TestGoldenRealFontScenes:
+    """R4.5：只有真字体引擎才暴露得出来的场景——kerning、混排、小数字号。
+
+    全部走内嵌 Inkstone Sans（`tests/real_font.py`），三平台同一份字体文件，
+    黄金图的"同样的输入 → 同样的像素"才成立。
+    """
+
+    def test_golden_kerning_pairs(self) -> None:
+        """kerning 词对：To / AV / Wa / Yo 的间距是 GPOS 调过的，不是等宽排开。
+
+        同图放一行 "office" 盯住连字（fi/ffi 在真字体里是一个字形）。
+        排版按 kern 后的 advance 算、画也按它画——两者对不上时字形会叠或散。
+        """
+        owner = golden_owner(Theme.light())
+        owner.mount(
+            Card(
+                Column(
+                    gap=8,
+                    children=(
+                        Text("To AV Wa Yo", size="lg"),
+                        Text("office traffic", size="lg"),
+                        Text("To AV Wa Yo", size="sm"),
+                    ),
+                )
+            )
+        )
+        png = render_to_png(owner, BoxConstraints(max_width=320, max_height=160))
+        _assert_or_update_golden("text_kerning_pairs", png)
+
+    def test_golden_mixed_cjk_latin(self) -> None:
+        """中英混排：同一行里汉字与拉丁字母共享基线、各自取正确的字形。
+
+        真字体的坑位：汉字走 em 对齐、拉丁走 x-height，基线若各画各的，
+        混排行会"拉丁字母浮起来"。这张图就是那条回归的闸门。
+        """
+        owner = golden_owner(Theme.light())
+        owner.mount(
+            Card(
+                Column(
+                    gap=8,
+                    children=(
+                        Text("版本 v2.1 发布", size="lg"),
+                        Text("Inkstone 渲染管线 pipeline", size="md"),
+                        Text("像素 pixel 基线 baseline 对齐", size="sm"),
+                    ),
+                )
+            )
+        )
+        png = render_to_png(owner, BoxConstraints(max_width=320, max_height=180))
+        _assert_or_update_golden("text_mixed_cjk_latin", png)
+
+    def test_golden_fractional_size(self) -> None:
+        """小数字号 17.5px：非整数字号下的 hinting 与基线稳定性。
+
+        这是 R4.7 结案的回归闸门（小字号底沿 ±1px 是 hinting 固有行为，
+        不修，但要钉住不再漂移）。Text 组件的 `size` 只收档位名，
+        所以这里在文本层构造段落，复用组件同款的 `glyphs_of_layout` 转换，
+        手动发显示列表指令——链路除了"档位查表"外与组件完全一致。
+        """
+        engine = embedded_engine()
+        text_engine = TextEngine(HeadlessBackend(font_engine=engine))
+        style = TextStyle(families=("Inkstone Sans",), size=17.5, line_height=1.6)
+        paragraph = text_engine.paragraph(
+            "小数字号 17.5px 的渲染：中英 mixed", style, max_width=280.0
+        )
+
+        width, height = 320, 80
+        recorder = DisplayListRecorder()
+        recorder.fill_rect(Rect(0.0, 0.0, float(width), float(height)), Theme.light().color("bg"))
+        for layout in paragraph.lines:
+            glyphs = glyphs_of_layout(layout)
+            if glyphs:
+                recorder.text_run(
+                    Offset(layout.x, layout.origin_y),
+                    layout.line.baseline,
+                    glyphs,
+                    style.size,
+                    Theme.light().color("text"),
+                )
+        display_list = recorder.finish(width, height)
+
+        # 与 `render_to_framebuffer` 同一套帧生命周期（docs/03 §2），
+        # 字形源必须显式注入——默认的内置字形画的是方块，测不出真字体。
+        raster = SoftwareRasterizer(glyph_provider=engine)
+        raster.begin_frame(Size(float(width), float(height)), 1.0)
+        raster.execute(display_list)
+        raster.end_frame()
+        frame = raster.screenshot()
+        png = encode_png(frame.width, frame.height, frame.data)
+        _assert_or_update_golden("text_fractional_size", png)
 
 
 # ================================================================ R4.3：连字

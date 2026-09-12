@@ -31,15 +31,14 @@ from unittest import mock
 
 import pytest
 
-from inkstone.backend import HeadlessBackend
 from inkstone.core import BuildOwner
 from inkstone.devtools import render_to_png
 from inkstone.gfx import encode_png
 from inkstone.layout import BoxConstraints
 from inkstone.style import ButtonVariant, Theme
-from inkstone.text import TextEngine
 from inkstone.widgets import Box, Button, Card, Column, Flexible, Input, Row
 from png_compare import GoldenBaseline, decode_png
+from real_font import golden_owner
 
 GOLDEN_DIR = Path(__file__).resolve().parents[1] / "golden"
 FAILURES_DIR = GOLDEN_DIR / "failures"
@@ -51,13 +50,13 @@ def _constraints() -> BoxConstraints:
 
 
 def _owner(theme: Theme) -> BuildOwner:
-    """带文本引擎的 BuildOwner。
+    """带真字体引擎的 BuildOwner（R4.5：黄金图用内嵌字体，见 `tests/real_font.py`）。
 
     **必须带**：不带的话按钮标签、输入框占位符都画不出来，
     黄金图就成了"没有字的表单"——看着像渲染坏了，其实只是没配引擎。
     文本引擎是整棵树共享的有状态服务（带度量缓存），所以要复用一个实例。
     """
-    return BuildOwner(theme=theme, text_engine=TextEngine(HeadlessBackend()))
+    return golden_owner(theme)
 
 
 def _build_login_form(theme: Theme) -> BuildOwner:
@@ -162,6 +161,9 @@ def test_no_orphan_failures_in_fixtures():
     )
 
 
+@pytest.mark.skipif(
+    os.environ.get(UPDATE_ENV) == "1", reason="更新基线模式下门禁语义不成立（缺失即写入）"
+)
 class TestGoldenGateIsReal:
     """门禁本身要能红——这是 docs/16 §R2.2 的验收，也是 R2 整包验收的第一条。
 
