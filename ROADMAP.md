@@ -74,7 +74,9 @@
      StatefulWidget 生命周期、BuildOwner 帧调度（批处理 + 阶段守卫）。
      24 个测试覆盖：100 次 set_state 只重建一次、Key 正确的重排状态零丢失、
      layout 阶段改状态抛 FrameError。
-   - 未实现：signals（docs/06 §3 状态双轨）、semantics 阶段（Phase 3 无障碍）。
+   - signals（docs/06 §3 状态双轨）已在 R6.2 落地：`Signal` / `Computed` / `Effect`，
+     与 Inherited 环境传播（R6.1 `ThemeScope`）共用依赖追踪内核。
+   - 未实现：semantics 阶段（Phase 3 无障碍）。
 6. **样式**：设计系统三层令牌（含阴影/动效令牌，规格见 `docs/13`）+ 明暗主题 + 组件变体解析
    - **进度（部分完成）**：`gfx/color.py`（含 WCAG 对比度计算）、
      `style/tokens.py`（12 级色板、8pt 间距、圆角、字号、控件高度、阴影 e0–e4、

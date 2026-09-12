@@ -28,6 +28,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from enum import Enum
+from functools import cache
 from typing import TypeVar
 
 from ..gfx.color import Color
@@ -165,8 +166,14 @@ def _lookup(group: str, name: str, table: Mapping[str, _V]) -> _V:
         raise TokenError(f"没有 {group}[{name!r}] 这个令牌。可用：{available}") from None
 
 
+@cache
 def _semantic_map(semantic: SemanticTokens) -> dict[str, Color]:
-    """把 SemanticTokens 摊平成 dict，供 color() 按名取用。"""
+    """把 SemanticTokens 摊平成 dict，供 color() 按名取用。
+
+    缓存（R6.3）：`Theme.color()` 是热路径（每帧每控件多次），
+    每次重建 26 键 dict 纯属浪费。SemanticTokens 是 frozen 可哈希的，
+    直接按实例缓存。返回的 dict 是共享的——**只读，别改**。
+    """
     return {
         "bg": semantic.bg,
         "surface": semantic.surface,

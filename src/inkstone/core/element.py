@@ -17,12 +17,14 @@ Element 复用 + RenderBox 增量更新"是业界验证最充分的可变状态 
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Protocol, TypeVar
 
 from ..layout import RenderBox
 from ..style import Theme, default_theme
-from .widget import RenderObjectWidget, StatefulWidget, StatelessWidget, Widget
+from .scope import ThemeScope
+from .widget import InheritedWidget, RenderObjectWidget, StatefulWidget, StatelessWidget, Widget
 
 if TYPE_CHECKING:
     from ..text import TextEngine
@@ -31,6 +33,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ComponentElement",
     "Element",
+    "InheritedElement",
     "LeafRenderObjectElement",
     "MultiChildRenderObjectElement",
     "RenderObjectElement",
@@ -42,6 +45,47 @@ __all__ = [
 # 哨兵：区分"没传 slot"与"传了 None"（None 本身是合法槽位值）。
 # 定义在类之前，因为它要用作方法默认参数。
 _SLOT_UNCHANGED = object()
+
+IW = TypeVar("IW", bound=InheritedWidget)
+
+
+class Dependent(Protocol):
+    """依赖源脏了要被通知的一方：Element（标脏重建）与 Effect（重跑）共用。"""
+
+    def _on_dependency_dirty(self) -> None: ...
+
+
+class DependencySource(Protocol):
+    """ "读时登记、写时标脏"的源：InheritedElement 与 Signal 共用这套内核（R6）。"""
+
+    def _subscribe(self, dependent: Dependent) -> None: ...
+
+    def _unsubscribe(self, dependent: Dependent) -> None: ...
+
+
+class _Collector(Protocol):
+    """依赖收集者：build 期间的 Element、求值期间的 Effect / Computed。"""
+
+    def _track_dependency(self, source: DependencySource) -> None: ...
+
+
+# 依赖收集栈：build（或 effect 求值）期间读环境/信号，会登记到栈顶的收集者。
+_dependency_collectors: list[_Collector] = []
+
+
+def current_dependency_collector() -> _Collector | None:
+    """当前依赖收集者（栈顶）。signals 层靠它把"读"变成"登记"。"""
+    return _dependency_collectors[-1] if _dependency_collectors else None
+
+
+@contextmanager
+def dependency_collection(collector: _Collector) -> Iterator[None]:
+    """把 collector 压栈，期间的信号读取都登记到它头上。"""
+    _dependency_collectors.append(collector)
+    try:
+        yield
+    finally:
+        _dependency_collectors.pop()
 
 
 class Element:
@@ -58,6 +102,12 @@ class Element:
         # 它必须穿过 StatelessWidget / StatefulWidget 一直传到真正的渲染节点，
         # 否则 `Flexible(Button())` 里的 flex 会丢——Button 是个组件，中间隔了一层。
         self._slot: object | None = None
+        # 环境索引（type[InheritedWidget] → InheritedElement）。
+        # 与父级共享同一张只读表；InheritedElement 挂载时复制并注册自己。
+        self._inherited: dict[type[InheritedWidget], InheritedElement] = {}
+        # 本节点 build 期间声明过的依赖（InheritedElement / Signal / Computed）。
+        # 每次 build 重新登记——上次读过的环境，这次不一定还读。
+        self._dependencies: set[DependencySource] = set()
 
     # ------------------------------------------------------------ 属性
 
@@ -112,9 +162,13 @@ class Element:
     def theme(self) -> Theme:
         """环境主题（BuildContext 的核心能力之一）。
 
-        组件靠它取令牌，不必把 theme 当参数层层透传。
-        没挂到 BuildOwner 上时退回到默认主题，保证单独构造也能工作。
+        查找顺序：最近的 `ThemeScope`（子树覆盖）→ BuildOwner 根主题 →
+        默认主题（没挂到树上时的兜底，保证单独构造也能工作）。
+        读到 ThemeScope 即登记依赖：它换了主题，本节点被定向标脏（R6.1）。
         """
+        scope = self.depend_on(ThemeScope)
+        if scope is not None:
+            return scope.theme
         owner = self.owner
         if owner is None:
             return default_theme()
@@ -145,6 +199,9 @@ class Element:
         self._slot = slot
         if parent_owner is not None and self._owner is None:
             self._owner = parent_owner
+        # 环境索引直接沿用父级的表（只读共享，零拷贝）；
+        # InheritedElement 会在自己的 mount 里复制一份并注册自己。
+        self._inherited = parent._inherited if parent is not None else {}
 
     def update(self, new_widget: Widget, slot: object = _SLOT_UNCHANGED) -> None:
         """配置变了但身份没变——只换 Widget 引用，Element 与其状态保留。
@@ -157,8 +214,43 @@ class Element:
             self._slot = slot
 
     def unmount(self) -> None:
+        self._release_dependencies()
         self._active = False
         self._parent = None
+        self._inherited = {}
+
+    # ------------------------------------------------------------ 依赖追踪（R6）
+
+    def depend_on(self, scope_type: type[IW]) -> IW | None:
+        """声明对最近的 `scope_type` 型环境组件的依赖，并返回它（没有则 None）。
+
+        之后该 InheritedWidget 更新且 `update_should_notify` 为真时，
+        本节点被**定向**标脏——改侧栏主题不会拖着主区陪葬。
+        依赖在每次 build 时重新登记：上次 build 读过的环境，这次不一定还读。
+        """
+        element = self._inherited.get(scope_type)
+        if element is None:
+            return None
+        self._track_dependency(element)
+        widget = element.widget
+        assert isinstance(widget, scope_type)
+        return widget
+
+    def _track_dependency(self, source: DependencySource) -> None:
+        """登记一个依赖源（Inherited / Signal 通用内核的"读时登记"半）。"""
+        if source in self._dependencies:
+            return
+        self._dependencies.add(source)
+        source._subscribe(self)
+
+    def _release_dependencies(self) -> None:
+        for source in self._dependencies:
+            source._unsubscribe(self)
+        self._dependencies.clear()
+
+    def _on_dependency_dirty(self) -> None:
+        """依赖源通知"我脏了"（内核的"写时标脏"半）。"""
+        self.mark_needs_build()
 
     # ------------------------------------------------------------ 重建
 
@@ -266,7 +358,10 @@ class ComponentElement(Element):
         self.perform_rebuild()
 
     def perform_rebuild(self) -> None:
-        built = self.build()
+        # 依赖每次 build 重新登记：上次 build 读过的环境/信号，这次不一定还读。
+        self._release_dependencies()
+        with dependency_collection(self):
+            built = self.build()
         # 关键：把本节点的槽位继续传给子级。写成 None 的话，
         # `Flexible(Button())` 里的 flex 会在这一层丢掉。
         self._child = self.update_child(self._child, built, self._slot)
@@ -322,6 +417,51 @@ class StatefulElement(ComponentElement):
         self.state.dispose()
         self.state._element = None
         super().unmount()
+
+
+class InheritedElement(ComponentElement):
+    """InheritedWidget 的 Element：维护依赖者名单，更新时定向标脏（R6.1）。
+
+    它是"读时登记、写时标脏"内核在组件树上的那一半；
+    另一半（高频标量状态）是 `signals.py` 的 `Signal`。
+    """
+
+    def __init__(self, widget: InheritedWidget) -> None:
+        super().__init__(widget)
+        self._dependents: set[Dependent] = set()
+
+    def mount(self, parent: Element | None, slot: object | None) -> None:
+        # 分两步走：先挂基础信息并把**自己**注册进环境索引，
+        # 再 build 子树——这样后代 mount 时就能查到本节点。
+        Element.mount(self, parent, slot)
+        widget = self.widget
+        assert isinstance(widget, InheritedWidget)
+        self._inherited = {**self._inherited, type(widget): self}
+        self.perform_rebuild()
+
+    def build(self) -> Widget:
+        widget = self.widget
+        assert isinstance(widget, InheritedWidget)
+        return widget.child
+
+    def update(self, new_widget: Widget, slot: object = _SLOT_UNCHANGED) -> None:
+        old_widget = self.widget
+        super().update(new_widget, slot)
+        assert isinstance(old_widget, InheritedWidget)
+        assert isinstance(new_widget, InheritedWidget)
+        if new_widget.update_should_notify(old_widget):
+            self._notify_dependents()
+
+    def _subscribe(self, dependent: Dependent) -> None:
+        self._dependents.add(dependent)
+
+    def _unsubscribe(self, dependent: Dependent) -> None:
+        self._dependents.discard(dependent)
+
+    def _notify_dependents(self) -> None:
+        """定向标脏：只有声明过依赖的节点重建，其余子树不动。"""
+        for dependent in list(self._dependents):
+            dependent._on_dependency_dirty()
 
 
 class RenderObjectElement(Element):

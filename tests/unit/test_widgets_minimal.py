@@ -9,6 +9,8 @@
 - Flexible 能让 Row 里的控件吃掉剩余宽度
 """
 
+from typing import ClassVar
+
 import pytest
 
 from inkstone.core import BuildOwner
@@ -494,3 +496,61 @@ class TestControlTextRendering:
         size = owner.flush_layout(BoxConstraints(max_width=320, max_height=100))
         assert size is not None
         assert size.height > 0
+
+
+class TestVariantStateRecipes:
+    """R6.3：逐变体的状态配方对称性 + 全组合对比度断言（docs/20 验收）。
+
+    这组测试抓到过的真 bug：暗色主题 PRIMARY 的 active/selected 用
+    `primary_press`（中调亮色）配 `on_primary`，对比度只有 3.6:1——
+    是算出来的，不是看出来的。
+    """
+
+    # WCAG 1.4.3 豁免"非激活组件"：disabled / loading 不要求对比度，
+    # 但它们必须**看起来**不一样（由 TestStateAxis 的另一组断言管）。
+    _CONTRAST_EXEMPT: ClassVar[set[ComponentState]] = {
+        ComponentState.DISABLED,
+        ComponentState.LOADING,
+    }
+
+    def test_every_variant_has_visible_hover_and_active_feedback(self):
+        """任何变体的 hover / active 都必须与默认态有可见差别——
+        修复前 SECONDARY 的 hover 与默认完全相同（无反馈）。"""
+        for theme in (Theme.light(), Theme.dark()):
+            for variant in ButtonVariant:
+                default = resolve_button_style(theme, variant=variant)
+                for state in (ComponentState.HOVER, ComponentState.ACTIVE):
+                    changed = resolve_button_style(theme, variant=variant, state=state)
+                    assert (changed.bg, changed.fg, changed.border) != (
+                        default.bg,
+                        default.fg,
+                        default.border,
+                    ), f"{theme.name}/{variant.value}/{state.value} 与默认态毫无差别"
+
+    def test_danger_hover_stays_in_the_danger_family(self):
+        """修复前 DANGER hover 变成中性灰——危险浅底消失，与默认配方自相矛盾。"""
+        for theme in (Theme.light(), Theme.dark()):
+            s = theme.semantic
+            hover = resolve_button_style(
+                theme, variant=ButtonVariant.DANGER, state=ComponentState.HOVER
+            )
+            assert {hover.bg, hover.fg} == {s.danger_bg, s.danger_text}, (
+                "danger 的反馈必须仍在危险色对内（反转），不许发明第三种颜色"
+            )
+
+    def test_all_variants_all_states_pass_aa(self):
+        """全变体 × 全状态 × 明暗两版：字色对底色 ≥ WCAG 2.2 AA（4.5:1）。
+
+        透明底的变体（ghost/outline/link）对主题底色断言——它们画在表面上。
+        """
+        for theme in (Theme.light(), Theme.dark()):
+            for variant in ButtonVariant:
+                for state in ComponentState:
+                    if state in self._CONTRAST_EXEMPT:
+                        continue
+                    style = resolve_button_style(theme, variant=variant, state=state)
+                    background = theme.color("bg") if style.is_transparent_bg else style.bg
+                    assert style.fg.meets_aa(background), (
+                        f"{theme.name}/{variant.value}/{state.value} 对比度 "
+                        f"{style.fg.contrast_ratio(background):.2f}:1，需要 ≥ 4.5:1"
+                    )

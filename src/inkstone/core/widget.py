@@ -22,6 +22,7 @@ if TYPE_CHECKING:  # 只在类型检查时引入，避免与 element 形成运�
     from .element import BuildContext, Element, StatefulElement
 
 __all__ = [
+    "InheritedWidget",
     "RenderObjectWidget",
     "State",
     "StatefulWidget",
@@ -78,6 +79,31 @@ class StatefulWidget(Widget):
         from .element import StatefulElement
 
         return StatefulElement(self)
+
+
+class InheritedWidget(Widget):
+    """环境数据的载体（主题、locale、DPI……）：子树内所有后代都能读到。
+
+    与 StatelessWidget 的区别不在"有没有状态"，而在**传播方式**：
+    后代用 `context.depend_on(...)` 显式声明依赖；配置换成新 Widget 后，
+    只有 `update_should_notify` 返回 True 时才定向标脏这些依赖者——
+    而不是"父级重建、整棵子树不问青红皂白跟着重建"。
+
+    状态：已实现（R6.1，docs/20）。
+    """
+
+    def __init__(self, child: Widget, *, key: Key | None = None) -> None:
+        super().__init__(key=key)
+        self.child = child
+
+    def update_should_notify(self, old: InheritedWidget) -> bool:
+        """配置从 old 换成 self 之后，依赖者要不要重建。"""
+        raise NotImplementedError(f"{type(self).__name__} 必须实现 update_should_notify")
+
+    def create_element(self) -> Element:
+        from .element import InheritedElement
+
+        return InheritedElement(self)
 
 
 class State(Generic[W]):

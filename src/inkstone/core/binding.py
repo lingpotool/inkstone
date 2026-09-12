@@ -34,6 +34,7 @@ from ..style import Theme, default_theme
 from ..text import TextEngine
 from .element import Element
 from .render_object import PaintContext
+from .signals import Effect
 from .widget import Widget
 
 __all__ = [
@@ -146,6 +147,9 @@ class BuildOwner:
         # 于是 set_state → 屏幕刷新这条闭环压根不存在。
         self.on_frame_scheduled: Callable[[], None] | None = None
         self._frame_scheduled = False
+        # 失效的 Effect 队列：下一帧 build 之前统一重跑（docs/20 R6.2）。
+        # 信号写 → effect 失效 → 入队 → 同帧结算，UI 与副作用不差一拍。
+        self._pending_effects: list[Effect] = []
 
     # ------------------------------------------------------------ 查询
 
@@ -172,10 +176,10 @@ class BuildOwner:
     def theme(self, value: Theme) -> None:
         """换主题：把整棵树标脏，下一帧重新解析所有样式。
 
-        这是最小版（正式机制——InheritedElement / signals——在 docs/20）。
-        它补的是"换肤承诺"里缺失的那一环：`Element.theme` 是**活读** owner 的，
-        但样式只在 mount / update 的 `_apply_style` 时被写进渲染对象——
-        运行时不标脏重建的话，整棵树会静默保留旧色：主题"换了"，界面没动。
+        正式机制（InheritedElement / ThemeScope，R6.1）落地后，本属性就是
+        "根作用域"：没被子树 ThemeScope 覆盖的节点都读它，所以换根主题
+        仍然是全树标脏——那是"根作用域变了"的特例，不是另一套机制。
+        子树级覆盖请用 `ThemeScope`，它能定向标脏（docs/20）。
 
         在 layout / paint 阶段换主题会抛 `FrameError`（与其它状态变更一致）。
         """
@@ -256,6 +260,34 @@ class BuildOwner:
         callback = self.on_frame_scheduled
         if callback is not None:
             callback()
+
+    def schedule_effect(self, effect: Effect) -> None:
+        """把一个失效的 Effect 排入队列，下一帧 build 之前统一重跑。
+
+        与标脏共用同一个帧出口：队列一进东西就是"需要一帧"。
+        """
+        if self._phase in (FramePhase.LAYOUT, FramePhase.PAINT):
+            raise FrameError(
+                f"在 {self._phase.value} 阶段不允许修改状态",
+                phase=self._phase.value,
+            )
+        self._pending_effects.append(effect)
+        self.request_frame()
+
+    def flush_effects(self) -> None:
+        """在 build 之前重跑失效的 Effect。
+
+        时序刻意放在 build 之前：effect 里 set_state 产生的脏，
+        由紧随其后的 `flush_build` 在同一帧收掉。
+        在 BUILD 阶段运行，所以 effect 里允许 set_state / 写信号。
+        """
+        if not self._pending_effects:
+            return
+        with self._phase_scope(FramePhase.BUILD):
+            pending = self._pending_effects
+            self._pending_effects = []
+            for effect in pending:
+                effect.flush()
 
     def flush_build(self) -> None:
         """重建所有脏节点，按 depth 从浅到深，保证父级先于子级。
@@ -345,6 +377,7 @@ class BuildOwner:
         """
         self.frame_count += 1
         try:
+            self.flush_effects()
             self.flush_build()
             size = self.flush_layout(constraints)
             if context is not None:

@@ -338,7 +338,10 @@ DARK_SEMANTIC = SemanticTokens(
     text_faint=_hex("#94A3B8"),
     primary=_hex("#818CF8"),
     primary_hover=_hex("#A5B4FC"),
-    primary_press=_hex("#6366F1"),
+    # 暗色里"按得更深"=更亮（docs/13 §2.3：暗色是重新映射，不是反色）。
+    # 不能沿用品牌 600（#6366F1）：它是中调，配 on_primary 只有 3.6:1，不达 AA——
+    # 这条是 R6.3 的全变体×全状态对比度测试抓出来的，不是看出来的。
+    primary_press=_hex("#C7D2FE"),
     primary_soft=_hex("#1E1B4B"),
     on_primary=_hex("#1E1B4B"),
     focus_ring=_hex("#A5B4FC"),

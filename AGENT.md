@@ -22,7 +22,7 @@ Phase 1 · 地基。真实代码覆盖布局、组件树、样式、渲染、**�
 | `layout/grid.py` | ✅ Grid（fixed / fr / auto 轨道 + span） |
 | `layout/stack.py` | ✅ Stack / Positioned / Align |
 | `layout/scroll.py` | ✅ ScrollView（向子级派发无限主轴约束） |
-| `core/`（key / widget / element / render_object / binding） | ✅ 三棵树 + 帧调度 + `text_engine` 环境服务 |
+| `core/`（key / widget / element / render_object / binding / scope / signals） | ✅ 三棵树 + 帧调度 + 环境传播（`InheritedWidget` / `ThemeScope`）+ signals（`Signal` / `Computed` / `Effect`） |
 | `backend/`（base / headless / sdl2 / **fonts** / **headless_fonts** / **fontfiles** / **hbft_fonts** / **fonts_data**） | ✅ 平台抽象层 + **字体度量契约**（`MetricsProvider`）+ **跨平台真字体引擎（HarfBuzz + FreeType）** + **内嵌兜底字体** |
 | `gfx/color.py` | ✅ Color（hex 解析、插值、WCAG 对比度） |
 | `style/`（tokens / theme / resolve / variants） | ✅ 三层令牌 + 明暗主题 + 变体解析 |
@@ -34,10 +34,10 @@ Phase 1 · 地基。真实代码覆盖布局、组件树、样式、渲染、**�
 | `examples/hello.py` | ✅ 可运行示例（`--dark` / `--deterministic`），进 CI 冒烟测试 |
 | 其余模块（gfx GL+Skia / events 其余 / primitives …） | ⬜ 占位桩 |
 
-863 个无头单测全绿，**黄金图像素级比对**也跑通。
+888 个无头单测全绿，**黄金图像素级比对**也跑通。
 **地基整改 R1（正确性止血，docs/15）、R2（测试求真，docs/16）、
 R3（渲染协议重塑，docs/17）、R4（跨平台文本栈，docs/18）、
-R5（事件与 IME，docs/19）已完成**：
+R5（事件与 IME，docs/19）、R6（主题传播与依赖追踪，docs/20）已完成**：
 R1 修掉 11 处静默断链与崩溃级 bug；
 R2 让门禁本身说真话（黄金图改像素比对、基线缺失即失败、真全量性能基准、
 数值硬编码扫描）；R3 趁消费者少把渲染协议改对（帧生命周期、
@@ -47,8 +47,14 @@ R4 把文本栈换成 Flutter/Chrome 同路线（HarfBuzz 整形 + FreeType 光�
 R5 把输入命脉修通：事件模型加 window_id、时间戳用事件自带值、
 `wait_events` 不再丢唤醒事件、滚轮方向/精度/坐标、scancode 与 keysym 分离、
 **IME 通道从物理不通变成可用**（start_text_input / set_ime_rect 进协议、
-TEXTINPUT 与组合态拆成两条通道）、呈现契约进协议、GLFW 空壳删除。
-每条都带"修复前必红"的回归测试。下一步是 R6（docs/20）。
+TEXTINPUT 与组合态拆成两条通道）、呈现契约进协议、GLFW 空壳删除；
+R6 落地环境传播与状态双轨：`InheritedWidget` / `ThemeScope` 子树覆盖 +
+定向标脏（改侧栏主题，主区零重建）、`Signal` / `Computed` / `Effect`
+（与 Inherited 共用"读时登记、写时标脏"内核，1000 次写 = 1 次帧）、
+变体状态配方逐变体补齐（全变体×全状态过 WCAG AA 断言，
+顺手修掉暗色 `primary_press` 3.6:1 的违规令牌）。
+每条都带"修复前必红"的回归测试。地基整改 R1–R6 全部完成，
+后补清单见 docs/20 §R6.4。
 
 按 ROADMAP 顺序，Phase 1 剩下：② 自研 GL 后端、输入事件路由与组件接线
 （`events/` 其余模块）、DPI 缩放、样板 App。

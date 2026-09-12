@@ -22,7 +22,7 @@
     owner.begin_frame(BoxConstraints(max_width=800, max_height=600))
     ```
 
-状态：三棵树与帧调度已实现；signals（高频更新）未实现，见 docs/06 §3。
+状态：三棵树、帧调度、环境传播（Inherited/ThemeScope）与 signals 均已实现（R6）。
 """
 
 from .binding import (
@@ -36,6 +36,7 @@ from .binding import (
 from .element import (
     ComponentElement,
     Element,
+    InheritedElement,
     LeafRenderObjectElement,
     MultiChildRenderObjectElement,
     RenderObjectElement,
@@ -44,7 +45,10 @@ from .element import (
 )
 from .key import Key, ValueKey
 from .render_object import PaintContext, RenderObject
+from .scope import ThemeScope
+from .signals import Computed, Effect, Signal
 from .widget import (
+    InheritedWidget,
     RenderObjectWidget,
     State,
     StatefulWidget,
@@ -58,9 +62,13 @@ __all__ = [
     "BuildFailure",
     "BuildOwner",
     "ComponentElement",
+    "Computed",
+    "Effect",
     "Element",
     "FrameError",
     "FramePhase",
+    "InheritedElement",
+    "InheritedWidget",
     "Key",
     "LeafRenderObjectElement",
     "MultiChildRenderObjectElement",
@@ -68,11 +76,13 @@ __all__ = [
     "RenderObject",
     "RenderObjectElement",
     "RenderObjectWidget",
+    "Signal",
     "State",
     "StatefulElement",
     "StatefulWidget",
     "StatelessElement",
     "StatelessWidget",
+    "ThemeScope",
     "ValueKey",
     "Widget",
 ]

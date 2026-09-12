@@ -242,3 +242,28 @@ def _semantic_kwargs(semantic) -> dict[str, Color]:
     import dataclasses
 
     return {f.name: getattr(semantic, f.name) for f in dataclasses.fields(semantic)}
+
+
+class TestUnsetSentinel:
+    """R6.3：`UNSET` 区分"没填"与"填了 None"（resolve.py）。"""
+
+    def test_unset_means_no_opinion(self):
+        from inkstone.style import UNSET
+        from inkstone.style.resolve import layer
+
+        assert layer({"a": 1}, {"a": UNSET}) == {"a": 1}
+
+    def test_none_is_a_real_override(self):
+        """把 e1 阴影降回 e0（None）必须能生效——修复前 None 被当成"没填"跳过。"""
+        from inkstone.style.resolve import layer
+
+        assert layer({"shadow": "e1"}, {"shadow": None}) == {"shadow": None}
+
+
+class TestThemeColorCache:
+    def test_semantic_map_is_built_once_per_semantic(self):
+        """R6.3：`Theme.color()` 是热路径，26 键 dict 不许每次调用重建。"""
+        from inkstone.style.theme import _semantic_map
+
+        theme = Theme.light()
+        assert _semantic_map(theme.semantic) is _semantic_map(theme.semantic)

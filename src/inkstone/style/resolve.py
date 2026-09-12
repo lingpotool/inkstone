@@ -34,6 +34,7 @@ from typing import Any
 __all__ = [
     "FOCUS_RING_OFFSET",
     "FOCUS_RING_WIDTH",
+    "UNSET",
     "ComponentState",
     "layer",
     "resolve",
@@ -43,6 +44,24 @@ __all__ = [
 # 键盘导航必备，鼠标点击不显示（focus-visible 语义）。
 FOCUS_RING_WIDTH = 2.0
 FOCUS_RING_OFFSET = 2.0
+
+
+class _Unset:
+    """ "这一层没填"的显式哨兵（R6.3）。
+
+    为什么不能用 None 充当"没填"：None 本身是合法值——
+    比如把阴影从 e1 覆盖回 e0（无阴影）就必须真的写进一个 None。
+    "没填"与"填了 None"区分不开的话，上层永远无法把值覆盖回 None。
+    参照 `core/element.py` 的 `_SLOT_UNCHANGED` 先例。
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNSET"
+
+
+UNSET = _Unset()
 
 
 class ComponentState(Enum):
@@ -66,13 +85,13 @@ class ComponentState(Enum):
 def layer(*layers: Mapping[str, Any]) -> dict[str, Any]:
     """按给定顺序合并样式层，后者覆盖前者。
 
-    只有非空值才覆盖——"这一层没意见"表达成留空即可，
-    不必把上一层的原值再抄一遍。
+    `UNSET`（或不写这个键）= "这一层没意见"；写 None 就是**真的覆盖成 None**
+    ——例如把 e1 阴影降回 e0。两者必须能区分（R6.3）。
     """
     merged: dict[str, Any] = {}
     for current in layers:
         for key, value in current.items():
-            if value is not None:
+            if value is not UNSET:
                 merged[key] = value
     return merged
 
