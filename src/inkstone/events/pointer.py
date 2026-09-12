@@ -24,12 +24,13 @@ R5 把事件**模型**补齐了（`backend/base.py` 的 `PointerEvent` 含 windo
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
 from ..backend.base import PointerEvent, PointerKind
+from .gestures import GestureArena, GestureRecognizer, GestureState
 
 __all__ = [
     "DispatchPhase",
@@ -65,6 +66,10 @@ class PointerTarget(Protocol):
 
     def handle_pointer_event(self, dispatch: PointerDispatch) -> None:
         """处理一次分发。`dispatch` 里带着阶段、局部坐标与叫停开关。"""
+        ...
+
+    def pointer_recognizers(self) -> tuple[GestureRecognizer, ...]:
+        """本节点注册的手势识别器（R7.2）。默认没有。"""
         ...
 
 
@@ -152,6 +157,12 @@ class PointerRouter:
     def __init__(self) -> None:
         # 上一条 MOVE 的命中目标，按 target 优先排列。
         self._hover: list[PointerTarget] = []
+        # 每个指针一次按下-抬起对应一个竞技场（R7.2）。
+        self._arenas: dict[int, GestureArena] = {}
+        # 有超时计时的识别器（长按 / 双击）。tick 时统一推进。
+        self._timeouts: set[GestureRecognizer] = set()
+        # 识别器需要"到点了叫我"时通知上层排一帧（BuildOwner 接这个钩子）。
+        self.request_timeout_check: Callable[[], None] | None = None
 
     @property
     def hover_chain(self) -> tuple[PointerTarget, ...]:
@@ -162,14 +173,80 @@ class PointerRouter:
 
         任何带位置的事件都先做 hover 差分（先生成 ENTER/LEAVE，再走正常三阶段），
         这样组件既能收到"悬停开始/结束"，也能收到事件本身。
+
+        随后走手势竞技场（R7.2）：DOWN 收集命中链上的识别器开局，
+        MOVE/UP 继续喂给它们，UP 时 sweep 兜底判定。
         """
         if event.kind in _POSITIONAL_KINDS:
             self._update_hover(result, event)
 
         entries = result.entries
-        if not entries:
-            return False
-        return self._dispatch_phases(entries, event)
+        handled = self._dispatch_phases(entries, event) if entries else False
+        if self._route_gestures(entries, event):
+            handled = True
+        return handled
+
+    # ------------------------------------------------------------ 手势竞技场
+
+    def tick(self, now_ms: float) -> bool:
+        """推进超时计时（长按 / 双击时窗）。
+
+        由帧循环调用（`BuildOwner.begin_frame(now_ms=...)`），时间来自调用方——
+        识别器从不读墙上时钟，测试才能用注入时间戳确定性地驱动。
+        返回是否还有未决计时。
+        """
+        pending = False
+        for recognizer in list(self._timeouts):
+            if recognizer.state is not GestureState.PENDING:
+                self._timeouts.discard(recognizer)
+                continue
+            still_pending = recognizer.check_timeout(now_ms)
+            if recognizer.next_deadline_ms() is None:
+                # 计时用完（含刚刚自决）——不用再叫醒它
+                self._timeouts.discard(recognizer)
+            elif still_pending:
+                pending = True
+        return pending
+
+    def _route_gestures(self, entries: tuple[HitTestEntry, ...], event: PointerEvent) -> bool:
+        if event.kind is PointerKind.DOWN:
+            recognizers = [r for entry in entries for r in entry.target.pointer_recognizers()]
+            if not recognizers:
+                return False
+            arena = GestureArena(event.pointer_id)
+            for recognizer in recognizers:
+                arena.add(recognizer)
+            arena.close()
+            self._arenas[event.pointer_id] = arena
+            self._timeouts.update(recognizers)
+            for recognizer in recognizers:
+                recognizer.handle_event(event)
+            self._schedule_timeout_check()
+            return True
+
+        if event.kind in (PointerKind.MOVE, PointerKind.UP):
+            active = self._arenas.get(event.pointer_id)
+            if active is None:
+                return False
+            for recognizer in list(active.members):
+                recognizer.handle_event(event)
+            if event.kind is PointerKind.UP:
+                active.sweep()
+                self._discard_resolved()
+                self._schedule_timeout_check()
+            return True
+        return False
+
+    def _discard_resolved(self) -> None:
+        for pointer_id, arena in list(self._arenas.items()):
+            if arena.resolved:
+                del self._arenas[pointer_id]
+
+    def _schedule_timeout_check(self) -> None:
+        if self.request_timeout_check is not None and any(
+            r.next_deadline_ms() is not None for r in self._timeouts
+        ):
+            self.request_timeout_check()
 
     # ------------------------------------------------------------ 三阶段
 

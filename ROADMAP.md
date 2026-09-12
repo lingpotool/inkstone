@@ -79,8 +79,12 @@
    - **事件路由已在 R7.1 接上**（docs/21）：`RenderBox.hit_test` 逆序命中 +
      滚动视口裁剪，`events/pointer.py` 的三阶段路由（捕获/目标/冒泡 +
      `stop_propagation`）与 ENTER/LEAVE 命中链差分；Button 由路由驱动
-     HOVER/ACTIVE/FOCUS 与 `on_tap`，Input 聚焦打开 IME 通道并上报候选框。
-     手势竞技场、DPI 接线、样板 App、性能基准是 R7.2–R7.5。
+     HOVER/ACTIVE/FOCUS，Input 聚焦打开 IME 通道并上报候选框。
+   - **手势竞技场已在 R7.2 落地**：`events/gestures.py` 的
+     `GestureArena` + Tap / DoubleTap / LongPress / Drag 按 pointer_id 竞争，
+     滚动列表里的按钮"tap 或滚动"二选一（8px 阈值进令牌），输家收 cancel
+     退回 ACTIVE；长按/双击时窗用注入 `time_ms` 经 `begin_frame(now_ms=)` 推进。
+     DPI 接线、样板 App、性能基准是 R7.3–R7.5。
    - 未实现：semantics 阶段（Phase 3 无障碍）。
 6. **样式**：设计系统三层令牌（含阴影/动效令牌，规格见 `docs/13`）+ 明暗主题 + 组件变体解析
    - **进度（部分完成）**：`gfx/color.py`（含 WCAG 对比度计算）、

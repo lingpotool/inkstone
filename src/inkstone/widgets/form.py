@@ -32,6 +32,12 @@ from ..core import (
 )
 from ..core.element import _SLOT_UNCHANGED, Element
 from ..core.key import Key
+from ..events.gestures import (
+    DoubleTapGestureRecognizer,
+    GestureRecognizer,
+    LongPressGestureRecognizer,
+    TapGestureRecognizer,
+)
 from ..events.pointer import PointerDispatch
 from ..gfx.color import Color
 from ..layout import BoxConstraints, RenderBox, Size
@@ -256,6 +262,7 @@ class _ControlBox(RenderObjectWidget):
         on_pointer: Callable[[PointerDispatch], None] | None = None,
         focused: bool = False,
         wants_text_input: bool = False,
+        recognizers: list[GestureRecognizer] | None = None,
     ) -> None:
         self.style = style
         self.width = width
@@ -265,6 +272,7 @@ class _ControlBox(RenderObjectWidget):
         self.on_pointer = on_pointer
         self.focused = focused
         self.wants_text_input = wants_text_input
+        self.recognizers: list[GestureRecognizer] = recognizers if recognizers is not None else []
 
     def create_render_object(self) -> _ControlRenderObject:
         render_object = _ControlRenderObject()
@@ -291,6 +299,8 @@ class _ControlBox(RenderObjectWidget):
         render_object.center_text = self.center_text
         render_object.on_pointer = self.on_pointer
         render_object.focused = self.focused
+        # 识别器由组件层（知道主题令牌）创建，元素写进渲染对象（R7.2）
+        render_object.recognizers = list(self.recognizers)
         if isinstance(self.style, InputStyle):
             render_object.placeholder_color = self.style.placeholder
         render_object.mark_needs_layout()
@@ -362,8 +372,8 @@ class Button(StatefulWidget):
     """按钮。
 
     状态由 `ComponentState` 驱动：组件不关心"鼠标在哪"，只关心"我现在是什么状态"。
-    事件系统落地后，pointer 事件只负责调 `set_component_state()`，
-    样式解析这条链完全不用动。
+    点击/双击/长按由**手势识别器**在竞技场里裁决（R7.2）——事件不直达组件，
+    组件只收到识别器回调（按下/抬起/取消/命中手势）。
     """
 
     def __init__(
@@ -371,6 +381,8 @@ class Button(StatefulWidget):
         label: str = "",
         *,
         on_tap: Callable[[], None] | None = None,
+        on_double_tap: Callable[[], None] | None = None,
+        on_long_press: Callable[[], None] | None = None,
         variant: ButtonVariant = ButtonVariant.PRIMARY,
         size: str = "md",
         width: float | None = None,
@@ -379,6 +391,8 @@ class Button(StatefulWidget):
     ) -> None:
         self.label = label
         self.on_tap = on_tap
+        self.on_double_tap = on_double_tap
+        self.on_long_press = on_long_press
         self.variant = variant
         self.size = size
         self.width = width
@@ -390,11 +404,13 @@ class Button(StatefulWidget):
 
 
 class ButtonState(State["Button"]):
-    """按钮的交互状态机（R7.1）。
+    """按钮的交互状态机。
 
-    组件不监听"鼠标在哪"，只把命中链送来的 ENTER/LEAVE/DOWN/UP 翻译成
-    `ComponentState`，样式解析那条链一行都不用动。优先级：
-    ACTIVE（按下）> FOCUS_VISIBLE（聚焦）> HOVER（悬停）> DEFAULT。
+    - hover / 焦点：命中链的 ENTER/LEAVE 直接送达（不是手势竞争）；
+    - 点击 / 双击 / 长按：识别器在竞技场里赢下后回调，输了（如被滚动抢走）
+      收到 cancel —— ACTIVE 必须退回去。
+
+    状态优先级：ACTIVE（按下）> FOCUS_VISIBLE（聚焦）> HOVER（悬停）> DEFAULT。
     """
 
     def init_state(self) -> None:
@@ -404,6 +420,9 @@ class ButtonState(State["Button"]):
         self._hovered = False
         self._pressed = False
         self._focused = False
+        self._tap: TapGestureRecognizer | None = None
+        self._double: DoubleTapGestureRecognizer | None = None
+        self._long: LongPressGestureRecognizer | None = None
 
     def build(self, context: object) -> Widget:
         assert isinstance(context, Element)
@@ -420,27 +439,105 @@ class ButtonState(State["Button"]):
             label=self.widget.label,
             center_text=True,
             on_pointer=self._handle_pointer,
+            recognizers=self._build_recognizers(context.theme),
         )
 
+    # ------------------------------------------------------------ 识别器
+
+    def _build_recognizers(self, theme: object) -> list[GestureRecognizer]:
+        """按当前 widget 配置组装识别器，阈值一律来自令牌（不许字面量）。"""
+        from ..style import Theme  # 局部导入避免循环；Theme 是 L6，widgets 是 L7
+
+        assert isinstance(theme, Theme)
+        if self.widget.disabled:
+            return []
+        slop = theme.gesture("tap_slop")
+
+        recognizers: list[GestureRecognizer] = []
+        if self.widget.on_double_tap is not None:
+            # 双击识别器顺带负责单击（两者必须在同一个状态机里裁决，见 gestures.py）
+            if self._double is None:
+                self._double = DoubleTapGestureRecognizer(
+                    slop=slop,
+                    double_tap_ms=theme.gesture("double_tap_ms"),
+                    on_tap=self._fire_tap,
+                    on_double_tap=self._fire_double_tap,
+                    on_tap_down=self._press_down,
+                    on_tap_up=self._press_up,
+                    on_cancel=self._press_cancel,
+                )
+            else:
+                self._double.slop = slop
+                self._double.double_tap_ms = theme.gesture("double_tap_ms")
+            recognizers.append(self._double)
+        else:
+            if self._tap is None:
+                self._tap = TapGestureRecognizer(
+                    slop=slop,
+                    on_tap=self._fire_tap,
+                    on_tap_down=self._press_down,
+                    on_tap_up=self._press_up,
+                    on_cancel=self._press_cancel,
+                )
+            else:
+                self._tap.slop = slop
+            recognizers.append(self._tap)
+
+        if self.widget.on_long_press is not None:
+            if self._long is None:
+                self._long = LongPressGestureRecognizer(
+                    slop=slop,
+                    duration_ms=theme.gesture("long_press_ms"),
+                    on_long_press=self._fire_long_press,
+                )
+            else:
+                self._long.slop = slop
+                self._long.duration_ms = theme.gesture("long_press_ms")
+            recognizers.append(self._long)
+        return recognizers
+
+    # ------------------------------------------------------------ 识别器回调
+
+    def _press_down(self) -> None:
+        self._pressed = True
+        self._focused = True
+        self._refresh_state()
+
+    def _press_up(self) -> None:
+        self._pressed = False
+        self._refresh_state()
+
+    def _press_cancel(self) -> None:
+        # 竞技场判给别人（滚动获胜）时必须退回按压态
+        self._pressed = False
+        self._refresh_state()
+
+    def _fire_tap(self) -> None:
+        callback = self.widget.on_tap
+        if callback is not None:
+            callback()
+
+    def _fire_double_tap(self) -> None:
+        callback = self.widget.on_double_tap
+        if callback is not None:
+            callback()
+
+    def _fire_long_press(self) -> None:
+        callback = self.widget.on_long_press
+        if callback is not None:
+            callback()
+
+    # ------------------------------------------------------------ hover / 焦点
+
     def _handle_pointer(self, dispatch: PointerDispatch) -> None:
-        if not self.enabled:
-            return  # disabled / loading 不响应输入
+        if self.widget.disabled:
+            return
         kind = dispatch.event.kind
-        left = dispatch.event.button == 1
         if kind is PointerKind.ENTER:
             self._hovered = True
         elif kind is PointerKind.LEAVE:
-            # 离开即取消按压：指针移出按钮后抬起不该算点击（R7.1 的取消语义）
             self._hovered = False
             self._pressed = False
-        elif kind is PointerKind.DOWN and left:
-            self._pressed = True
-            self._focused = True
-        elif kind is PointerKind.UP and left:
-            fire = self._pressed
-            self._pressed = False
-            if fire:
-                self._emit_tap()
         else:
             return
         self._refresh_state()
@@ -456,13 +553,8 @@ class ButtonState(State["Button"]):
             state = ComponentState.DEFAULT
         self.set_component_state(state)
 
-    def _emit_tap(self) -> None:
-        callback = self.widget.on_tap
-        if callback is not None:
-            callback()
-
     def set_component_state(self, state: ComponentState) -> None:
-        """切换交互状态（事件系统与测试的直接入口）。"""
+        """切换交互状态（测试的直接入口）。"""
         if self.component_state is state:
             return
         self.component_state = state
@@ -512,6 +604,7 @@ class InputState(State["Input"]):
     def init_state(self) -> None:
         self.component_state = ComponentState.ERROR if self.widget.error else ComponentState.DEFAULT
         self._focused = False
+        self._tap: TapGestureRecognizer | None = None
 
     @property
     def focused(self) -> bool:
@@ -530,19 +623,29 @@ class InputState(State["Input"]):
             label=self.widget.value,
             placeholder=self.widget.placeholder,
             center_text=False,
-            on_pointer=self._handle_pointer,
             focused=self._focused,
             wants_text_input=True,
+            recognizers=self._build_recognizers(context.theme),
         )
 
-    def _handle_pointer(self, dispatch: PointerDispatch) -> None:
-        if (
-            dispatch.event.kind is PointerKind.DOWN
-            and dispatch.event.button == 1
-            and not self._focused
-        ):
-            self._focused = True
-            self._refresh_state()
+    def _build_recognizers(self, theme: object) -> list[GestureRecognizer]:
+        """点击即聚焦。走单击识别器而不是裸 DOWN——这样"点击落在输入框上"
+        与滚动/拖拽的竞争语义和按钮完全一致（R7.2）。"""
+        from ..style import Theme
+
+        assert isinstance(theme, Theme)
+        slop = theme.gesture("tap_slop")
+        if self._tap is None:
+            self._tap = TapGestureRecognizer(slop=slop, on_tap_down=self._focus)
+        else:
+            self._tap.slop = slop
+        return [self._tap]
+
+    def _focus(self) -> None:
+        if self._focused:
+            return
+        self._focused = True
+        self._refresh_state()
 
     def unfocus(self) -> None:
         """主动失焦（点击别处、Esc）。焦点管理器属后续工作，先留显式入口。"""

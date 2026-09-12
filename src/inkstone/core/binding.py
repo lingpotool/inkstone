@@ -154,7 +154,9 @@ class BuildOwner:
         self._pending_effects: list[Effect] = []
         # 指针路由（R7.1）：命中链的三阶段分发与 hover 差分。
         # 一个 owner 一棵树，所以 router 的 hover 状态也归它。
+        # 手势超时（长按/双击）需要"到点排一帧"，接到 request_frame 上（R7.2）。
         self.pointer_router = PointerRouter()
+        self.pointer_router.request_timeout_check = self.request_frame
         # 文本输入通道：输入框获焦时经这两个钩子通知后端（R5.7 的协议已就位）。
         # 为什么不直接调 backend：core 不应该认识平台对象；App 组装时把
         # `backend.start_text_input` / `set_ime_rect` 接进来即可。
@@ -308,6 +310,14 @@ class BuildOwner:
         root.hit_test(Offset(event.x, event.y), result)
         return self.pointer_router.dispatch(result, event)
 
+    def tick_gestures(self, now_ms: float) -> bool:
+        """推进手势超时（长按 / 双击时窗）。时间由调用方给（后端注入）。
+
+        由 `begin_frame(now_ms=...)` 在帧首调用；也可被主循环单独调用。
+        返回是否还有未决计时，调用方据此决定要不要继续排帧。
+        """
+        return self.pointer_router.tick(now_ms)
+
     def flush_effects(self) -> None:
         """在 build 之前重跑失效的 Effect。
 
@@ -402,15 +412,21 @@ class BuildOwner:
         context: PaintContext | None = None,
         *,
         force_repaint: bool = False,
+        now_ms: float | None = None,
     ) -> Size | None:
         """跑完整的一帧。
 
         `force_repaint=True` 时强制把渲染树全部标脏——动画场景下默认会跳过
         没动的子树（省 99% 工作量），黄金图测试与截图工具要的是"每帧完整画面"，
         所以 devtools 用这个标志。
+
+        `now_ms` 是当前时间（后端注入）。给了就先推进手势超时——长按到点
+        会在这里触发 `set_state`，同帧的 build 就能收掉，不差一拍。
         """
         self.frame_count += 1
         try:
+            if now_ms is not None:
+                self.tick_gestures(now_ms)
             self.flush_effects()
             self.flush_build()
             size = self.flush_layout(constraints)

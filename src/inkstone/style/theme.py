@@ -135,6 +135,14 @@ class Theme:
         """缓动曲线或弹簧参数。"""
         return _lookup("easings", name, self.raw.easings)
 
+    def gesture(self, name: str) -> float:
+        """手势参数。`"tap_slop"=8 / "long_press_ms"=500 / "double_tap_ms"=300`。
+
+        识别器住在 `events/`（L1），读不到主题（L6）——所以由组件在构造
+        识别器时把令牌值传进去，识别器本身不含字面量。
+        """
+        return _lookup("gestures", name, self.raw.gestures)
+
     @property
     def font_sans(self) -> tuple[str, ...]:
         return self.raw.font_sans

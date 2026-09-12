@@ -156,6 +156,10 @@ class RawTokens:
     # 缓动曲线与弹簧
     easings: Mapping[str, CubicBezier | SpringSpec]
 
+    # 手势识别参数。8px 阈值、长按/双击时窗都是**设计决定**，
+    # 散落在识别器里当字面量就没人能一次改全（docs/21 R7.2）。
+    gestures: Mapping[str, float]
+
 
 _PILL = float("inf")
 
@@ -240,6 +244,14 @@ DEFAULT_RAW = RawTokens(
         "ease-in-out-quart": CubicBezier(0.76, 0.0, 0.24, 1.0),
         "spring-default": SpringSpec(1.0, 170.0, 26.0),
         "spring-gentle": SpringSpec(1.0, 120.0, 20.0),
+    },
+    gestures={
+        # 触摸滑动容差：按下后移动不超过它，抬起仍算 tap（超过则让位给滚动/拖拽）。
+        # 8px 是触摸屏上"手抖但不构成滑动"的经验分界（docs/06 §5）。
+        "tap_slop": 8.0,
+        # 长按判定时长与双击第二击时窗。
+        "long_press_ms": 500.0,
+        "double_tap_ms": 300.0,
     },
 )
 

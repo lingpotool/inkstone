@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from ..events.gestures import GestureRecognizer
 from ..events.pointer import HitTestResult, PointerDispatch
 from .protocol import (
     INF,
@@ -63,6 +64,10 @@ class RenderBox:
         self._overflow: float = 0.0
         self._needs_layout: bool = True
         self._needs_paint: bool = True
+
+        # 手势识别器（R7.2）：由知道主题令牌的组件层填进来（元素写、渲染对象读），
+        # 命中测试命中本节点时交给竞技场竞争。滚动容器、按钮各注册自己的。
+        self.recognizers: list[GestureRecognizer] = []
 
     # ------------------------------------------------------------ 树
 
@@ -374,7 +379,12 @@ class RenderBox:
 
         需要响应输入的节点（按钮、输入框）覆写它，或在 `paint` 之外
         由元素把回调写进渲染对象（"元素写、渲染对象读"）。
+        点击/拖拽这类**手势**不走这里——它们在竞技场里被识别器裁决（R7.2）。
         """
+
+    def pointer_recognizers(self) -> tuple[GestureRecognizer, ...]:
+        """本节点注册的手势识别器（供 `events.PointerRouter` 收集）。"""
+        return tuple(self.recognizers)
 
     def local_to_global(self, point: Offset) -> Offset:
         """把本节点局部坐标换算成窗口（根）坐标。沿父链累加 offset。

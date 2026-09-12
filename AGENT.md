@@ -32,6 +32,7 @@ Phase 1 · 地基。真实代码覆盖布局、组件树、样式、渲染、**�
 | `devtools/screenshot.py` | ✅ 确定性截图 + 黄金图基线（10 张）+ **字形源自动配对** |
 | `events/ime.py` | ✅ IME 组合态模型（`ImeSession`：事件流 → text+composition 状态） |
 | `events/pointer.py` | ✅ 指针路由：`HitTestResult` + 三阶段 `PointerRouter`（捕获/目标/冒泡、`stop_propagation`）+ ENTER/LEAVE 命中链差分；`layout.RenderBox.hit_test` 逆序命中 |
+| `events/gestures.py` | ✅ 手势竞技场：`GestureArena` + `GestureRecognizer` 基类 + Tap / DoubleTap / LongPress / Drag；按 pointer_id 竞争裁决、取消是一等公民、超时用注入时间轴推进 |
 | `examples/hello.py` | ✅ 可运行示例（`--dark` / `--deterministic`），进 CI 冒烟测试 |
 | 其余模块（gfx GL+Skia / events 其余 / primitives …） | ⬜ 占位桩 |
 
@@ -59,11 +60,13 @@ R6 落地环境传播与状态双轨：`InheritedWidget` / `ThemeScope` 子树�
 收官包 **R7「交互闭环与 Phase 1 收尾」（docs/21）正在进行**：
 R7.1 命中测试与指针事件路由已完成（`RenderBox.hit_test` 逆序命中 +
 滚动视口裁剪、三阶段路由与 `stop_propagation`、ENTER/LEAVE 差分、
-Button 的 HOVER/ACTIVE/FOCUS 状态与 `on_tap`、Input 聚焦经 owner 钩子
-打开 IME 通道并上报候选框位置），测试 888 → 908 全绿。
+Input 聚焦经 owner 钩子打开 IME 通道并上报候选框位置）；
+R7.2 手势竞技场已完成（`GestureArena` + Tap/DoubleTap/LongPress/Drag，
+按 pointer_id 竞争裁决、输家收到 cancel 退回 ACTIVE、8px/500ms/300ms 进令牌、
+超时经 `begin_frame(now_ms=...)` 用注入时间推进）。测试 888 → 920 全绿。
 
-按 ROADMAP 顺序，Phase 1 剩下：R7.2 手势竞技场、R7.3 DPI 接线、
-R7.4 样板 App、R7.5 性能基准 → GL 后端决策（docs/21）。
+按 ROADMAP 顺序，Phase 1 剩下：R7.3 DPI 接线、R7.4 样板 App、
+R7.5 性能基准 → GL 后端决策（docs/21）。
 渲染与文本这几块已经能出**看起来像正经软件**的界面。
 
 **字体有三种来源，各司其职（ADR-0007 / ADR-0011）**：
@@ -196,6 +199,11 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
   `theme` / `text_engine` 都是这个套路。另外框架**挂载时只调 `create_render_object`**，
   不调 `update_render_object`——字段必须在 `create_*` 里就填满，
   否则首次布局量到空值（表现为"文字没画出来但也不报错"）。
+- **手势识别器由组件层创建、经元素写进渲染对象（R7.2）。** 识别器要令牌阈值
+  （L6），而 `RenderObject` 拿不到主题——所以 Button/Input 在 `State.build` 里用
+  `context.theme.gesture(...)` 造识别器，元素写进 `render_object.recognizers`，
+  Router 命中时收集并交给竞技场。组件**不许**直接解释裸 DOWN/UP 判点击——
+  那是竞技场的裁决权（ADR-0014）。
 - **`Perform_layout` 里的无限宽是正常输入，不是错误。** Row 里放 Text 时
   宽度无界，此时应走"不换行"路径，而不是抛异常或死循环。
 
@@ -362,6 +370,7 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 | ADR-0008 | **`text_run` 指令只吃字形不吃字符串** | docs/03 的约定落地：整形与断行在 L3 完成，渲染层只接收"哪些字形、画在哪"。换行规则、回退链、字素簇的知识不渗进渲染层。光栅层**按 `glyph.x` 画，不自己累加 advance**——否则字距调整/两端对齐/标点悬挂的决策会被静默丢掉 |
 | ADR-0012 | **MetricsProvider 拆出 Backend 协议；协议符合性用显式遍历测试** | SDL2Backend 自称实现 Backend 却缺全部度量方法——`runtime_checkable` 不查方法体，假保证比没保证更危险。拆分后：窗口后端管窗口/输入/帧边界，度量引擎（HB+FT）由 App 组装时注入。符合性由 `tests/unit/test_backend_protocol.py` 逐成员断言，且测试自身能红。同批：事件模型加 `window_id`、IME 拆 TextEvent/ImeEvent 双通道、呈现帧边界（begin/end_frame）进协议 |
 | ADR-0013 | **命中链的"顺序与分发"归 events（L1），"坐标与几何"归 layout（L4）** | L1 不能 import L4，所以 `HitTestResult` / `PointerTarget` / 三阶段 `PointerRouter` 定义在 `events/pointer.py` 且不含任何几何类型；`layout.RenderBox.hit_test` 反向（L4→L1 合法）填充命中链、逐层扣掉子级 offset，局部坐标因此随链传递。命中链 **target 优先**（逆序递归子级 = 后画的在上层），滚动裁剪由"视口 bounds 检查先于递归"结构成立，不写特判。**ENTER/LEAVE 不信后端**（SDL 的是窗口级），由 MOVE/DOWN/UP/WHEEL 的命中链差分生成——把 DOWN 也算进来是为触屏（无悬停）。事件派发在 layout/paint 阶段一律抛 `FrameError` |
+| ADR-0014 | **tap/double-tap/long-press/drag 是竞技场里的竞争，不是各自判断；单击与双击必须在同一个识别器里裁决** | 滚动列表里放按钮时"按钮 ACTIVE + 列表一起滚"是两个都赢的经典 bug——`GestureArena` 按 pointer_id 收集命中链上的识别器并显式裁决，输家收 `on_reject`（取消），组件据此退回 ACTIVE。单击与双击**不能**拆成两个识别器：第一击抬起时 Tap 无法知道第二击来不来，Tap 先赢则双击永不出现，Tap 等待则无法在第二击时撤回已发的单击；`DoubleTapGestureRecognizer` 用"延迟的单击 + 双击"一个状态机闭合。识别器只吃构造时传入的令牌阈值（8px / 500ms / 300ms），时间一律用事件 `time_ms` + `begin_frame(now_ms=)` 推进，不读墙上时钟 |
 
 ## 已知待办
 
