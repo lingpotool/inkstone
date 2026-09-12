@@ -11,8 +11,8 @@
 > **渲染管线**（显示列表 + 软件光栅 + 文本 + 黄金图）、
 > **最小组件集**（Box / Card / Text / Row / Column / Flexible / Button / Input）
 > 均已实现。**中文渲染成真正的汉字**（Windows 走系统字体）。
-> 567 个无头单测全绿，三平台 CI（含 py3.10 最低版本）全绿，
-> 覆盖率 89%，1001 节点全量布局 0.9ms。
+> 662 个无头单测全绿，三平台 CI（含 py3.10 最低版本）全绿，
+> 覆盖率 89%，1001 节点**增量**布局 1.7ms、**全量**布局 17.6ms（预算 30ms）。
 > 尚未实现：自研 GL 后端、中文输入（事件系统与编辑模型）、DPI 缩放。详见 [ROADMAP.md](ROADMAP.md)。
 
 ---
@@ -68,7 +68,7 @@ inkstone/
 ```bash
 python examples/hello.py                 # 渲染成 hello.png（用系统真字体）
 python examples/hello.py --dark          # 暗色主题
-python examples/hello.py --deterministic # 内置确定性字形（跨平台逐字节一致）
+python examples/hello.py --deterministic # 内置确定性字形（跨平台像素级一致）
 ```
 
 示例里没有一处硬编码宽度——按钮宽度由标签文字**自己量出来**。

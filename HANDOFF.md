@@ -1,7 +1,39 @@
 # HANDOFF —— 交接文档
 
 > 写给下一个接手的对话。读完这份 + `AGENT.md` + `ROADMAP.md`，就能直接开工。
-> 交接时间：2026-09-10 · **567 个测试全绿** · 覆盖率 89% · 中文已渲染真字形
+> 交接时间：2026-09-10 · 覆盖率 89% · 中文已渲染真字形
+> （测试数已过时——见下方更新：现在是 662 个全绿）
+>
+> **2026-09-12 重要更新**：地基审查完成，结论与施工方案在 `docs/14-地基整改总览.md`
+> （工作包 R1–R6，分包文档 docs/15–20）。**整改期间，新功能开发让位于地基整改**；
+> 本文中"已完成"表格的部分条目实际状态比记录的弱，以 docs/14 第 1 节的审查结论为准。
+>
+> **2026-09-12 晚：R1「正确性止血」已完工（docs/15 的 11 个条目全部落地）。**
+> 修掉 11 处静默断链与崩溃级 bug，每条都带"修复前必红"的回归测试；
+> 无头单测 **567 → 610** 全绿。
+> 黄金图基线 `text_wrapping.png` 因 R1.1 更新过一次（diff 已逐像素核对：
+> 只有竖长画布底部 20 行由透明黑变成主题底色）。
+>
+> **2026-09-12 深夜：R2「测试求真」也已完工（docs/16 的 6 个条目全部落地）。**
+> 无头单测 **610 → 662** 全绿。这一包改的是**门禁本身**：
+>
+> - 黄金图比对单位从 PNG 文件字节改成**解码后的 RGBA 像素**
+>   （`encode_png` 的 zlib 输出不跨版本保证一致，"三平台逐字节相同"是侥幸）；
+>   解码器在 `tests/png_compare.py`，5 种滤波器都实现，其余形态响亮报错。
+> - **基线缺失 = 失败**（此前缺失就顺手写一份新基线然后绿灯——自动橡皮图章）。
+> - 性能基准拆成 `test_layout_perf_incremental`（预算 5ms）与
+>   `test_layout_perf_full`（预算 30ms）。原来的"全量 0.89ms"测的是**缓存命中**：
+>   它每轮只调 `root.mark_needs_layout()`，而该方法只向上冒泡。
+>   真全量实测 17.6ms，是那个数字的 20 倍。
+> - "组件零硬编码"扫描从颜色扩到**圆角 / 描边宽度 / 控件高度三类数值**，
+>   清掉 4 处漏网（Card 的 `or 10.0`、`stroke(rect, 1.0, ...)`、
+>   `_ControlRenderObject` 的 36.0/1.0/10.0/12.0）；`elevation` 死字段删除。
+> - conftest 删掉两个没人用的 fixture（`clock` / `any_backend`）。
+>
+> **下一个该动的是 R3「渲染协议重塑」（docs/17）**：RasterBackend 改
+> begin/execute/end 形态、`PositionedGlyph` 加 `y_offset`（HarfBuzz 落地的前提）、
+> transform/path 指令、光栅快路径。R3 依赖 R1、R2，两者都已就绪。
+> 注意 R3 会大改 `gfx/raster/`，届时黄金图要按新口径（像素级）重跑一次确认。
 
 ---
 
@@ -45,7 +77,8 @@ Windows / macOS / Linux 一等公民、中文一等公民。
 2c9ed8c feat(text): 文本栈落地，度量下沉后端保证同源
 d3baffd feat(text,widgets,gfx): 文本接入渲染管线，Text 组件落地
 5392708 feat(widgets): Button 按标签收缩、Input 显示值/占位符
-77fed3a ci: 三平台 CI + 覆盖率门禁 + 架构约束任务   ← HEAD
+77fed3a ci: 三平台 CI + 覆盖率门禁 + 架构约束任务
+（此后还有 4 个提交：真字体引擎、CI 两处修正、R1 之后的整改；见 `git log`）
 ```
 
 ### ROADMAP Phase 1 进度
@@ -56,7 +89,8 @@ d3baffd feat(text,widgets,gfx): 文本接入渲染管线，Text 组件落地
 **Phase 1 剩下的是 DoD 而非交付项**：
 
 - [x] 三平台 CI 全绿 —— **首次推送即 8 个任务全绿**（`77fed3a`）。
-      黄金图在 Windows / macOS / Ubuntu 上**逐字节相同**，
+      黄金图在 Windows / macOS / Ubuntu 上**像素级一致**（R2 之后比对单位是
+      解码后的 RGBA，见 AGENT.md 的 CI 段），
       "确定性"从设计意图变成了可验证的事实。
 - [ ] 中文输入：可输入、可删除、光标位置正确 ← **最大的一块，见下**
 - [ ] 100%/125%/150% 缩放无模糊无错位
@@ -66,6 +100,11 @@ d3baffd feat(text,widgets,gfx): 文本接入渲染管线，Text 组件落地
 ---
 
 ## 三、下一步（按 ROADMAP 顺序，别跳）
+
+> **⚠️ 先看这里**：地基整改（docs/14–20）期间，**新功能开发让位于整改**。
+> R1、R2 已完成，**当前该动的是 R3「渲染协议重塑」（docs/17）**；
+> R4/R5/R6 依次跟上。下面这几节（中文输入 / DPI / 字体引擎 / 样板 App）
+> 是整改之前写的功能顺序，**整改做完之后再回到它们**——顺序不变，只是让位。
 
 ### ① 中文输入与文本编辑 —— Phase 1 最大的剩余缺口
 
@@ -112,7 +151,7 @@ Phase 1 的成功标准是"能用它写出一个真实的小工具"。
 
 ```bash
 cd /e/inkstone
-./.venv/Scripts/python.exe -m pytest tests -q          # 567 个必须全绿
+./.venv/Scripts/python.exe -m pytest tests -q          # 662 个必须全绿
 ./.venv/Scripts/python.exe -m ruff format --check src tests
 ./.venv/Scripts/python.exe -m ruff check src tests     # 必须 All checks passed
 ./.venv/Scripts/python.exe -m mypy                     # strict，必须零错误
@@ -191,7 +230,7 @@ cd /e/inkstone
 ## 八、开工姿势（建议）
 
 1. 读 `AGENT.md`（**重点看 ADR 表**）→ `ROADMAP.md` → 本文档
-2. 跑一遍验证命令确认起点全绿（567 passed / mypy 干净 / 覆盖 89%）
+2. 跑一遍验证命令确认起点全绿（662 passed / mypy 干净 / 覆盖 89%）
 3. 跑一次 `python examples/hello.py` —— 亲眼看看现在的界面长什么样，
    这是最快建立"这个库到什么程度了"直觉的方式
 4. 若继续 Phase 1，顺序建议：**①中文输入**（`events/` + 编辑模型）→
@@ -199,7 +238,7 @@ cd /e/inkstone
 5. 每完成一块：全量检查全绿 → commit（中文说明为什么）→ push
 
 地基是结实的：三棵树、令牌、文本栈、确定性渲染、无头测试链路、
-CI 全通了。三平台 CI 首次推送就全绿，黄金图逐字节一致，
+CI 全通了。三平台 CI 首次推送就全绿，黄金图像素级一致，
 中文已经渲染成真汉字。剩下的主要是"把交互接上"和"补齐另两个平台"。
 
 ---
