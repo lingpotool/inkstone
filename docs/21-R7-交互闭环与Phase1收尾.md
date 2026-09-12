@@ -124,3 +124,37 @@ R2.3 立过规矩：**优化按数据驱动**。GL 后端（ROADMAP Phase 1 ②�
 
 **明确不做**（写在这里防 scope 蔓延）：GL/Skia 后端本体、macOS/Linux
 字体之外的 backend 扩展、动效引擎接线（motion/ 仍骨架）、多窗口管理 UI。
+
+---
+
+## 施工状态（2026-09-13 收官）
+
+R7.1–R7.5 全部落地。无头单测 **888 → 944** 全绿，覆盖率 89.8%，
+`make check`（ruff + mypy strict + pytest）全绿，slow 性能用例单跑全过。
+对应提交：`2580a88` / `4e5c63f` / `cb76c17` / `873d1df` / `5bbb29e`。
+
+- **R7.1** 命中测试（`RenderBox.hit_test` 逆序、滚动视口裁剪）+ 三阶段
+  `PointerRouter`（捕获/目标/冒泡、`stop_propagation`）+ ENTER/LEAVE 命中链
+  差分；Button 由路由驱动 HOVER/ACTIVE/FOCUS，Input 聚焦经 owner 钩子打开
+  IME 通道并上报候选框。ADR-0013。
+- **R7.2** `GestureArena` + Tap/DoubleTap/LongPress/Drag 按 pointer_id 竞争裁决；
+  8px/500ms/300ms 进令牌；输家收 cancel 退回 ACTIVE；超时用事件 `time_ms`
+  经 `begin_frame(now_ms=)` 推进，不读墙上时钟。ADR-0014。docs/06 §8 已勾。
+- **R7.3** DPI 档位经 `begin_frame(dpi_scale=…)` 进上下文、`flush_paint` 在根上
+  压缩放；布局/命中/事件恒为逻辑像素；`DPI_CHANGED` 下一帧生效；150% 黄金图。
+  ADR-0015，口径写进 docs/02 §6。
+- **R7.4** 样板 App「墨记」（`examples/notes.py`）；补 `ScrollView` widget；
+  headless 黄金图 `notes_light` / `notes_dark` 进 CI。纪律执行结果：
+  App 层逼出的缺口如实记入 docs/20 §R6.4（无通用单子容器、无文本编辑模型、
+  无滚动条/虚拟滚动、`app.py` 仍占位），**没有在 App 层打补丁**；
+  顺带发现并修掉文本栈一个真 bug（多字重下光栅按 family 重选字体面，
+  用甲的 glyph id 查乙的轮廓 → 粗体整行画成别的字），ADR-0016。
+- **R7.5** 决策规则先写死再用 `benchmarks/run.py` 去量：三场景 p95
+  859 / 3125 / 576ms，超 10ms 预算 40–300 倍，热点是软件光栅的纯 Python
+  逐像素 SDF。规则触发 → **GL 后端子包另立文档 `docs/22`**（不在本包 scope，
+  故未在 R7 内实现），软件光栅继续做黄金图的确定性事实源。ADR-0017。
+
+**整包验收对照**：docs/06 §8 手势竞技场已勾 ✓；命中/路由/竞技场/焦点各有
+回归测试 ✓；样板 App headless 黄金图进 CI ✓（SDL2 真窗口三平台验证待做）；
+benchmarks 出报告、GL 决策有据 ✓；`make check` 全绿 ✓；docs/06 §5 与 docs/02
+DPI 口径与实现一致 ✓。
