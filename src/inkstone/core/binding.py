@@ -29,7 +29,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 
-from ..backend.base import PointerEvent
+from ..backend.base import PointerEvent, WindowEvent, WindowKind
 from ..events.pointer import HitTestResult, PointerRouter
 from ..layout import BoxConstraints, Offset, Rect, RenderBox, Size
 from ..style import Theme, default_theme
@@ -162,6 +162,10 @@ class BuildOwner:
         # `backend.start_text_input` / `set_ime_rect` 接进来即可。
         self.on_text_input: Callable[[bool], None] | None = None
         self.on_ime_rect: Callable[[Rect], None] | None = None
+        # 设备像素比（R7.3）：布局永远在逻辑像素里算，物理 = 逻辑 × dpi_scale，
+        # 换算只发生在录制/光栅那一层。它随帧走（begin_frame(now_ms/dpi_scale)），
+        # 跨屏拖动时后端发 DPI_CHANGED，经 handle_window_event 更新。
+        self._dpi_scale: float = 1.0
 
     # ------------------------------------------------------------ 查询
 
@@ -210,6 +214,28 @@ class BuildOwner:
             node = pending.pop()
             node.mark_needs_build()
             node.visit_children(pending.append)
+
+    # ------------------------------------------------------------ DPI 缩放
+
+    @property
+    def dpi_scale(self) -> float:
+        """当前设备像素比（1.0 / 1.25 / 1.5 …）。布局不受它影响——只影响光栅。"""
+        return self._dpi_scale
+
+    @dpi_scale.setter
+    def dpi_scale(self, value: float) -> None:
+        if value <= 0.0:
+            raise FrameError(f"DPI 缩放必须为正，收到 {value}", phase="dpi")
+        self._dpi_scale = float(value)
+
+    def handle_window_event(self, event: WindowEvent) -> None:
+        """消费窗口事件。目前只处理 DPI 变化（R7.3）。
+
+        后端在跨屏拖动时发 `DPI_CHANGED`，这里更新档位；下一帧
+        `render_to_*` / 帧循环按新档位录制，**不拉伸旧帧**（那会模糊）。
+        """
+        if event.kind is WindowKind.DPI_CHANGED:
+            self.dpi_scale = event.dpi_scale
 
     @property
     def root_render_object(self) -> RenderBox | None:
@@ -401,10 +427,27 @@ class BuildOwner:
             return self.root_render_object.layout(constraints)
 
     def flush_paint(self, context: PaintContext) -> None:
-        if self.root_render_object is None:
+        root = self.root_render_object
+        if root is None:
             return
         with self._phase_scope(FramePhase.PAINT):
-            self.root_render_object.paint_tree(context)
+            # DPI 缩放压**在根上**（R7.3）：布局/几何全是逻辑像素，
+            # 只有录进显示列表时才折算成设备像素（物理 = 逻辑 × scale）。
+            # 这样组件的坐标一行业务代码都不用改，1.5 档下文字是在
+            # 物理分辨率上光栅化的，不是把 1.0 的画面拉伸糊掉。
+            scale = self._dpi_scale
+            apply_scale = getattr(context, "scale", None)
+            save = getattr(context, "save", None)
+            restore = getattr(context, "restore", None)
+            if scale != 1.0 and callable(apply_scale) and callable(save) and callable(restore):
+                save()
+                apply_scale(scale)
+                try:
+                    root.paint_tree(context)
+                finally:
+                    restore()
+                return
+            root.paint_tree(context)
 
     def begin_frame(
         self,
@@ -413,6 +456,7 @@ class BuildOwner:
         *,
         force_repaint: bool = False,
         now_ms: float | None = None,
+        dpi_scale: float | None = None,
     ) -> Size | None:
         """跑完整的一帧。
 
@@ -422,7 +466,13 @@ class BuildOwner:
 
         `now_ms` 是当前时间（后端注入）。给了就先推进手势超时——长按到点
         会在这里触发 `set_state`，同帧的 build 就能收掉，不差一拍。
+
+        `dpi_scale` 是本帧的设备像素比（后端注入）。给了就更新档位，
+        录制时由 `flush_paint` 压在根变换上。布局尺寸仍是**逻辑像素**——
+        本次调用的返回值不受缩放影响（docs/02 §6）。
         """
+        if dpi_scale is not None:
+            self.dpi_scale = dpi_scale
         self.frame_count += 1
         try:
             if now_ms is not None:

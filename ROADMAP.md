@@ -84,7 +84,10 @@
      `GestureArena` + Tap / DoubleTap / LongPress / Drag 按 pointer_id 竞争，
      滚动列表里的按钮"tap 或滚动"二选一（8px 阈值进令牌），输家收 cancel
      退回 ACTIVE；长按/双击时窗用注入 `time_ms` 经 `begin_frame(now_ms=)` 推进。
-     DPI 接线、样板 App、性能基准是 R7.3–R7.5。
+   - **DPI 缩放已在 R7.3 接上**：档位经 `begin_frame(dpi_scale=…)` 进帧上下文，
+     `flush_paint` 在根上压等比仿射变换 → 显示列表是设备像素、帧缓冲按
+     逻辑尺寸×scale；布局与命中恒为逻辑像素；`DPI_CHANGED` 下一帧生效。
+     150% 黄金图（`login_form_light_150`）进 CI。样板 App、性能基准是 R7.4–R7.5。
    - 未实现：semantics 阶段（Phase 3 无障碍）。
 6. **样式**：设计系统三层令牌（含阴影/动效令牌，规格见 `docs/13`）+ 明暗主题 + 组件变体解析
    - **进度（部分完成）**：`gfx/color.py`（含 WCAG 对比度计算）、

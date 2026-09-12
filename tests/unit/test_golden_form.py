@@ -129,6 +129,28 @@ class TestGoldenLoginForm:
         _assert_or_update_golden("login_form_dark", png)
 
 
+class TestGoldenDpiScale:
+    """R7.3：同一棵树在 150% 档位下按设备像素出图（文字在物理分辨率上光栅化）。"""
+
+    def test_login_form_at_150_percent(self):
+        owner = _build_login_form(Theme.light())
+        png = render_to_png(owner, _constraints(), dpi_scale=1.5)
+        _assert_or_update_golden("login_form_light_150", png)
+
+    def test_150_percent_is_not_a_stretch_of_100_percent(self):
+        """150% 不是把 100% 的图放大——布局相同、光栅分辨率更高。
+
+        判据：两者的物理尺寸不同（480×390 vs 320×260），
+        但 150% 的画布确实是 1.5 倍（由解码器给出）。
+        """
+        frame_100 = decode_png(render_to_png(_build_login_form(Theme.light()), _constraints()))
+        frame_150 = decode_png(
+            render_to_png(_build_login_form(Theme.light()), _constraints(), dpi_scale=1.5)
+        )
+        assert (frame_100.width, frame_100.height) == (320, 260)
+        assert (frame_150.width, frame_150.height) == (480, 390)
+
+
 class TestGoldenElementaryShapes:
     def test_button_primary_only(self):
         owner = _owner(Theme.light())

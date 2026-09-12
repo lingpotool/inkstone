@@ -63,10 +63,12 @@ R7.1 命中测试与指针事件路由已完成（`RenderBox.hit_test` 逆序命
 Input 聚焦经 owner 钩子打开 IME 通道并上报候选框位置）；
 R7.2 手势竞技场已完成（`GestureArena` + Tap/DoubleTap/LongPress/Drag，
 按 pointer_id 竞争裁决、输家收到 cancel 退回 ACTIVE、8px/500ms/300ms 进令牌、
-超时经 `begin_frame(now_ms=...)` 用注入时间推进）。测试 888 → 920 全绿。
+超时经 `begin_frame(now_ms=...)` 用注入时间推进）；
+R7.3 DPI 缩放接线已完成（档位经 `begin_frame(dpi_scale=…)` 进上下文，
+`flush_paint` 在根上压缩放 → 显示列表是设备像素，布局仍是逻辑像素；
+DPI_CHANGED 下一帧生效不拉伸；150% 黄金图）。测试 888 → 933 全绿。
 
-按 ROADMAP 顺序，Phase 1 剩下：R7.3 DPI 接线、R7.4 样板 App、
-R7.5 性能基准 → GL 后端决策（docs/21）。
+按 ROADMAP 顺序，Phase 1 剩下：R7.4 样板 App、R7.5 性能基准 → GL 后端决策（docs/21）。
 渲染与文本这几块已经能出**看起来像正经软件**的界面。
 
 **字体有三种来源，各司其职（ADR-0007 / ADR-0011）**：
@@ -371,6 +373,7 @@ make check   # = ruff check + ruff format --check + mypy(strict) + pytest
 | ADR-0012 | **MetricsProvider 拆出 Backend 协议；协议符合性用显式遍历测试** | SDL2Backend 自称实现 Backend 却缺全部度量方法——`runtime_checkable` 不查方法体，假保证比没保证更危险。拆分后：窗口后端管窗口/输入/帧边界，度量引擎（HB+FT）由 App 组装时注入。符合性由 `tests/unit/test_backend_protocol.py` 逐成员断言，且测试自身能红。同批：事件模型加 `window_id`、IME 拆 TextEvent/ImeEvent 双通道、呈现帧边界（begin/end_frame）进协议 |
 | ADR-0013 | **命中链的"顺序与分发"归 events（L1），"坐标与几何"归 layout（L4）** | L1 不能 import L4，所以 `HitTestResult` / `PointerTarget` / 三阶段 `PointerRouter` 定义在 `events/pointer.py` 且不含任何几何类型；`layout.RenderBox.hit_test` 反向（L4→L1 合法）填充命中链、逐层扣掉子级 offset，局部坐标因此随链传递。命中链 **target 优先**（逆序递归子级 = 后画的在上层），滚动裁剪由"视口 bounds 检查先于递归"结构成立，不写特判。**ENTER/LEAVE 不信后端**（SDL 的是窗口级），由 MOVE/DOWN/UP/WHEEL 的命中链差分生成——把 DOWN 也算进来是为触屏（无悬停）。事件派发在 layout/paint 阶段一律抛 `FrameError` |
 | ADR-0014 | **tap/double-tap/long-press/drag 是竞技场里的竞争，不是各自判断；单击与双击必须在同一个识别器里裁决** | 滚动列表里放按钮时"按钮 ACTIVE + 列表一起滚"是两个都赢的经典 bug——`GestureArena` 按 pointer_id 收集命中链上的识别器并显式裁决，输家收 `on_reject`（取消），组件据此退回 ACTIVE。单击与双击**不能**拆成两个识别器：第一击抬起时 Tap 无法知道第二击来不来，Tap 先赢则双击永不出现，Tap 等待则无法在第二击时撤回已发的单击；`DoubleTapGestureRecognizer` 用"延迟的单击 + 双击"一个状态机闭合。识别器只吃构造时传入的令牌阈值（8px / 500ms / 300ms），时间一律用事件 `time_ms` + `begin_frame(now_ms=)` 推进，不读墙上时钟 |
+| ADR-0015 | **DPI 换算只在录制/光栅层：布局与事件恒为逻辑像素，物理 = 逻辑 × dpi_scale** | 组件里乘缩放因子会让几何、命中、事件坐标三处口径分叉（改一处漏两处）。档位经 `BuildOwner.begin_frame(dpi_scale=…)` 进帧上下文，`flush_paint` 在根上压一个等比仿射变换，于是显示列表指令是设备像素、帧缓冲按逻辑尺寸×scale 分配，而组件代码一行不改。线宽/圆角/字形 em 随仿射一起缩放（R3.4），文字在物理分辨率上重新光栅化——掩码缓存键含生效字号，1.0 档的掩码不会被复用到 1.5 档。`DPI_CHANGED` 经 `handle_window_event` 更新档位，下一帧按新档重录，不拉伸旧帧 |
 
 ## 已知待办
 

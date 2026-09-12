@@ -33,17 +33,24 @@ def render_to_display_list(
     constraints: BoxConstraints,
     *,
     background: bool = True,
+    dpi_scale: float | None = None,
 ) -> DisplayList:
-    """跑完一帧，返回显示列表。`background=True` 时先用主题底色铺满。"""
+    """跑完一帧，返回显示列表。`background=True` 时先用主题底色铺满。
+
+    显示列表的尺寸是**设备像素**（逻辑尺寸 × dpi_scale）：缩放由
+    `BuildOwner.flush_paint` 压在根变换上，所以指令坐标已经是设备像素，
+    保证 `list.width == framebuffer.width`（software.execute 会校验）。
+    背景是"铺满整块画布"，所以直接用设备像素画，不参与内容缩放。
+    """
+    scale = owner.dpi_scale if dpi_scale is None else dpi_scale
+    width = _ceil(constraints.max_width * scale)
+    height = _ceil(constraints.max_height * scale)
     recorder = DisplayListRecorder()
     if background:
-        recorder.fill_rect(
-            Rect(0.0, 0.0, constraints.max_width, constraints.max_height),
-            owner.theme.color("bg"),
-        )
+        recorder.fill_rect(Rect(0.0, 0.0, float(width), float(height)), owner.theme.color("bg"))
     # 强制重画：黄金图要的是"每帧完整画面"，不是"动画场景里跳过的优化版"
-    owner.begin_frame(constraints, recorder, force_repaint=True)
-    return recorder.finish(_ceil(constraints.max_width), _ceil(constraints.max_height))
+    owner.begin_frame(constraints, recorder, force_repaint=True, dpi_scale=scale)
+    return recorder.finish(width, height)
 
 
 def render_to_framebuffer(
@@ -52,6 +59,7 @@ def render_to_framebuffer(
     *,
     background: bool = True,
     glyph_provider: object | None = None,
+    dpi_scale: float | None = None,
 ) -> FrameBuffer:
     """跑完一帧，返回像素缓冲区。
 
@@ -65,15 +73,19 @@ def render_to_framebuffer(
 
     走的是 docs/03 §2 的帧生命周期（R3.1 之后）：
     `begin_frame → execute → end_frame → screenshot`。
-    截图是**读回**操作，不是后端的唯一出口——`scale=1.0` 是因为
-    设备像素比的接线属 DPI 那一项工作（docs/03 §5），届时这里会带上真实比例。
+    设备像素比（R7.3）默认取 `owner.dpi_scale`；帧缓冲按
+    `逻辑尺寸 × scale` 分配，**文字在物理分辨率上光栅化**，不是拉伸糊。
     """
-    display_list = render_to_display_list(owner, constraints, background=background)
+    scale = owner.dpi_scale if dpi_scale is None else dpi_scale
+    display_list = render_to_display_list(
+        owner, constraints, background=background, dpi_scale=scale
+    )
     provider = glyph_provider if glyph_provider is not None else _provider_from(owner)
     raster = (
         SoftwareRasterizer() if provider is None else SoftwareRasterizer(glyph_provider=provider)  # type: ignore[arg-type]
     )
-    raster.begin_frame(Size(float(display_list.width), float(display_list.height)), 1.0)
+    logical = Size(float(constraints.max_width), float(constraints.max_height))
+    raster.begin_frame(logical, scale)
     raster.execute(display_list)
     raster.end_frame()
     return raster.screenshot()
@@ -102,10 +114,15 @@ def render_to_png(
     *,
     background: bool = True,
     glyph_provider: object | None = None,
+    dpi_scale: float | None = None,
 ) -> bytes:
-    """跑完一帧，返回 PNG 字节。"""
+    """跑完一帧，返回 PNG 字节。`dpi_scale` 默认取 `owner.dpi_scale`。"""
     frame = render_to_framebuffer(
-        owner, constraints, background=background, glyph_provider=glyph_provider
+        owner,
+        constraints,
+        background=background,
+        glyph_provider=glyph_provider,
+        dpi_scale=dpi_scale,
     )
     return encode_png(frame.width, frame.height, bytes(frame.data))
 
