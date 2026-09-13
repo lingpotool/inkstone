@@ -18,7 +18,10 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import importlib
+import os
 import sys
+import warnings
 from dataclasses import replace
 from typing import Any
 
@@ -43,7 +46,13 @@ from .base import (
     WindowSpec,
 )
 
-__all__ = ["SDL2Backend", "normalize_key_name", "normalize_key_value", "sdl2_library_name"]
+__all__ = [
+    "SDL2Backend",
+    "load_sdl2",
+    "normalize_key_name",
+    "normalize_key_value",
+    "sdl2_library_name",
+]
 
 # ---------------------------------------------------------------- 常量
 
@@ -520,19 +529,66 @@ class SDL2Backend:
     def initialize(self) -> None:
         if self._initialized:
             return
-        self._lib = _load_sdl2()
+        self._lib = load_sdl2()
+        self._bind_signatures()
         if self._lib.SDL_Init(_SDL_INIT_VIDEO) != 0:
             raise BackendError(f"SDL_Init 失败：{self._last_error()}")
-        self._lib.SDL_GetKeyName.restype = ctypes.c_char_p
-        self._lib.SDL_GetKeyName.argtypes = [ctypes.c_int32]
-        self._lib.SDL_GetScancodeName.restype = ctypes.c_char_p
-        self._lib.SDL_GetScancodeName.argtypes = [ctypes.c_int32]
+        self._initialized = True
+
+    def _bind_signatures(self) -> None:
+        """集中声明 ctypes 签名。
+
+        **指针返回值必须显式声明 `restype`**：ctypes 默认按 `c_int` 处理返回值，
+        在 64 位平台会把 `SDL_Window*` 截断成 32 位——句柄作废，
+        再传给 `SDL_GetWindowID` 就是一次访问违例（R8.5 真机验证时撞到的）。
+        声明集中在这里，避免"哪个函数忘了声明"散落各处。
+        """
+        lib = self._lib
+        c, p = ctypes, ctypes.POINTER
+        lib.SDL_Init.restype = c.c_int
+        lib.SDL_Init.argtypes = [c.c_uint32]
+        lib.SDL_Quit.restype = None
+        lib.SDL_CreateWindow.restype = c.c_void_p
+        lib.SDL_CreateWindow.argtypes = [c.c_char_p, c.c_int, c.c_int, c.c_int, c.c_int, c.c_uint32]
+        lib.SDL_DestroyWindow.argtypes = [c.c_void_p]
+        lib.SDL_GetWindowID.restype = c.c_uint32
+        lib.SDL_GetWindowID.argtypes = [c.c_void_p]
+        lib.SDL_GetWindowSize.argtypes = [c.c_void_p, p(c.c_int), p(c.c_int)]
+        # DPI：SDL 2.24+ 的 scale 返回 float（不声明 restype 会被当 int 解读）；
+        # 老版本兜底走 display index + display DPI。这三个按版本可选，缺失就跳过。
+        for name, restype, argtypes in (
+            ("SDL_GetWindowDisplayScale", c.c_float, [c.c_void_p]),
+            ("SDL_GetWindowDisplayIndex", c.c_int, [c.c_void_p]),
+            ("SDL_GetDisplayDPI", c.c_int, [c.c_int, p(c.c_float), p(c.c_float), p(c.c_float)]),
+        ):
+            function = getattr(lib, name, None)
+            if function is None:
+                continue
+            function.restype = restype
+            function.argtypes = argtypes
+        lib.SDL_PollEvent.restype = c.c_int
+        lib.SDL_PollEvent.argtypes = [c.c_void_p]
+        lib.SDL_WaitEventTimeout.restype = c.c_int
+        lib.SDL_WaitEventTimeout.argtypes = [c.c_void_p, c.c_int]
+        lib.SDL_GetTicks.restype = c.c_uint32
+        lib.SDL_GetMouseState.restype = c.c_uint32
+        lib.SDL_GetMouseState.argtypes = [p(c.c_int), p(c.c_int)]
+        lib.SDL_CreateSystemCursor.restype = c.c_void_p
+        lib.SDL_CreateSystemCursor.argtypes = [c.c_int]
+        lib.SDL_SetCursor.argtypes = [c.c_void_p]
+        lib.SDL_StartTextInput.restype = None
+        lib.SDL_StopTextInput.restype = None
+        lib.SDL_SetTextInputRect.argtypes = [c.c_void_p]
+        lib.SDL_SetClipboardText.restype = c.c_int
+        lib.SDL_SetClipboardText.argtypes = [c.c_char_p]
         # 返回的是 SDL 拥有的缓冲区，必须自己 string_at 之后 SDL_free（R5.10）；
         # 声明成 c_char_p 会让 ctypes 转换后丢掉原指针，每次读剪贴板泄漏一次。
-        self._lib.SDL_GetClipboardText.restype = ctypes.c_void_p
-        self._lib.SDL_GetWindowID.restype = ctypes.c_uint32
-        self._lib.SDL_GetWindowID.argtypes = [ctypes.c_void_p]
-        self._initialized = True
+        lib.SDL_GetClipboardText.restype = c.c_void_p
+        lib.SDL_free.argtypes = [c.c_void_p]
+        lib.SDL_GetKeyName.restype = c.c_char_p
+        lib.SDL_GetKeyName.argtypes = [c.c_int32]
+        lib.SDL_GetScancodeName.restype = c.c_char_p
+        lib.SDL_GetScancodeName.argtypes = [c.c_int32]
 
     def shutdown(self) -> None:
         if not self._initialized:
@@ -836,30 +892,94 @@ class SDL2Backend:
 # ---------------------------------------------------------------- 加载
 
 
-def _load_sdl2() -> Any:
-    """加载 SDL2 动态库。找不到时给出带修复指引的报错。"""
-    candidates = list(_LIBRARY_CANDIDATES.get(sys.platform, _DEFAULT_CANDIDATES))
-    if sdl2_library_name() not in candidates:
-        candidates.insert(0, sdl2_library_name())
-
+def _library_candidates() -> list[str]:
+    """系统库候选名（按平台），`find_library` 的结果插到最前。"""
+    names = list(_LIBRARY_CANDIDATES.get(sys.platform, _DEFAULT_CANDIDATES))
+    preferred = sdl2_library_name()
+    if preferred not in names:
+        names.insert(0, preferred)
     found = ctypes.util.find_library("SDL2")
-    if found:
-        candidates.insert(0, found)
+    if found and found not in names:
+        names.insert(0, found)
+    return names
 
-    last_error: OSError | None = None
-    for candidate in candidates:
+
+def load_sdl2() -> Any:
+    """按**优先级**加载 SDL2 动态库；全失败时抛带修复指引的 `BackendError`。
+
+    跨平台获取二进制不该靠"往仓库里塞 DLL"。这里是三层策略（R8.5）：
+
+    1. `INKSTONE_SDL2` 环境变量显式指定路径（打包/调试/私有部署用）；
+    2. **可选依赖** `inkstone[sdl2]`（`pysdl2-dll` 提供三平台预编译二进制，
+       `pysdl2` 负责按平台定位：Windows 的 `SDL2.dll`、macOS 的
+       `libSDL2-2.0.0.dylib`、Linux 的 `libSDL2-2.0.so.0`）；
+    3. 系统已装的 SDL2（`winget` / `brew` / `apt`）。
+
+    顺序即策略：显式覆盖 > 声明式依赖 > 系统库。核心包仍是**零依赖**——
+    SDL2 只在开真窗口时需要，测试/CI/黄金图/基准全走无头后端。
+    """
+    errors: list[str] = []
+
+    override = os.environ.get("INKSTONE_SDL2")
+    if override:
         try:
-            return ctypes.CDLL(candidate)
-        except OSError as error:  # pragma: no cover - 取决于机器
-            last_error = error
+            return ctypes.CDLL(override)
+        except OSError as error:
+            errors.append(f"INKSTONE_SDL2={override}: {error}")
+
+    from_package = _load_from_pysdl2(errors)
+    if from_package is not None:
+        return from_package
+
+    names = _library_candidates()
+    for name in names:
+        try:
+            return ctypes.CDLL(name)
+        except OSError as error:
+            errors.append(f"{name}: {error}")
 
     raise BackendError(
-        f"找不到 SDL2 动态库（试过：{', '.join(candidates)}）。\n"
-        f"  安装方式：Windows `winget install libsdl-org.SDL2`；"
-        f"macOS `brew install sdl2`；Ubuntu `sudo apt install libsdl2-2.0-0`。\n"
-        f"  也可以改用 HeadlessBackend（无需 SDL2，供测试与 CI 使用）。\n"
-        f"  原始错误：{last_error}"
+        "找不到 SDL2 动态库。按优先级试过：\n"
+        "  1) 环境变量 INKSTONE_SDL2（未设置或无效）\n"
+        "  2) 可选依赖包 pysdl2-dll（未安装或加载失败）\n"
+        f"  3) 系统库（试过：{', '.join(names)}）\n"
+        '推荐：pip install "inkstone[sdl2]"（= pysdl2 + pysdl2-dll，'
+        "自带 Windows/macOS/Linux 预编译二进制，不需编译器）。\n"
+        "  或系统安装：Windows `winget install libsdl-org.SDL2`；"
+        "macOS `brew install sdl2`；Ubuntu `sudo apt install libsdl2-2.0-0`。\n"
+        "  测试与 CI 请用 HeadlessBackend（无需 SDL2）。\n"
+        "  详细错误：\n  " + "\n  ".join(errors)
     )
+
+
+def _load_from_pysdl2(errors: list[str]) -> Any | None:
+    """从可选依赖 `pysdl2` 的加载器拿库对象（它已按平台找到正确的二进制）。
+
+    `sdl2.dll` 在导入时就会尝试加载二进制并可能发 UserWarning；这里吞掉那条
+    警告——它不是给最终用户看的，加载失败会走我们自己的报错。
+    """
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            # 用 importlib 而不是 import 语句：pysdl2 是可选依赖且没有类型存根，
+            # 写死 import 会让"没装这个 extra"的环境连 mypy 都过不去。
+            sdl2_dll = importlib.import_module("sdl2.dll")
+    except Exception as error:  # pragma: no cover - 取决于环境
+        errors.append(f"pysdl2: {type(error).__name__}: {error}")
+        return None
+    # pysdl2 的加载器对象不是可直接调用的 CDLL（它只暴露加载 API），
+    # 但能给出**已按平台定位到的二进制路径**——拿路径自己 CDLL，
+    # 我们的绑定方式与错误处理保持不变。
+    get_path = getattr(sdl2_dll, "get_dll_file", None)
+    if not callable(get_path):  # pragma: no cover - 上游结构变化时才会走到
+        errors.append("pysdl2: 加载器没有 get_dll_file()")
+        return None
+    path = get_path()
+    try:
+        return ctypes.CDLL(path)
+    except OSError as error:  # pragma: no cover - 取决于环境
+        errors.append(f"pysdl2 路径 {path}: {error}")
+        return None
 
 
 def _modifiers_from(sdl_mod: int) -> Modifiers:

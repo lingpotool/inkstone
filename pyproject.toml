@@ -39,8 +39,12 @@ dependencies = [
 [project.optional-dependencies]
 # 平台窗口与 GPU 渲染能力按需安装。核心包自带文本栈（上面三个依赖 +
 # 内嵌字体约 1.8MB，安装合计约 24MB，仍低于 docs/00 的 <40MB 目标）。
-# 注意：SDL2 后端走 ctypes 直调动态库（见 backend/sdl2.py 的报错指引），
-# 不需要 PySDL2；这里只留真正要装的渲染后端。
+# sdl2：**声明式获取跨平台窗口后端**，而不是往仓库塞二进制。
+#   pysdl2-dll 提供 Windows/macOS/Linux 预编译 SDL2 二进制（wheel ≈4MB，
+#   内含 SDL2.dll ≈1.5MB）；pysdl2 负责按平台定位它。我们的 backend 仍走
+#   ctypes 直调（见 backend/sdl2.py 的 load_sdl2），二者只用来"找到库"。
+#   只在开真窗口时需要：测试/CI/黄金图/基准全走无头后端。
+sdl2 = ["pysdl2>=0.9.17", "pysdl2-dll>=2.28,<3"]
 skia = ["skia-python>=132.0"]
 dev = [
     "pytest>=8.0",

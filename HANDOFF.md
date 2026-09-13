@@ -2,7 +2,7 @@
 
 > 写给下一个接手的对话。读完这份 + `AGENT.md` + `ROADMAP.md`，就能直接开工。
 > 交接时间：**2026-09-13** · 地基整改 R1–R6 + 收官包 R7 **全部完成** ·
-> 无头单测 **1004 个全绿**（覆盖率 89.09%）· 黄金图 12 张像素级比对
+> 无头单测 **1009 个全绿**（覆盖率 89.09%）· 黄金图 12 张像素级比对
 >
 > **当前主线**：**GL 后端子包（`docs/22`）**——R7.5 的性能基准触发了预先写死的
 > 决策规则（三场景 p95 超 10ms 预算 40–300 倍）。R8.1 接缝+逻辑层、R8.2
@@ -116,10 +116,17 @@ docs/22 已定范围：**只实现现有显示列表 IR 的指令集**、沿用 
   （`PushLayerOp` → 离屏 FBO 纹理，命中即复用，每帧只画一个四边形）。
   顺带修掉"自动清屏擦掉未变区域"的真问题：光栅后端不自动清屏，背景由显示
   列表指令负责，脏子树重绘保留区域外像素。
-- **仍未做**：真窗口 GL present（SDL2 `SDL_WINDOW_OPENGL` + swap；本机无
-  SDL2 库，未验证）；Linux GLX/EGL、macOS CGL 驱动；路径三角化（两后端同等
-  能力）；通用脏矩形损伤跟踪（现在是"层 + 帧去重"）；交互式主循环仍是最朴素
-  的"每帧全录/全画"，应用外壳落地时接 `on_frame_scheduled` + 脏区重绘。
+- **SDL2 获取已专业化（ADR-0020，R8.5）**：不往仓库塞二进制；可选依赖
+  `inkstone[sdl2] = pysdl2 + pysdl2-dll`（三平台预编译库），加载优先级
+  环境变量 > 可选依赖 > 系统库。本机已装并在**真窗口**上验证：建窗、DPI、
+  事件泵、光标、IME 通道、剪贴板全通。过程中撞到并修掉两个潜伏 bug：
+  `SDL_CreateWindow` 指针返回值未声明 `restype` 被截断成 32 位（访问违例）、
+  DPI 函数签名缺失；签名现集中在 `_bind_signatures`。
+- **仍未做**：真窗口 **GL present**（SDL2 `SDL_WINDOW_OPENGL` + 换链；
+  现在真窗口仍走软件光栅，所以交互帧率还没用上 GL）；Linux GLX/EGL、
+  macOS CGL 驱动；路径三角化（两后端同等能力）；通用脏矩形损伤跟踪
+  （现在是"层 + 帧去重"）；交互式主循环仍是最朴素的"每帧全录/全画"，
+  应用外壳落地时接 `on_frame_scheduled` + 脏区重绘。
 - R8.4：真窗口 present（SDL2 GL 窗口）与三场景帧率验收。Linux GLX/EGL、
   macOS CGL 驱动在 R8.2 基础上照 `GLDriver` 协议补。
 
@@ -153,7 +160,7 @@ R7.1–R7.3 的事件/手势/DPI 链路在 headless 下都有确定性测试，
 
 ```bash
 cd /e/inkstone
-./.venv/Scripts/python.exe -m pytest tests -q          # 1004 个必须全绿
+./.venv/Scripts/python.exe -m pytest tests -q          # 1009 个必须全绿
 ./.venv/Scripts/python.exe -m ruff check src tests examples benchmarks
 ./.venv/Scripts/python.exe -m ruff format --check src tests examples benchmarks
 ./.venv/Scripts/python.exe -m mypy                     # strict，零错误
@@ -226,7 +233,7 @@ cd /e/inkstone
 ## 八、开工姿势（建议）
 
 1. 读 `AGENT.md`（**重点看 ADR 表**）→ `ROADMAP.md` → 本文档
-2. 跑一遍验证命令确认起点全绿（1004 passed / mypy 干净 / 覆盖 89.1%）
+2. 跑一遍验证命令确认起点全绿（1009 passed / mypy 干净 / 覆盖 89.1%）
 3. 跑一次 `python examples/notes.py` —— 看当前最完整的界面长什么样
 4. 按第三节顺序推进：**①GL 后端子包（docs/22）** → ②文本编辑 → ③macOS/Linux
    真机字体验证 → ④三平台 SDL2 验证
