@@ -63,6 +63,22 @@ class GLDriver(Protocol):
         宽度是文本层的事（ADR-0006）。
         """
 
+    def layer_begin(
+        self, key: int, width: int, height: int, origin_x: float, origin_y: float
+    ) -> bool:
+        """开始一个可缓存的层：把后续绘制重定向到 `width × height` 的离屏目标。
+
+        返回 `True` 表示需要渲染（缓存未命中）；`False` 表示该 `key` 已有缓存，
+        调用方**跳过渲染**直接 `layer_end` + `draw_layer`。`origin` 是该层左上角
+        在当前帧坐标系的绝对位置——层内坐标会减去它，从而与滚动偏移无关。
+        """
+
+    def layer_end(self) -> None:
+        """结束层渲染，把绘制目标切回主帧缓冲。"""
+
+    def draw_layer(self, key: int, rect: Rect) -> None:
+        """把 `key` 的缓存画到 `rect`（绝对像素）。"""
+
     def create_texture(self, width: int, height: int, pixels: bytes) -> int:
         """上传一张 RGBA 位图，返回纹理句柄。句柄由驱动分配、由调用方释放。"""
 

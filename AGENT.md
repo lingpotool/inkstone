@@ -38,7 +38,7 @@ Phase 1 · 地基。真实代码覆盖布局、组件树、样式、渲染、**�
 | `examples/notes.py` | ✅ **样板 App「墨记」**：侧栏 + 滚动列表 + 表单 + 明暗主题切换；headless 出黄金图、`--sdl2` 真窗口交互，进 CI 冒烟 |
 | 其余模块（gfx GL+Skia / events 其余 / primitives / app …） | ⬜ 占位桩 |
 
-991 个无头单测全绿，**黄金图像素级比对**也跑通（12 张基线）。
+1004 个无头单测全绿，**黄金图像素级比对**也跑通（12 张基线）。
 **地基整改 R1（正确性止血，docs/15）、R2（测试求真，docs/16）、
 R3（渲染协议重塑，docs/17）、R4（跨平台文本栈，docs/18）、
 R5（事件与 IME，docs/19）、R6（主题传播与依赖追踪，docs/20）已完成**：
@@ -76,10 +76,11 @@ R7.4 样板 App「墨记」（`examples/notes.py`）已完成：侧栏 + 滚动�
 R7.5 性能基准已完成（`benchmarks/run.py` 三场景出 p50/p95，规则先写死），
 数据触发 GL 后端子包（ADR-0017 / docs/22）。测试 888 → 944 全绿；
 GL 子包 R8.1（驱动接缝 + 后端逻辑层）、R8.2（Windows WGL 真机驱动）、
-R8.3（热路径缓存 + 矩形合批 + 字形图集 + 帧去重）已完成，
-测试 → 991 全绿（覆盖率 89.99%）。GL p95：全屏 5.7ms ✅ / 文本 8.8ms ✅ /
-滚动 108ms ✗——滚动每帧平移、帧去重命中不了，需 repaint boundary + 变换指令
-（Flutter 层模型，见 docs/22 §8）。
+R8.3（热路径缓存 + 矩形合批 + 字形图集 + 帧去重）、
+R8.4（显示列表状态指令 + 滚动 repaint boundary + GL 层缓存）已完成，
+测试 → 1004 全绿（覆盖率 89.09%）。**R7.5 验收达成：GL p95 全屏 4.4ms /
+文本 8.6ms / 滚动 1.0ms，三场景全部 ≤10ms**（软件为事实源，未变）。
+剩余：真窗口 GL present、Linux/macOS GL 驱动、路径三角化、通用脏矩形。
 
 **R7 整包完成，Phase 1 的"交互闭环"闭合**（能点、能滚、能打字的前半程：
 聚焦与 IME 通道、能切主题、能缩放）。Phase 1 剩余 DoD：文本编辑模型
@@ -400,6 +401,7 @@ Phase 1 其余 DoD（文本编辑模型、macOS/Linux 真机字体验证、三�
 | ADR-0016 | **字形 id 必须与"产生它的字体面"（face_key）同源，光栅不许按 family 重选面** | glyph id 只在它所属的 face 里有意义。同一 family 的 Regular 与 Bold 是两个文件、两套编号；整形按 `spec.weight` 选面，而 `mask_for` 曾按 family 用 REGULAR 重选——于是"用 Bold 的 id 查 Regular 的轮廓"，粗体中文整行画成别的字（R7.4 样板 App 的标题栏暴露）。修法：`GlyphPlacement.face_key`（path+index）经 `ShapedCluster` / `PositionedGlyph` 一路带到 `mask_for(face_key=…)`；掩码缓存键也改用 face_key（否则两个字重互相顶掉）。合成字体回归测试钉住（`TestGlyphsComeFromTheShapedFace`）。这条是"度量与字形同源"从"同一个对象"加强到"同一个面" |
 | ADR-0017 | **GL 后端由 R7.5 数据驱动启动：软件光栅只做确定性事实源，不做生产帧率** | 决策规则在施工前写死（`benchmarks/run.py`，p95 > 10ms = 60fps 预算六成）。实测三场景 p95 为预算的 40–300 倍（scroll 859ms / fullscreen 3125ms / text 576ms），热点是纯 Python 逐像素 SDF 与"整份显示列表全量光栅"。故启动 GL 后端子包（docs/22）：只实现现有 IR 指令集、沿用 R3.1 帧生命周期、不改 core、不引第二套文本栈、黄金图仍以软件光栅为准。**量完再调阈值等于给结论找理由**，数字与规则一并留在 docs/22 |
 | ADR-0018 | **GL 后端先切"驱动接缝"并把逻辑层测透，真机 GL 调用后置；两个光栅后端能力必须对等** | GL 里只有建上下文/传纹理/draw call/读像素属于 GPU，其余（帧状态机、op.clip×脏矩形取交→scissor、半径钳制、文本取掩码与连字规则、资源生命周期、读回校验）都能无显卡测试。`GLDriver` 协议 + `FakeDriver` 记录调用序列，把 R8.1 做成了**可验证**的一步；真机 ctypes 驱动（R8.2）只需照协议填，后端逻辑不改。同时规定：**一个后端会画的指令，另一个也必须会**（路径两后端都抛 `NotImplementedError`），否则差异会拖到黄金图比对时才暴露。取字形规则 `glyph_mask_plan` 抽成两后端共用的唯一副本 |
+| ADR-0019 | **显示列表增加状态指令（变换/裁剪）与层标记；滚动/静态子树作为 repaint boundary 做 RasterCache** | 坐标在录制时被 bake 成绝对值，导致滚动每帧都要把新偏移重新烤进几百条指令、并重排重绘整棵子树——这是滚动做不到专业帧率的根因（Flutter 的答案是 layer + repaint boundary，Skia 是 damage）。落地：`PushTranslateOp`/`PushClipOp`/`PopOp` 作为运行时状态，`resolve_state_ops` 保证与烘焙**逐像素等价**（两个后端共用，黄金图不动）；`PushLayerOp(key, rect)` 标记可缓存层，GL 后端渲染进离屏 FBO 纹理、命中 key 即复用，每帧只画一个四边形。配套两条纪律：**光栅后端不自动清屏**（背景由显示列表的指令负责，否则脏子树重绘会擦掉未变区域）；**层 key 用单调代号而非 `id()`**（对象回收后 id 复用会让旧纹理顶包） |
 
 ## 已知待办
 

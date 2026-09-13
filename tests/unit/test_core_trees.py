@@ -30,7 +30,7 @@ from inkstone.core import (
     ValueKey,
     Widget,
 )
-from inkstone.gfx import DisplayList, DisplayListRecorder
+from inkstone.gfx import DisplayList, DisplayListRecorder, resolve_state_ops
 from inkstone.gfx.color import Color
 from inkstone.layout import (
     BoxConstraints,
@@ -779,14 +779,18 @@ class TestLayoutMarksPaintDirty:
 
         scroll.layout(constraints)
         before = _record(scroll, 120, 100)
-        assert len(before) == 5, "首次布局后应当画出 5 条指令"
+        # R8.4 后指令里含状态指令（push-clip / push-translate / pop），
+        # 断言语义要看**展开后**的纯绘制指令
+        before_ops = list(resolve_state_ops(before.ops))
+        assert len(before_ops) == 5, "首次布局后应当画出 5 条指令"
 
         scroll.scroll_to(dy=50)
         scroll.layout(constraints)
         after = _record(scroll, 120, 100)
+        after_ops = list(resolve_state_ops(after.ops))
 
-        assert len(after) == 5, "滚动后必须是新指令，不是空增量"
-        assert after != before, "滚动改变了子级位置，显示列表必须跟着变"
+        assert len(after_ops) == 5, "滚动后必须是新指令，不是空增量"
+        assert after_ops != before_ops, "滚动改变了子级位置，显示列表必须跟着变"
 
     def test_resize_produces_a_different_display_list(self) -> None:
         root = RenderColumn(debug_name="Root")

@@ -24,7 +24,8 @@ v0 的指令集刻意收敛：矩形填充 / 圆角填充 / 矩形描边 / 裁�
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Iterator
+from dataclasses import dataclass, replace
 from typing import Union
 
 from ..layout.types import Offset, Rect
@@ -40,13 +41,20 @@ __all__ = [
     "DisplayList",
     "FillRectOp",
     "Op",
+    "PaintOp",
     "PathCommand",
     "PathData",
     "PathFillOp",
     "PathStrokeOp",
+    "PopLayerOp",
+    "PopOp",
     "PositionedGlyph",
+    "PushClipOp",
+    "PushLayerOp",
+    "PushTranslateOp",
     "StrokeRectOp",
     "TextRunOp",
+    "resolve_state_ops",
 ]
 
 
@@ -237,8 +245,167 @@ class PathStrokeOp:
         validate_path(self.data)
 
 
+# ---------------------------------------------------------------- 状态指令
+#
+# R8.4 引入"运行时状态"：平移与裁剪不再只能被录制器**烘焙**进每条指令，
+# 也可以作为状态指令在回放时生效。这是"内容只录一次、每帧只改变换"（滚动层
+# 缓存）的前提——否则滚动每帧都要把新偏移重新烤进几百条指令的坐标里。
+#
+# 只支持**平移**，不引入任意仿射：旋转/缩放的指令形状会牵动字形度量与圆角
+# 语义（见 ADR-0015 的非等比例外），而那些能力的消费者（motion 的缩放动画）
+# 还没落地。明确不支持，好过半个实现悄悄画错。
+
+
+@dataclass(frozen=True, slots=True)
+class PushTranslateOp:
+    """压入一个平移：其后的绘制指令坐标整体偏移 `(dx, dy)`。与 `PopOp` 配对。"""
+
+    dx: float
+    dy: float
+
+
+@dataclass(frozen=True, slots=True)
+class PushClipOp:
+    """压入一个裁剪：其后的绘制只保留与 `rect` 的交集。只能收窄。"""
+
+    rect: Rect
+
+
+@dataclass(frozen=True, slots=True)
+class PopOp:
+    """弹出最近一次 `PushTranslateOp` / `PushClipOp` 的状态。"""
+
+
+@dataclass(frozen=True, slots=True)
+class PushLayerOp:
+    """标记一段**可缓存的层**（R8.4 后半，Flutter RasterCache 的思路）。
+
+    `key` 是内容标识：只要内容没变，key 就不变，后端可以把这一层**渲染进
+    离屏纹理缓存**，之后每帧只画一个四边形，而不是把几百条指令重新提交一遍。
+    滚动正是这个模式——内容静态、只有平移在变。
+
+    `rect` 是该层在**当前帧坐标系**里的边界（绝对像素）。
+    """
+
+    key: int
+    rect: Rect
+
+
+@dataclass(frozen=True, slots=True)
+class PopLayerOp:
+    """结束最近一次 `PushLayerOp`。"""
+
+
+PaintOp = Union[  # noqa: UP007
+    FillRectOp,
+    StrokeRectOp,
+    TextRunOp,
+    PathFillOp,
+    PathStrokeOp,
+]
+
+
+def resolve_state_ops(ops: tuple[Op, ...]) -> Iterator[PaintOp]:
+    """把状态指令展开成等价的**纯绘制指令**序列。
+
+    语义与"录制时直接烘焙"逐位一致（平移就是坐标相加、裁剪就是矩形取交），
+    所以两个光栅后端只要都走这个函数，就能确定性地得到同一结果。
+    坐标口径：状态里的裁剪是**屏幕坐标**，指令自带的 `clip` 是**指令局部坐标**
+    （会被同一平移偏移后再取交）。
+    """
+    stack: list[tuple[float, float, Rect | None]] = [(0.0, 0.0, None)]
+    balanced = True
+    for op in ops:
+        dx, dy, clip = stack[-1]
+        if isinstance(op, PushTranslateOp):
+            stack.append((dx + op.dx, dy + op.dy, clip))
+            continue
+        if isinstance(op, PushClipOp):
+            rect = op.rect.shift(dx, dy)
+            stack.append((dx, dy, rect if clip is None else clip.intersect(rect)))
+            continue
+        if isinstance(op, PopOp):
+            if len(stack) == 1:
+                raise ValueError("PopOp 没有配对的 Push——状态栈已空")
+            stack.pop()
+            continue
+        if isinstance(op, (PushLayerOp, PopLayerOp)):
+            # 层标记由关心缓存的后端处理；对"只要像素对"的路径（软件光栅）透明。
+            # 层内部的状态指令仍由本函数展开，所以这里的跳过不会丢语义。
+            continue
+        resolved = _translate_op(op, dx, dy)
+        yield _with_clip(resolved, _intersect_clip(clip, resolved.clip))
+    if len(stack) != 1:
+        balanced = False
+    if not balanced:
+        raise ValueError("有 Push 没配对的 Pop——状态指令必须成对")
+
+
+def _translate_op(op: PaintOp, dx: float, dy: float) -> PaintOp:
+    if dx == 0.0 and dy == 0.0:
+        return op
+    if isinstance(op, FillRectOp):
+        return replace(op, rect=op.rect.shift(dx, dy), clip=_shift(op.clip, dx, dy))
+    if isinstance(op, StrokeRectOp):
+        return replace(op, rect=op.rect.shift(dx, dy), clip=_shift(op.clip, dx, dy))
+    if isinstance(op, TextRunOp):
+        return replace(
+            op,
+            origin=Offset(op.origin.dx + dx, op.origin.dy + dy),
+            clip=_shift(op.clip, dx, dy),
+        )
+    if isinstance(op, PathFillOp):
+        return replace(op, data=_shift_path(op.data, dx, dy), clip=_shift(op.clip, dx, dy))
+    if isinstance(op, PathStrokeOp):
+        return replace(op, data=_shift_path(op.data, dx, dy), clip=_shift(op.clip, dx, dy))
+    raise NotImplementedError(f"状态平移不认识指令 {type(op).__name__}")
+
+
+def _shift(rect: Rect | None, dx: float, dy: float) -> Rect | None:
+    return None if rect is None else rect.shift(dx, dy)
+
+
+def _with_clip(op: PaintOp, clip: Rect | None) -> PaintOp:
+    return replace(op, clip=clip)
+
+
+def _intersect_clip(a: Rect | None, b: Rect | None) -> Rect | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return a.intersect(b)
+
+
+def _shift_path(data: PathData, dx: float, dy: float) -> PathData:
+    shifted: list[PathCommand] = []
+    for command in data:
+        verb = command[0]
+        coords = command[1:]
+        if verb == CLOSE:
+            shifted.append(command)
+            continue
+        moved: list[float | str] = [verb]
+        for index, value in enumerate(coords):
+            assert isinstance(value, (int, float))
+            moved.append(float(value) + (dx if index % 2 == 0 else dy))
+        shifted.append(tuple(moved))
+    return tuple(shifted)
+
+
 # 指令联合类型。新增指令时只扩这里，光栅端同步加一个分支。
-Op = Union[FillRectOp, StrokeRectOp, TextRunOp, PathFillOp, PathStrokeOp]  # noqa: UP007
+Op = Union[  # noqa: UP007
+    FillRectOp,
+    StrokeRectOp,
+    TextRunOp,
+    PathFillOp,
+    PathStrokeOp,
+    PushTranslateOp,
+    PushClipOp,
+    PopOp,
+    PushLayerOp,
+    PopLayerOp,
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +428,16 @@ class DisplayList:
 
 
 def _describe_op(op: Op) -> str:
+    if isinstance(op, PushTranslateOp):
+        return f"push-translate ({op.dx:g},{op.dy:g})"
+    if isinstance(op, PushClipOp):
+        return f"push-clip {_r(op.rect)}"
+    if isinstance(op, PushLayerOp):
+        return f"push-layer key={op.key} {_r(op.rect)}"
+    if isinstance(op, PopLayerOp):
+        return "pop-layer"
+    if isinstance(op, PopOp):
+        return "pop"
     if isinstance(op, FillRectOp):
         radius = f" r={op.radius:g}" if op.radius > 0 else ""
         clip = f" clip={_r(op.clip)}" if op.clip else ""
@@ -282,6 +459,7 @@ def _describe_op(op: Op) -> str:
         if isinstance(op, PathStrokeOp):
             return f"path-stroke w={op.width:g} n={len(op.data)} [{verbs}] {op.color}{clip}"
         return f"path-fill n={len(op.data)} [{verbs}] {op.color}{clip}"
+    assert isinstance(op, StrokeRectOp)
     return (
         f"stroke {_r(op.rect)} w={op.width:g}"
         f"{' r=' + format(op.radius, 'g') if op.radius > 0 else ''} {op.color}"

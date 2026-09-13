@@ -9,7 +9,13 @@
 
 import pytest
 
-from inkstone.gfx import DisplayList, DisplayListRecorder, FrameBuffer, SoftwareRasterizer
+from inkstone.gfx import (
+    DisplayList,
+    DisplayListRecorder,
+    FrameBuffer,
+    SoftwareRasterizer,
+    resolve_state_ops,
+)
 from inkstone.gfx.color import Color
 from inkstone.layout import (
     BoxConstraints,
@@ -247,12 +253,14 @@ class TestViewportClipping:
         return scroll
 
     def test_scrolled_ops_carry_the_viewport_clip(self) -> None:
+        """R8.4 后裁剪由状态指令提供；这里断言**展开后**的等价语义。"""
         scroll = self._scrolled()
         dl = _record(scroll, *self.VIEWPORT)
 
-        assert len(dl) == 6
+        ops = list(resolve_state_ops(dl.ops))
+        assert len(ops) == 6
         expected = Rect(0.0, 0.0, 120.0, 100.0)
-        for op in dl.ops:
+        for op in ops:
             assert op.clip == expected, f"视口外的指令没带裁剪：{op}"
 
     def test_clip_is_relative_to_the_scroll_node(self) -> None:
@@ -273,7 +281,7 @@ class TestViewportClipping:
 
         dl = _record(holder, 160, 140)
         expected = Rect(20.0, 20.0, 120.0, 100.0)
-        for op in dl.ops:
+        for op in resolve_state_ops(dl.ops):
             assert op.clip == expected
 
     def test_pixels_outside_the_viewport_stay_clean(self) -> None:
@@ -312,5 +320,6 @@ class TestViewportClipping:
         scroll = RenderScroll(_long_list(), debug_name="Scroll")
         scroll.layout(BoxConstraints(max_width=120, max_height=100))
         dl = _record(scroll, *self.VIEWPORT)
-        assert len(dl) == 6, "视口内的内容不许被裁掉"
-        assert all(op.clip == Rect(0.0, 0.0, 120.0, 100.0) for op in dl.ops)
+        ops = list(resolve_state_ops(dl.ops))
+        assert len(ops) == 6, "视口内的内容不许被裁掉"
+        assert all(op.clip == Rect(0.0, 0.0, 120.0, 100.0) for op in ops)

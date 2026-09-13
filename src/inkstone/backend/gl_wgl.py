@@ -158,6 +158,27 @@ void main() {
 }
 """
 
+# 层缓存合成：把一层已经渲染好的 RGBA 纹理画成一个四边形（R8.4 RasterCache）
+_LAYER_VERTEX = b"""#version 120
+attribute vec2 a_pos;
+attribute vec2 a_uv;
+uniform vec2 u_viewport;
+varying vec2 v_uv;
+void main() {
+    vec2 clip = (a_pos / u_viewport) * 2.0 - 1.0;
+    gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+    v_uv = a_uv;
+}
+"""
+
+_LAYER_FRAGMENT = b"""#version 120
+uniform sampler2D u_texture;
+varying vec2 v_uv;
+void main() {
+    gl_FragColor = texture2D(u_texture, v_uv);
+}
+"""
+
 #: 每个字形顶点的浮点数个数：pos(2)+uv(2)+color(4)
 _GLYPH_FLOATS = 8
 #: 字形图集边长（texel）。2048² = 4MB 单通道，够 CJK 常用字；
@@ -418,10 +439,17 @@ class WglGLDriver:
         self._width = 0
         self._height = 0
         self._textures: dict[int, int] = {}
+        #: 层缓存 key → (fbo, texture, width, height)，FIFO 淘汰
+        self._layers: dict[int, tuple[int, int, int, int]] = {}
+        self._layer_limit = 32
+        self._layer_active: tuple[int, int, int, int] | None = None
+        #: 层渲染时的坐标原点偏移（层内坐标 = 绝对坐标 - origin）
+        self._origin = (0.0, 0.0)
         self._create_context()
         self._gl.load_extensions()
         self._sdf = _Program(self._gl, _SDF_VERTEX, _SDF_FRAGMENT)
         self._glyph = _Program(self._gl, _GLYPH_VERTEX, _GLYPH_FRAGMENT)
+        self._layer_program = _Program(self._gl, _LAYER_VERTEX, _LAYER_FRAGMENT)
         self._create_quad_buffer()
 
     # ------------------------------------------------------------ 可用性
@@ -608,6 +636,127 @@ class WglGLDriver:
         self._gl.glClearColor(color.r / 255.0, color.g / 255.0, color.b / 255.0, float(color.a))
         self._gl.glClear(_COLOR_BUFFER_BIT)
 
+    # ------------------------------------------------------------ 层缓存
+
+    def layer_begin(
+        self, key: int, width: int, height: int, origin_x: float, origin_y: float
+    ) -> bool:
+        self._flush_rects()
+        self._flush_glyphs()
+        if key in self._layers:
+            return False  # 命中缓存：调用方跳过渲染，稍后直接 draw_layer
+        gl = self._gl
+        texture = ctypes.c_uint(0)
+        gl.glGenTextures(1, ctypes.byref(texture))
+        gl.glBindTexture(_TEXTURE_2D, texture.value)
+        gl.glTexImage2D(_TEXTURE_2D, 0, _RGBA8, width, height, 0, _RGBA, _UNSIGNED_BYTE, None)
+        gl.glTexParameteri(_TEXTURE_2D, _TEXTURE_MIN_FILTER, _LINEAR)
+        gl.glTexParameteri(_TEXTURE_2D, _TEXTURE_MAG_FILTER, _LINEAR)
+        gl.glTexParameteri(_TEXTURE_2D, _TEXTURE_WRAP_S, _CLAMP_TO_EDGE)
+        gl.glTexParameteri(_TEXTURE_2D, _TEXTURE_WRAP_T, _CLAMP_TO_EDGE)
+        gl.glBindTexture(_TEXTURE_2D, 0)
+        fb = ctypes.c_uint(0)
+        gl.glGenFramebuffers(1, ctypes.byref(fb))
+        gl.glBindFramebuffer(_FRAMEBUFFER, fb.value)
+        gl.glFramebufferTexture2D(_FRAMEBUFFER, _COLOR_ATTACHMENT0, _TEXTURE_2D, texture.value, 0)
+        status = gl.glCheckFramebufferStatus(_FRAMEBUFFER)
+        if status != _FRAMEBUFFER_COMPLETE:
+            raise GLUnavailableError(f"层 FBO 不完整（0x{status:04X}）")
+        if len(self._layers) >= self._layer_limit:
+            oldest = next(iter(self._layers))
+            self._delete_layer(oldest)
+        self._layers[key] = (fb.value, texture.value, width, height)
+        gl.glViewport(0, 0, width, height)
+        gl.glDisable(_SCISSOR_TEST)
+        gl.glClearColor(0.0, 0.0, 0.0, 0.0)
+        gl.glClear(_COLOR_BUFFER_BIT)
+        self._layer_active = (fb.value, texture.value, width, height)
+        self._origin = (origin_x, origin_y)
+        return True
+
+    def layer_end(self) -> None:
+        self._flush_rects()
+        self._flush_glyphs()
+        gl = self._gl
+        self._layer_active = None
+        self._origin = (0.0, 0.0)
+        gl.glBindFramebuffer(_FRAMEBUFFER, self._fb)
+        gl.glViewport(0, 0, self._width, self._height)
+        gl.glDisable(_SCISSOR_TEST)
+
+    def draw_layer(self, key: int, rect: Any) -> None:
+        self._flush_rects()
+        self._flush_glyphs()
+        cached = self._layers.get(key)
+        if cached is None:
+            return
+        _, texture, _, _ = cached
+        gl = self._gl
+        program = self._layer_program
+        gl.glUseProgram(program.id)
+        vw, vh = self._viewport_size()
+        gl.glUniform2f(program.uniform(b"u_viewport"), float(vw), float(vh))
+        gl.glUniform1i(program.uniform(b"u_texture"), 0)
+        gl.glActiveTexture(_TEXTURE0)
+        gl.glBindTexture(_TEXTURE_2D, texture)
+        # 层纹理的行序：内容顶边落在纹理 t=1（渲染时 y 已翻），所以采样要翻 v
+        gl.glBindBuffer(_ARRAY_BUFFER, self._vbo)
+        x0, y0 = rect.left, rect.top
+        x1, y1 = rect.right, rect.bottom
+        vertices = (
+            x0,
+            y0,
+            0.0,
+            1.0,
+            x1,
+            y0,
+            1.0,
+            1.0,
+            x1,
+            y1,
+            1.0,
+            0.0,
+            x0,
+            y0,
+            0.0,
+            1.0,
+            x1,
+            y1,
+            1.0,
+            0.0,
+            x0,
+            y1,
+            0.0,
+            0.0,
+        )
+        array = (ctypes.c_float * len(vertices))(*vertices)
+        gl.glBufferData(_ARRAY_BUFFER, ctypes.sizeof(array), array, _STREAM_DRAW)
+        stride = 4 * ctypes.sizeof(ctypes.c_float)
+        for name, offset in ((b"a_pos", 0), (b"a_uv", 8)):
+            location = program.attrib(name)
+            if location >= 0:
+                gl.glEnableVertexAttribArray(location)
+                gl.glVertexAttribPointer(location, 2, _FLOAT, 0, stride, ctypes.c_void_p(offset))
+        gl.glDrawArrays(_TRIANGLES, 0, 6)
+        gl.glBindBuffer(_ARRAY_BUFFER, 0)
+        gl.glBindTexture(_TEXTURE_2D, 0)
+        gl.glUseProgram(0)
+
+    def _delete_layer(self, key: int) -> None:
+        cached = self._layers.pop(key, None)
+        if cached is None:
+            return
+        fb, texture, _, _ = cached
+        fb_id = ctypes.c_uint(fb)
+        tex_id = ctypes.c_uint(texture)
+        self._gl.glDeleteFramebuffers(1, ctypes.byref(fb_id))
+        self._gl.glDeleteTextures(1, ctypes.byref(tex_id))
+
+    def _viewport_size(self) -> tuple[int, int]:
+        if self._layer_active is not None:
+            return self._layer_active[2], self._layer_active[3]
+        return self._width, self._height
+
     def end(self) -> None:
         # 离屏：冲掉最后两批，不做 unbind（读回还要用它）；上屏（swap）属 R8.4
         self._flush_rects()
@@ -625,11 +774,19 @@ class WglGLDriver:
             gl.glDisable(_SCISSOR_TEST)
             return
         gl.glEnable(_SCISSOR_TEST)
-        x = int(rect.left)
-        width = int(rect.right) - x
-        height = int(rect.bottom) - int(rect.top)
-        # GL 原点在左下：把 top 换算成底边
-        y = self._height - int(rect.bottom)
+        if self._layer_active is not None:
+            ox, oy = self._origin
+            layer_h = self._layer_active[3]
+            x = int(rect.left - ox)
+            width = int(rect.right - ox) - x
+            height = int(rect.bottom - oy) - int(rect.top - oy)
+            y = layer_h - int(rect.bottom - oy)
+        else:
+            x = int(rect.left)
+            width = int(rect.right) - x
+            height = int(rect.bottom) - int(rect.top)
+            # GL 原点在左下：把 top 换算成底边
+            y = self._height - int(rect.bottom)
         gl.glScissor(x, max(0, y), max(0, width), max(0, height))
 
     def fill_rect(self, rect: Any, radius: float, color: Any) -> None:
@@ -642,9 +799,11 @@ class WglGLDriver:
         """把一个矩形写进合批缓冲。真正下 draw 在 `_flush_rects`。"""
         # 混合顺序相关：矩形与字形交替时必须先画已排队的字形
         self._flush_glyphs()
+        ox, oy = self._origin
         hx, hy = rect.width / 2.0, rect.height / 2.0
         r, g, b, a = color.r / 255.0, color.g / 255.0, color.b / 255.0, float(color.a)
-        x0, y0, x1, y1 = rect.left, rect.top, rect.right, rect.bottom
+        x0, y0 = rect.left - ox, rect.top - oy
+        x1, y1 = rect.right - ox, rect.bottom - oy
         # 两个三角形（6 顶点），每顶点：pos, local, half, radius, ring, color
         corners = (
             (x0, y0, -hx, -hy),
@@ -664,7 +823,8 @@ class WglGLDriver:
         program = self._sdf
         array = (ctypes.c_float * len(self._rect_vertices))(*self._rect_vertices)
         gl.glUseProgram(program.id)
-        gl.glUniform2f(program.uniform(b"u_viewport"), float(self._width), float(self._height))
+        vw, vh = self._viewport_size()
+        gl.glUniform2f(program.uniform(b"u_viewport"), float(vw), float(vh))
         gl.glBindBuffer(_ARRAY_BUFFER, self._rect_vbo)
         gl.glBufferData(_ARRAY_BUFFER, ctypes.sizeof(array), array, _STREAM_DRAW)
         self._bind_rect_attributes(program)
@@ -700,8 +860,9 @@ class WglGLDriver:
         if uv is None:  # 图集满且无法重排（掩码比整张图还大）——直接跳过不崩
             return
         u0, v0, u1, v1 = uv
-        left = pen_x + mask.left
-        top = baseline_y + mask.top
+        ox, oy = self._origin
+        left = pen_x + mask.left - ox
+        top = baseline_y + mask.top - oy
         right = left + float(mask.width)
         bottom = top + float(mask.height)
         r, g, b, a = color.r / 255.0, color.g / 255.0, color.b / 255.0, float(color.a)
@@ -724,7 +885,8 @@ class WglGLDriver:
         program = self._glyph
         array = (ctypes.c_float * len(self._glyph_vertices))(*self._glyph_vertices)
         gl.glUseProgram(program.id)
-        gl.glUniform2f(program.uniform(b"u_viewport"), float(self._width), float(self._height))
+        vw, vh = self._viewport_size()
+        gl.glUniform2f(program.uniform(b"u_viewport"), float(vw), float(vh))
         gl.glUniform1i(program.uniform(b"u_texture"), 0)
         gl.glActiveTexture(_TEXTURE0)
         gl.glBindTexture(_TEXTURE_2D, self._atlas_texture)
@@ -867,6 +1029,8 @@ class WglGLDriver:
             tex = ctypes.c_uint(self._color_texture)
             gl.glDeleteTextures(1, ctypes.byref(tex))
             self._color_texture = 0
+        for key in list(self._layers):
+            self._delete_layer(key)
         if self._atlas_texture:
             tex = ctypes.c_uint(self._atlas_texture)
             gl.glDeleteTextures(1, ctypes.byref(tex))

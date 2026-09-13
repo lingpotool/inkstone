@@ -26,7 +26,12 @@ from .display_list import (
     DisplayList,
     FillRectOp,
     Op,
+    PopLayerOp,
+    PopOp,
     PositionedGlyph,
+    PushClipOp,
+    PushLayerOp,
+    PushTranslateOp,
     StrokeRectOp,
     TextRunOp,
 )
@@ -89,6 +94,40 @@ class DisplayListRecorder:
         """把裁剪收窄到 rect（局部坐标）。只能收窄，不能扩大。"""
         absolute = self._transform.map_rect(rect)
         self._clip = absolute if self._clip is None else self._clip.intersect(absolute)
+
+    # ------------------------------------------------------------ 状态指令（R8.4）
+
+    def push_translate(self, dx: float, dy: float) -> None:
+        """把"平移"记成**指令**而不是烘焙进坐标。
+
+        这是滚动层缓存的前提：内容只录一次，之后每帧换一个平移值即可重放。
+        状态指令与烘焙在光栅端逐像素等价（`resolve_state_ops`）。
+        """
+        self._ops.append(PushTranslateOp(dx, dy))
+
+    def push_clip(self, rect: Rect) -> None:
+        """把裁剪记成指令（屏幕/当前帧坐标，不随内层平移移动）。"""
+        self._ops.append(PushClipOp(rect))
+
+    def pop_state(self) -> None:
+        """弹出最近一次 push_translate / push_clip。"""
+        self._ops.append(PopOp())
+
+    def push_layer(self, key: int, rect: Rect) -> None:
+        """标记一段可缓存的层（内容标识 + 该层在当前帧坐标系的边界）。"""
+        self._ops.append(PushLayerOp(key, rect))
+
+    def pop_layer(self) -> None:
+        """结束最近一次 push_layer。"""
+        self._ops.append(PopLayerOp())
+
+    def append_ops(self, ops: tuple[Op, ...]) -> None:
+        """直接追加一批**已录好**的指令（层缓存重放用）。
+
+        这些指令必须已经是"当前坐标系局部"的：调用方负责在它们外面包好
+        `push_translate` / `push_clip`，重放本身只做搬运，不重新解释坐标。
+        """
+        self._ops.extend(ops)
 
     # ------------------------------------------------------------ 绘制
 

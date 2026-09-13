@@ -30,14 +30,17 @@ import math
 from enum import Enum
 
 from ...layout.types import Rect, Size
-from ..color import Color
 from ..display_list import (
     DisplayList,
     FillRectOp,
+    Op,
     PathFillOp,
     PathStrokeOp,
+    PopLayerOp,
+    PushLayerOp,
     StrokeRectOp,
     TextRunOp,
+    resolve_state_ops,
 )
 from ..glyphs import BuiltinGlyphProvider, GlyphProvider, glyph_mask_plan
 from .base import FrameBuffer, RasterError
@@ -123,10 +126,10 @@ class GLRasterBackend:
 
         self._clip = clip
         try:
-            if not self._drew_this_frame:
-                self._driver.clear(Color(0, 0, 0, 0))
-            for op in display_list.ops:
-                self._execute_op(op)
+            # **不自动清屏**：显示列表里的背景指令（如果有）负责铺底。
+            # 自动清屏会擦掉"本帧没重画、但上一帧还在"的区域——而脏子树绘制
+            # 的前提正是那些区域要保留（软件光栅一直是这个语义）。
+            self._execute_ops(display_list.ops)
         finally:
             # scissor 是整帧状态，用完复位——下一帧/下一个后端调用者不该继承它
             self._driver.set_scissor(None)
@@ -168,6 +171,52 @@ class GLRasterBackend:
         self._driver.destroy_texture(handle)
 
     # ------------------------------------------------------------ 指令分派
+
+    def _execute_ops(self, ops: tuple[Op, ...]) -> None:
+        """按顺序执行；遇到 `PushLayerOp` 时把嵌套段交给层缓存。
+
+        层缓存（RasterCache 思路）：内容静态、只有平移在变的子树（滚动）
+        渲染进离屏纹理一次，之后每帧只画一个四边形——不再重传几百条指令。
+        """
+        plain: list[Op] = []
+        index = 0
+        total = len(ops)
+        while index < total:
+            op = ops[index]
+            if isinstance(op, PushLayerOp):
+                self._flush_plain(plain)
+                plain = []
+                depth = 1
+                end = index + 1
+                while end < total and depth:
+                    if isinstance(ops[end], PushLayerOp):
+                        depth += 1
+                    elif isinstance(ops[end], PopLayerOp):
+                        depth -= 1
+                    end += 1
+                self._draw_layer(op, ops[index + 1 : end - 1])
+                index = end
+                continue
+            plain.append(op)
+            index += 1
+        self._flush_plain(plain)
+
+    def _flush_plain(self, ops: list[Op]) -> None:
+        if not ops:
+            return
+        for resolved in resolve_state_ops(tuple(ops)):
+            self._execute_op(resolved)
+
+    def _draw_layer(self, layer: PushLayerOp, group: tuple[Op, ...]) -> None:
+        rect = layer.rect
+        width = max(1, math.ceil(rect.width))
+        height = max(1, math.ceil(rect.height))
+        needs_render = self._driver.layer_begin(layer.key, width, height, rect.left, rect.top)
+        if needs_render:
+            for resolved in resolve_state_ops(group):
+                self._execute_op(resolved)
+            self._driver.layer_end()
+        self._driver.draw_layer(layer.key, rect)
 
     def _execute_op(self, op: object) -> None:
         if isinstance(op, FillRectOp):

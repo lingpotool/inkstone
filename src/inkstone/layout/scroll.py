@@ -54,6 +54,14 @@ class RenderScroll(RenderBox):
         self._child: RenderBox | None = None
         self._scroll: Offset = Offset(0.0, 0.0)
         self._content_size: Size = Size(0.0, 0.0)
+        # 层缓存（R8.4）：子树内容按"内容局部坐标"录一次，滚动只改变换。
+        # 没有它，滚动每帧都要把新偏移重新烘焙进几百条指令的坐标里，
+        # 并把整棵子树重排/重绘——这是"滚动做不专业"的根因。
+        self._layer_ops: tuple[object, ...] | None = None
+        self._layer_dirty: bool = True
+        # 层内容的单调代号：重建一次 +1。用它当缓存 key，而不是 id(tuple)——
+        # 旧 tuple 被回收后 id 可能被复用，后端会拿旧纹理顶包（内容不同的同键）。
+        self._layer_generation: int = 0
         if child is not None:
             self.child = child
 
@@ -71,6 +79,7 @@ class RenderScroll(RenderBox):
         if value is not None:
             self.adopt(value)
         self._scroll = Offset(0.0, 0.0)
+        self.invalidate_layer()
 
     @property
     def children(self) -> tuple[RenderBox, ...]:
@@ -108,19 +117,33 @@ class RenderScroll(RenderBox):
         m = self.max_scroll
         return m.dx > 0.0 or m.dy > 0.0
 
+    def invalidate_layer(self) -> None:
+        """丢弃层缓存（内容变了 / 子级换了 / 尺寸变了）。"""
+        self._layer_ops = None
+        self._layer_dirty = True
+        self._layer_generation += 1
+
     def scroll_to(self, dx: float | None = None, dy: float | None = None) -> None:
         """设置滚动偏移，自动夹取到合法范围。
 
-        偏移变了必须标脏：否则下一帧因为"约束没变且不脏"直接走缓存，
-        子级位置不会更新，表现就是**滚了但界面不动**。
+        偏移变化**不重排、不重录内容**：子级尺寸没变，变的只是位置——
+        直接改它的 offset 并只把**本节点**标脏，下一帧由 `paint_tree` 重放
+        层缓存并换一个平移指令（R8.4）。这就是"滚动只有 O(1) 合成"。
+        还没布局过（拿不到视口尺寸）时退回标脏重排，保证正确性优先。
         """
         limit = self.max_scroll
         new = Offset(
             min(max(dx if dx is not None else self._scroll.dx, 0.0), limit.dx),
             min(max(dy if dy is not None else self._scroll.dy, 0.0), limit.dy),
         )
-        if new != self._scroll:
-            self._scroll = new
+        if new == self._scroll:
+            return
+        self._scroll = new
+        if self._child is not None and self._constraints is not None:
+            self.place_child(self._child, Offset(-new.dx, -new.dy))
+            self.mark_needs_paint()
+        else:
+            # 未布局：没有视口/内容尺寸可算，交给正常的布局流程
             self.mark_needs_layout()
 
     def scroll_by(self, dx: float = 0.0, dy: float = 0.0) -> None:
@@ -136,6 +159,94 @@ class RenderScroll(RenderBox):
         否则它会直接糊在视口下方的组件上（"滚动列表盖住下面的按钮"）。
         """
         return Rect(0.0, 0.0, self._size.width, self._size.height)
+
+    def paint_tree(self, context: object) -> None:
+        """重放层缓存：子树内容不重录，只换一个平移。
+
+        这是滚动性能的关键路径（R8.4）。只有当 context 支持状态指令
+        （`push_clip` / `push_translate` / `append_ops`，即显示列表录制器）时才走
+        缓存；纯 object 上下文退回默认遍历，保证老调用方不受影响。
+        """
+        if not self._needs_paint:
+            return
+        push_clip = getattr(context, "push_clip", None)
+        push_translate = getattr(context, "push_translate", None)
+        append_ops = getattr(context, "append_ops", None)
+        pop_state = getattr(context, "pop_state", None)
+        push_layer = getattr(context, "push_layer", None)
+        pop_layer = getattr(context, "pop_layer", None)
+        transform = getattr(context, "transform", None)
+        # 缓存里的指令是"内容局部"的，重放时不会被 recorder 的变换折算——
+        # 所以只有当前变换是**纯平移**时才能用（祖先偏移可加，缩放/旋转不可加）。
+        # 典型会禁用缓存的场景：根上的 DPI 缩放（那本来也不是滚动热路径）。
+        if (
+            self._child is not None
+            and callable(push_clip)
+            and callable(push_translate)
+            and callable(append_ops)
+            and callable(pop_state)
+            and transform is not None
+            and transform.a == 1.0
+            and transform.d == 1.0
+            and transform.b == 0.0
+            and transform.c == 0.0
+        ):
+            # 子树内容真的变了才重录；只是滚动的话它一直是干净的
+            if self._child.needs_paint:
+                self.invalidate_layer()
+            if self._layer_ops is None:
+                self._rebuild_layer()
+            self.paint(context)
+            # 重放的坐标 = 祖先已累计的平移 + 本节点 offset + 子级 offset
+            base_x = transform.tx + self._offset.dx
+            base_y = transform.ty + self._offset.dy
+            clip = self.paint_clip()
+            push_layer_fn = push_layer if callable(push_layer) else None
+            pop_layer_fn = pop_layer if callable(pop_layer) else None
+            has_layer_ops = (
+                push_layer_fn is not None and pop_layer_fn is not None and clip is not None
+            )
+            if has_layer_ops and clip is not None and push_layer_fn is not None:
+                # 层缓存：内容静态（key=代号），后端可渲染成离屏纹理后每帧只画一个四边形
+                push_layer_fn(self._layer_generation, Rect(base_x, base_y, clip.width, clip.height))
+            depth = 0
+            if clip is not None:
+                push_clip(Rect(base_x, base_y, clip.width, clip.height))
+                depth += 1
+            push_translate(base_x + self._child.offset.dx, base_y + self._child.offset.dy)
+            depth += 1
+            assert self._layer_ops is not None
+            append_ops(self._layer_ops)
+            for _ in range(depth):
+                pop_state()
+            if has_layer_ops and pop_layer_fn is not None:
+                pop_layer_fn()
+            self._needs_paint = False
+            return
+        super().paint_tree(context)
+
+    def _rebuild_layer(self) -> None:
+        """把子树录成"内容局部坐标"的指令，供后续帧重放。"""
+        from ..gfx import DisplayListRecorder  # 局部导入，避免布局层在导入期依赖整个 gfx
+
+        child = self._child
+        if child is None:
+            self._layer_ops = ()
+            self._layer_dirty = False
+            return
+        recorder = DisplayListRecorder()
+        saved = child._offset
+        # 归零子级偏移：缓存的是内容自身坐标，平移由重放时的状态指令提供
+        child._offset = Offset(0.0, 0.0)
+        child.mark_subtree_needs_paint()  # 强制走一遍（否则干净子树会被整棵跳过）
+        try:
+            child.paint_tree(recorder)
+        finally:
+            child._offset = saved
+        width = max(1, int(self._size.width))
+        height = max(1, int(self._size.height))
+        self._layer_ops = recorder.finish(width, height).ops
+        self._layer_dirty = False
 
     # ------------------------------------------------------------ 布局
 
@@ -161,6 +272,8 @@ class RenderScroll(RenderBox):
         child_constraints = self._child_constraints(inner)
         self._content_size = self.layout_child(self._child, child_constraints)
 
+        # 约束/内容尺寸可能变了，层缓存必须作废重录
+        self.invalidate_layer()
         self.scroll_to()
         self.place_child(self._child, Offset(-self._scroll.dx, -self._scroll.dy))
         return size

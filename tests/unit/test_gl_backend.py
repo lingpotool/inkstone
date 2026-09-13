@@ -47,6 +47,7 @@ class FakeDriver:
         self.pixel_override: bytes | None = None
         self.began = 0
         self.ended = 0
+        self._layers: set[int] = set()
 
     def begin(self, width: int, height: int, scale: float) -> None:
         self.calls.append(("begin", width, height, scale))
@@ -55,6 +56,19 @@ class FakeDriver:
 
     def clear(self, color: Color) -> None:
         self.calls.append(("clear", color))
+
+    def layer_begin(self, key: int, width: int, height: int, ox: float, oy: float) -> bool:
+        self.calls.append(("layer_begin", key))
+        if key in self._layers:
+            return False
+        self._layers.add(key)
+        return True
+
+    def layer_end(self) -> None:
+        self.calls.append(("layer_end",))
+
+    def draw_layer(self, key: int, rect: Rect) -> None:
+        self.calls.append(("draw_layer", key))
 
     def end(self) -> None:
         self.calls.append(("end",))
@@ -168,14 +182,13 @@ class TestFrameLifecycle:
         backend.execute(display_list)
         backend.end_frame()
         first_draws = len(driver.fills())
-        first_clears = driver.kinds().count("clear")
-        assert first_draws == 1 and first_clears == 1
+        assert first_draws == 1
+        assert driver.kinds().count("clear") == 0, "GL 后端不自动清屏（保留脏区外的像素）"
 
         backend.begin_frame(SIZE, 1.0)
         backend.execute(display_list)
         backend.end_frame()
         assert len(driver.fills()) == first_draws, "相同内容不该重画"
-        assert driver.kinds().count("clear") == first_clears, "相同内容不该重清屏"
 
     def test_changed_frame_redraws(self) -> None:
         driver = FakeDriver()
@@ -188,7 +201,6 @@ class TestFrameLifecycle:
         backend.execute(_dl(100, 50, FillRectOp(Rect(0, 0, 20, 20), RED)))
         backend.end_frame()
         assert len(driver.fills()) == 2, "内容变了必须重画"
-        assert driver.kinds().count("clear") == 2
 
     def test_resize_invalidates_frame_dedup(self) -> None:
         driver = FakeDriver()
@@ -215,6 +227,41 @@ class TestFrameLifecycle:
 
 
 # ---------------------------------------------------------------- 指令与裁剪
+
+
+class TestLayerCache:
+    """层缓存（R8.4）：静态内容只渲染一次，之后每帧只画一个四边形。"""
+
+    @staticmethod
+    def _ops(outer_size: float) -> object:
+        from inkstone.gfx import PopLayerOp, PushLayerOp
+
+        return (
+            PushLayerOp(7, Rect(0.0, 0.0, 50.0, 50.0)),
+            FillRectOp(Rect(0.0, 0.0, 10.0, 10.0), RED),
+            PopLayerOp(),
+            FillRectOp(Rect(0.0, 0.0, outer_size, outer_size), RED),
+        )
+
+    def test_layer_renders_once_and_is_reused(self) -> None:
+        driver = FakeDriver()
+        backend = GLRasterBackend(driver)
+
+        backend.begin_frame(SIZE, 1.0)
+        backend.execute(_dl(100, 50, *self._ops(1.0)))  # type: ignore[arg-type]
+        backend.end_frame()
+        first_fills = len(driver.fills())
+
+        # 第二帧换了外层内容（躲开帧去重），但层内容没变 → 层不重画
+        backend.begin_frame(SIZE, 1.0)
+        backend.execute(_dl(100, 50, *self._ops(2.0)))  # type: ignore[arg-type]
+        backend.end_frame()
+
+        assert first_fills == 2, "第一次：层内 1 次 + 外层 1 次"
+        assert len(driver.fills()) == 3, "第二次只该画外层（层命中缓存）"
+        assert driver.kinds().count("draw_layer") == 2
+        begins = [c for c in driver.calls if c[0] == "layer_begin"]
+        assert begins[0][1] == 7 and begins[1][1] == 7
 
 
 class TestDrawCommands:

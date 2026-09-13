@@ -2,14 +2,15 @@
 
 > 写给下一个接手的对话。读完这份 + `AGENT.md` + `ROADMAP.md`，就能直接开工。
 > 交接时间：**2026-09-13** · 地基整改 R1–R6 + 收官包 R7 **全部完成** ·
-> 无头单测 **991 个全绿**（覆盖率 89.99%）· 黄金图 12 张像素级比对
+> 无头单测 **1004 个全绿**（覆盖率 89.09%）· 黄金图 12 张像素级比对
 >
 > **当前主线**：**GL 后端子包（`docs/22`）**——R7.5 的性能基准触发了预先写死的
-> 决策规则（三场景 p95 超 10ms 预算 40–300 倍）。R8.1（接缝+逻辑层）、
-> R8.2（Windows WGL 真机驱动）、R8.3（热路径缓存 + 矩形合批 + 字形图集 + 帧去重）
-> 已完成；本机 RTX 3060 / GL 4.6 实测 p95：全屏 3125→**5.7ms** ✅、
-> 文本 576→**8.8ms** ✅、滚动 859→108ms ✗。滚动每帧平移、帧去重命中不了，
-> 需要 repaint boundary + 变换指令（Flutter 层模型，见 docs/22 §8）。
+> 决策规则（三场景 p95 超 10ms 预算 40–300 倍）。R8.1 接缝+逻辑层、R8.2
+> Windows WGL 真机驱动、R8.3 热路径+合批+图集+帧去重、**R8.4 状态指令 +
+> 滚动 repaint boundary + GL 层缓存**均已完成。
+> **R7.5 验收达成**：本机 RTX 3060 / GL 4.6 实测 p95 全屏 **4.4ms** /
+> 文本 **8.6ms** / 滚动 **1.0ms**，三场景全部 ≤10ms（软件光栅仍是黄金图
+> 的确定性事实源，未变）。
 >
 > 更早的分包更新记录已归档为 git 历史；本文只描述**当前真实状态**。
 > 规矩：本文数字与"已完成"必须可复现；发现过期就改，不留"看起来还行"的旧描述。
@@ -106,14 +107,19 @@ docs/22 已定范围：**只实现现有显示列表 IR 的指令集**、沿用 
   上下文 current 之后加载；字形纹理按 `id(mask)` 缓存会每帧重传（内置
   provider 每次新建对象），改内容键 + FIFO。
 - **R8.3 已完成**：热路径缓存（段落排版结果 / 逐字符脚本判定，文本页纯 Python
-  37→6.9ms）；GL 矩形顶点属性合批 + 2048² 字形图集；**帧去重**（内容与上一帧
-  逐指令相同就整帧跳过 clear+draw，damage 思想的最简形态，清屏因此从 begin()
-  移到显式 clear()）。GL p95：全屏 5.7ms ✅、文本 8.8ms ✅、滚动 108ms ✗。
-- **R8.4 待做（专业方向）**：滚动是唯一未达标场景，因为它每帧都在平移、
-  帧去重命中不了；专业解法是 **repaint boundary + 变换指令**（Flutter 层模型）：
-  内容只录制/光栅一次，滚动只改一个平移变换后重新合成。需要显示列表支持
-  变换指令（现在坐标在录制时 bake 成绝对值），是 IR 演进，不在驱动层糊。
-  同套基础设施还能解决"矩形与文本交替切断合批"。路径三角化未做（两后端同等能力）。
+  37→6.9ms）；GL 矩形顶点属性合批 + 2048² 字形图集；帧去重（内容与上一帧逐指令
+  相同就整帧跳过，damage 思想的最简形态）。
+- **R8.4 已完成（ADR-0019）**：显示列表加**状态指令**（`PushTranslateOp` /
+  `PushClipOp` / `PopOp`，`resolve_state_ops` 保证与"烘焙版"逐像素等价，
+  两后端共用、黄金图未动）；**滚动成为 repaint boundary**（子树录成内容局部
+  坐标的层缓存，滚动只改平移，纯 Python 21ms→0.10ms）；**GL 层缓存**
+  （`PushLayerOp` → 离屏 FBO 纹理，命中即复用，每帧只画一个四边形）。
+  顺带修掉"自动清屏擦掉未变区域"的真问题：光栅后端不自动清屏，背景由显示
+  列表指令负责，脏子树重绘保留区域外像素。
+- **仍未做**：真窗口 GL present（SDL2 `SDL_WINDOW_OPENGL` + swap；本机无
+  SDL2 库，未验证）；Linux GLX/EGL、macOS CGL 驱动；路径三角化（两后端同等
+  能力）；通用脏矩形损伤跟踪（现在是"层 + 帧去重"）；交互式主循环仍是最朴素
+  的"每帧全录/全画"，应用外壳落地时接 `on_frame_scheduled` + 脏区重绘。
 - R8.4：真窗口 present（SDL2 GL 窗口）与三场景帧率验收。Linux GLX/EGL、
   macOS CGL 驱动在 R8.2 基础上照 `GLDriver` 协议补。
 
@@ -147,12 +153,12 @@ R7.1–R7.3 的事件/手势/DPI 链路在 headless 下都有确定性测试，
 
 ```bash
 cd /e/inkstone
-./.venv/Scripts/python.exe -m pytest tests -q          # 991 个必须全绿
+./.venv/Scripts/python.exe -m pytest tests -q          # 1004 个必须全绿
 ./.venv/Scripts/python.exe -m ruff check src tests examples benchmarks
 ./.venv/Scripts/python.exe -m ruff format --check src tests examples benchmarks
 ./.venv/Scripts/python.exe -m mypy                     # strict，零错误
 ./.venv/Scripts/python.exe -m pytest tests -q -m "not slow" \
-    --cov=src/inkstone --cov-fail-under=85             # 覆盖率（90.0%）
+    --cov=src/inkstone --cov-fail-under=85             # 覆盖率（89.1%）
 # 或一把梭：make check
 ```
 
@@ -220,7 +226,7 @@ cd /e/inkstone
 ## 八、开工姿势（建议）
 
 1. 读 `AGENT.md`（**重点看 ADR 表**）→ `ROADMAP.md` → 本文档
-2. 跑一遍验证命令确认起点全绿（991 passed / mypy 干净 / 覆盖 90.0%）
+2. 跑一遍验证命令确认起点全绿（1004 passed / mypy 干净 / 覆盖 89.1%）
 3. 跑一次 `python examples/notes.py` —— 看当前最完整的界面长什么样
 4. 按第三节顺序推进：**①GL 后端子包（docs/22）** → ②文本编辑 → ③macOS/Linux
    真机字体验证 → ④三平台 SDL2 验证
