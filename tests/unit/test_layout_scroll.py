@@ -852,3 +852,57 @@ class TestScrollbarAutoHide:
         assert thick_rect is not None
         assert thick_rect.width > thin
         assert thick_rect.right == pytest.approx(rect.right), "变粗只向左长，不移动右缘"
+
+
+class TestScrollbarTrackAndCorner:
+    """轨道点击翻页与双轴转角（R14.3）。"""
+
+    def test_clicking_below_the_thumb_pages_down(self) -> None:
+        scroll = TestScrollbarGeometry._styled()
+        rect = scroll.thumb_rect()
+        assert rect is not None
+        before = scroll.scroll_offset.dy
+        scroll._page_if_on_track(rect.left + 2.0, rect.bottom + 5.0)
+        assert scroll.scroll_offset.dy > before, "点拇指下方应向下翻一页"
+
+    def test_clicking_above_the_thumb_pages_up(self) -> None:
+        scroll = TestScrollbarGeometry._styled()
+        scroll.scroll_to(dy=scroll.max_scroll.dy)
+        rect = scroll.thumb_rect()
+        assert rect is not None
+        assert rect.top > 6.0, "滚到底后拇指上方要真的有空轨道，这条测试才有意义"
+        before = scroll.scroll_offset.dy
+        scroll._page_if_on_track(rect.left + 2.0, rect.top - 5.0)
+        assert scroll.scroll_offset.dy < before, "点拇指上方应向上翻一页"
+
+    def test_page_size_leaves_a_little_overlap(self) -> None:
+        """翻一页是 90% 视口，不是 100%——留一点重叠，跟读时不丢上下文。"""
+        scroll = TestScrollbarGeometry._styled()
+        scroll.page_by(1)
+        assert scroll.scroll_offset.dy == pytest.approx(100.0 * 0.9)
+
+    def test_clicking_the_thumb_is_not_a_page(self) -> None:
+        scroll = TestScrollbarGeometry._styled()
+        scroll.scroll_to(dy=50.0)
+        rect = scroll.thumb_rect()
+        assert rect is not None
+        before = scroll.scroll_offset.dy
+        assert scroll._page_if_on_track(rect.left + 2.0, rect.top + 2.0) is False
+        assert scroll.scroll_offset.dy == before
+
+    def test_clicking_off_the_track_does_nothing(self) -> None:
+        scroll = TestScrollbarGeometry._styled()
+        assert scroll._page_if_on_track(10.0, 10.0) is False
+        assert scroll.scroll_offset.dy == 0.0
+
+    def test_double_axis_trims_the_tracks_for_the_corner(self) -> None:
+        """双轴时两条轨道各让开对方，右下角留一个方块（Chromium 的 corner）。"""
+        big = RenderColumn(debug_name="Big")
+        big.add(RenderSized(width=Sizing.fixed(400.0), height=Sizing.fixed(400.0)))
+        inner = RenderScroll(big, direction=ScrollDirection.BOTH, debug_name="Both")
+        inner.scrollbar = _scrollbar_style()
+        inner.layout(BoxConstraints(max_width=120.0, max_height=100.0))
+        assert inner._both_axes_visible()
+        vertical = inner.bar_track_rect()
+        assert vertical is not None
+        assert vertical.height == pytest.approx(100.0 - 10.0 - 2.0), "竖轨道让开底部那一格"

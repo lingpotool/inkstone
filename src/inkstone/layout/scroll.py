@@ -280,6 +280,41 @@ class RenderScroll(RenderBox):
         if self.on_need_frame is not None:
             self.on_need_frame()
 
+    def bar_track_rect(self) -> Rect | None:
+        """整条轨道的矩形（拇指在上面滑动的那条）。
+
+        双轴时让开另一端滚动条占的角——这就是 Chromium 的 `scrollbar-corner`：
+        两条不重叠，右下角留一个方块。
+        """
+        style = self.scrollbar
+        if style is None or not self.can_scroll:
+            return None
+        thickness = self.bar_thickness()
+        if self.direction is ScrollDirection.HORIZONTAL:
+            width = self._size.width
+            if self._both_axes_visible():
+                width = max(0.0, width - thickness - style.margin)
+            return Rect(0.0, self._size.height - thickness - style.margin, width, thickness)
+        height = self._size.height
+        if self._both_axes_visible():
+            height = max(0.0, height - thickness - style.margin)
+        return Rect(self._size.width - thickness - style.margin, 0.0, thickness, height)
+
+    def _both_axes_visible(self) -> bool:
+        """双轴且两边都能滚——此时才需要转角。"""
+        if self.direction is not ScrollDirection.BOTH or not self.can_scroll:
+            return False
+        limit = self.max_scroll
+        return limit.dx > 0.0 and limit.dy > 0.0
+
+    def page_by(self, direction: int) -> None:
+        """点轨道翻页：`direction` 为 ±1，翻 90% 视口（留一点重叠好跟读）。"""
+        if self.direction is ScrollDirection.HORIZONTAL:
+            self.scroll_by(dx=direction * self._size.width * 0.9)
+        else:
+            self.scroll_by(dy=direction * self._size.height * 0.9)
+        self.wake(self._now_ms)
+
     def _paint_scrollbar(self, context: object) -> None:
         """把拇指画在**为它让出来的槽位**里（见 ADR-0026）。
 
@@ -303,13 +338,27 @@ class RenderScroll(RenderBox):
         base = style.hover_color if self._bar_active else style.color
         # 淡出就是把整体透明度按 opacity 缩放（颜色本身也是半透明的）
         color = base.with_alpha(base.a * self.opacity)
+        corner: Rect | None = None
+        if self._both_axes_visible():
+            # 转角方块：填满两条轨道交汇的那一格，避免视觉上"少一块"
+            thickness = self.bar_thickness()
+            corner = Rect(
+                self._size.width - thickness - style.margin,
+                self._size.height - thickness - style.margin,
+                thickness,
+                thickness,
+            )
         if callable(save) and callable(translate) and callable(restore):
             save()
             translate(self._offset.dx, self._offset.dy)
             round_rect(rect, style.radius, color)
+            if corner is not None:
+                round_rect(corner, 0.0, color)
             restore()
         else:
             round_rect(rect, style.radius, color)
+            if corner is not None:
+                round_rect(corner, 0.0, color)
 
     # ------------------------------------------------------------ 输入
 
@@ -350,6 +399,11 @@ class RenderScroll(RenderBox):
         if event.kind is PointerKind.LEAVE:
             self._set_thumb_hover(False)
             self.request_fade()
+            return
+        if event.kind is PointerKind.DOWN and self.opacity > 0.0:
+            # 点轨道翻页。**条不可见时不响应**——不可见的按钮不该能被点中
+            # （那会变成"莫名其妙跳一屏"）。拇指上的按下归把手识别器，不在这。
+            self._page_if_on_track(dispatch.local_x, dispatch.local_y)
             return
         if event.kind in (PointerKind.MOVE, PointerKind.ENTER):
             # 能收到 MOVE 就说明指针在本节点命中链上（= 指针在我们身上或
@@ -426,6 +480,20 @@ class RenderScroll(RenderBox):
             self.mark_needs_paint()
         if hovered:
             self.wake(self._now_ms)
+
+    def _page_if_on_track(self, x: float, y: float) -> bool:
+        """点在轨道（不是拇指）上就翻页；方向按**点在拇指的哪一侧**定。"""
+        track = self.bar_track_rect()
+        thumb = self.thumb_rect()
+        if track is None or thumb is None:
+            return False
+        if not track.contains(x, y) or thumb.contains(x, y):
+            return False
+        if self.direction is ScrollDirection.HORIZONTAL:
+            self.page_by(-1 if x < thumb.left else 1)
+        else:
+            self.page_by(-1 if y < thumb.top else 1)
+        return True
 
     # ------------------------------------------------------------ 绘制
 
