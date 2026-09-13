@@ -195,8 +195,20 @@ docs/22 已定范围：**只实现现有显示列表 IR 的指令集**、沿用 
   `ShapedLine` 构造时预计算已定位字形并缓存，`positioned_glyphs()` 只读。
   顺带让显示列表去重比较走元组同一性短路。实测文本 p95 7.1–10.7 → 1.5–1.8ms，
   全屏 4.5–4.9 → 1.8–2.6ms。**12 张黄金图逐字节不变**（零视觉变化）。
-- **仍未做**：窗口位置/尺寸记忆（应用外壳层）；滚动条 / 锚点保持 / 过滚动 /
-  虚拟滚动（Phase 2，`AGENT.md:441`）；Linux GLX/EGL、macOS CGL；
+- **R13.1 滚动条完成**（ADR-0026）：第一版做成"常驻半透明覆盖条"，用户一眼
+  看穿——它盖在条目上。改为**让出槽位**（`overflow: auto` 语义）：只有真溢出
+  才从内容区扣掉 `thickness+margin` 再量一次（有界的一次二次布局，滚动本身
+  不触发布局）。令牌新增 `scrollbar` 几何组 + 语义色 `scrollbar`/`scrollbar-hover`。
+- **R13.2 滚动条拖拽完成**：新增 `HandleDragRecognizer`（把手拖拽，将来
+  splitter/滑块同用）。**按下点不在把手上时用 hold 退场**——直接 reject 会让
+  内容拖拽在 DOWN 当场获胜、绕过 8px slop 门槛（ADR-0014 的 bug）。
+- **顺带修掉一个真机才暴露的老 bug**：`translate_motion` 用 `raw.which` 当
+  pointer_id、`translate_button` 留 0 → 竞技场对不上号，**鼠标拖动列表在真机上
+  一直是失效的**（单元测试两端都手写 0，同错自洽所以全绿）。统一为
+  `_pointer_id_of`，并补回归测试。
+- **仍未做**：窗口位置/尺寸记忆（应用外壳层）；滚动条自动淡出（等 `motion/`）、
+  轨道点击翻页、锚点保持 / 过滚动 / 虚拟滚动（Phase 2）；
+  Linux GLX/EGL、macOS CGL；
   路径三角化；通用脏矩形损伤跟踪；应用外壳脏区调度；macOS 的 NSWindow
   appearance 接线（`windows_shell` 目前只有 Win32 实现，其他平台是安全空操作）。
 - Linux GLX/EGL、macOS CGL 驱动照 `GLDriver` 协议补（Windows 已通过 WGL +
@@ -207,8 +219,8 @@ docs/22 已定范围：**只实现现有显示列表 IR 的指令集**、沿用 
 Phase 1 的 6 项 DoD 在 Windows 上全部达成（验收清单见第二节）。下一段主线按
 ROADMAP 走 Phase 2「可用」，建议顺序：
 
-1. **滚动条 + 锚点保持 + 虚拟滚动**（`AGENT.md:441` 划归 Phase 2）——滚轮已经
-   能用，但**没有任何视觉反馈**，用户不知道这区域能滚，这是当前最刺眼的 UX 缺口；
+1. ~~滚动条~~ **已完成（R13.1/R13.2）**；接着做**虚拟滚动 + 锚点保持**
+   （大列表的必备件，与数据展示组件同批）；
 2. **primitives**（portal / overlay_manager / focus_trap / popper / dismissible /
    presence / scroll_lock）——弹层与菜单的地基；
 3. 反馈组件（Dialog / Toast / Tooltip / ContextMenu）→ 表单全家桶 → 数据展示
