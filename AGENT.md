@@ -28,7 +28,7 @@ Phase 1 · 地基。真实代码覆盖布局、组件树、样式、渲染、**�
 | `style/`（tokens / theme / resolve / variants） | ✅ 三层令牌 + 明暗主题 + 变体解析 |
 | `text/`（font / fallback / shaping / linebreak / paragraph / engine） | ✅ 字体度量、CJK 回退链、整形、断行（含禁则）、段落排版 |
 | `widgets/`（basic / layout / form） | ✅ Box / Card / **Text** / Row / Column / Flexible / **ScrollView** / Button / Input |
-| `gfx/`（display_list / paint / transform / **glyphs** / raster.base / raster.software） | ✅ 显示列表（`TextRunOp` + `PathFillOp`/`PathStrokeOp`）+ 录制器（**仿射变换栈**）+ 软件光栅（**帧生命周期协议** + 不透明矩形快路径）+ PNG |
+| `gfx/`（display_list / paint / transform / **glyphs** / raster.base / raster.software / **raster.gl_driver + gl_backend**） | ✅ 显示列表（`TextRunOp` + `PathFillOp`/`PathStrokeOp`）+ 录制器（**仿射变换栈**）+ 软件光栅（**帧生命周期协议** + 不透明矩形快路径）+ PNG + **GL 后端骨架**（驱动接缝 + 假驱动测逻辑；真机驱动 R8.2） |
 | `devtools/screenshot.py` | ✅ 确定性截图 + 黄金图基线（12 张）+ **字形源自动配对** + DPI 档位 |
 | `benchmarks/run.py` | ✅ 帧耗时基准（长列表滚动 / 全屏重绘 / 文本密集，p50/p95，GL 决策依据） |
 | `events/ime.py` | ✅ IME 组合态模型（`ImeSession`：事件流 → text+composition 状态） |
@@ -38,7 +38,7 @@ Phase 1 · 地基。真实代码覆盖布局、组件树、样式、渲染、**�
 | `examples/notes.py` | ✅ **样板 App「墨记」**：侧栏 + 滚动列表 + 表单 + 明暗主题切换；headless 出黄金图、`--sdl2` 真窗口交互，进 CI 冒烟 |
 | 其余模块（gfx GL+Skia / events 其余 / primitives / app …） | ⬜ 占位桩 |
 
-944 个无头单测全绿，**黄金图像素级比对**也跑通（12 张基线）。
+974 个无头单测全绿，**黄金图像素级比对**也跑通（12 张基线）。
 **地基整改 R1（正确性止血，docs/15）、R2（测试求真，docs/16）、
 R3（渲染协议重塑，docs/17）、R4（跨平台文本栈，docs/18）、
 R5（事件与 IME，docs/19）、R6（主题传播与依赖追踪，docs/20）已完成**：
@@ -74,12 +74,15 @@ R7.4 样板 App「墨记」（`examples/notes.py`）已完成：侧栏 + 滚动�
 `--sdl2` 真窗口交互；它逼出并修掉一个文本栈真 bug（多字重下光栅选错字体面
 → 粗体整行画成别的字，见 ADR-0016）；
 R7.5 性能基准已完成（`benchmarks/run.py` 三场景出 p50/p95，规则先写死），
-数据触发 GL 后端子包（ADR-0017 / docs/22）。测试 888 → 944 全绿。
+数据触发 GL 后端子包（ADR-0017 / docs/22）。测试 888 → 944 全绿；
+GL 子包 R8.1（驱动接缝 + 后端逻辑层）已完成，测试 → 974 全绿（覆盖率 89.99%）。
 
 **R7 整包完成，Phase 1 的"交互闭环"闭合**（能点、能滚、能打字的前半程：
 聚焦与 IME 通道、能切主题、能缩放）。Phase 1 剩余 DoD：文本编辑模型
 （可输入/可删除/光标，Phase 2 首项）、macOS/Linux 真机字体验证、
-三平台 SDL2 交互验证，以及按 docs/22 启动的 GL 后端子包。
+三平台 SDL2 交互验证。
+**GL 后端子包（docs/22）已开工**：R8.1 完成（驱动接缝 + `GLRasterBackend`
+逻辑层，`FakeDriver` 30 例）；R8.2（ctypes 真机驱动）需要能验证 GL 的环境。
 渲染与文本这几块已经能出**看起来像正经软件**的界面。
 
 **字体有三种来源，各司其职（ADR-0007 / ADR-0011）**：
@@ -390,6 +393,7 @@ Phase 1 其余 DoD（文本编辑模型、macOS/Linux 真机字体验证、三�
 | ADR-0015 | **DPI 换算只在录制/光栅层：布局与事件恒为逻辑像素，物理 = 逻辑 × dpi_scale** | 组件里乘缩放因子会让几何、命中、事件坐标三处口径分叉（改一处漏两处）。档位经 `BuildOwner.begin_frame(dpi_scale=…)` 进帧上下文，`flush_paint` 在根上压一个等比仿射变换，于是显示列表指令是设备像素、帧缓冲按逻辑尺寸×scale 分配，而组件代码一行不改。线宽/圆角/字形 em 随仿射一起缩放（R3.4），文字在物理分辨率上重新光栅化——掩码缓存键含生效字号，1.0 档的掩码不会被复用到 1.5 档。`DPI_CHANGED` 经 `handle_window_event` 更新档位，下一帧按新档重录，不拉伸旧帧 |
 | ADR-0016 | **字形 id 必须与"产生它的字体面"（face_key）同源，光栅不许按 family 重选面** | glyph id 只在它所属的 face 里有意义。同一 family 的 Regular 与 Bold 是两个文件、两套编号；整形按 `spec.weight` 选面，而 `mask_for` 曾按 family 用 REGULAR 重选——于是"用 Bold 的 id 查 Regular 的轮廓"，粗体中文整行画成别的字（R7.4 样板 App 的标题栏暴露）。修法：`GlyphPlacement.face_key`（path+index）经 `ShapedCluster` / `PositionedGlyph` 一路带到 `mask_for(face_key=…)`；掩码缓存键也改用 face_key（否则两个字重互相顶掉）。合成字体回归测试钉住（`TestGlyphsComeFromTheShapedFace`）。这条是"度量与字形同源"从"同一个对象"加强到"同一个面" |
 | ADR-0017 | **GL 后端由 R7.5 数据驱动启动：软件光栅只做确定性事实源，不做生产帧率** | 决策规则在施工前写死（`benchmarks/run.py`，p95 > 10ms = 60fps 预算六成）。实测三场景 p95 为预算的 40–300 倍（scroll 859ms / fullscreen 3125ms / text 576ms），热点是纯 Python 逐像素 SDF 与"整份显示列表全量光栅"。故启动 GL 后端子包（docs/22）：只实现现有 IR 指令集、沿用 R3.1 帧生命周期、不改 core、不引第二套文本栈、黄金图仍以软件光栅为准。**量完再调阈值等于给结论找理由**，数字与规则一并留在 docs/22 |
+| ADR-0018 | **GL 后端先切"驱动接缝"并把逻辑层测透，真机 GL 调用后置；两个光栅后端能力必须对等** | GL 里只有建上下文/传纹理/draw call/读像素属于 GPU，其余（帧状态机、op.clip×脏矩形取交→scissor、半径钳制、文本取掩码与连字规则、资源生命周期、读回校验）都能无显卡测试。`GLDriver` 协议 + `FakeDriver` 记录调用序列，把 R8.1 做成了**可验证**的一步；真机 ctypes 驱动（R8.2）只需照协议填，后端逻辑不改。同时规定：**一个后端会画的指令，另一个也必须会**（路径两后端都抛 `NotImplementedError`），否则差异会拖到黄金图比对时才暴露。取字形规则 `glyph_mask_plan` 抽成两后端共用的唯一副本 |
 
 ## 已知待办
 

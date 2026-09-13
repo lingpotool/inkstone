@@ -35,7 +35,7 @@ from inkstone.gfx import (
     encode_png,
 )
 from inkstone.gfx.color import Color
-from inkstone.gfx.glyphs import BuiltinGlyphProvider, GlyphMask, rect_of_mask
+from inkstone.gfx.glyphs import BuiltinGlyphProvider, GlyphMask, glyph_mask_plan, rect_of_mask
 from inkstone.layout import BoxConstraints
 from inkstone.layout.types import Offset, Rect, Size
 from inkstone.style import Theme
@@ -889,7 +889,7 @@ class TestLigatureRasterization:
 
     def test_the_three_way_glyph_plan(self):
         """单字形簇走 id、多字形簇走文本、被连字覆盖的簇不画。"""
-        plan = SoftwareRasterizer._glyph_plan
+        plan = glyph_mask_plan
         single = PositionedGlyph("A", 0.0, 10.0, "F", glyph_ids=(7,))
         multiple = PositionedGlyph("Á", 0.0, 10.0, "F", glyph_ids=(7, 8))
         covered = PositionedGlyph("f", 4.0, 10.0, "F")
@@ -901,4 +901,4 @@ class TestLigatureRasterization:
     def test_without_any_ids_every_cluster_uses_text(self):
         """内置后端一个 id 都不给 → 全部走文本路径（它本来就没有整形）。"""
         glyph = PositionedGlyph("A", 0.0, 10.0, "F")
-        assert SoftwareRasterizer._glyph_plan(glyph, run_has_ids=False) == ()
+        assert glyph_mask_plan(glyph, run_has_ids=False) == ()

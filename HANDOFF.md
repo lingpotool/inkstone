@@ -2,11 +2,12 @@
 
 > 写给下一个接手的对话。读完这份 + `AGENT.md` + `ROADMAP.md`，就能直接开工。
 > 交接时间：**2026-09-13** · 地基整改 R1–R6 + 收官包 R7 **全部完成** ·
-> 无头单测 **944 个全绿**（覆盖率 89.8%）· 黄金图 12 张像素级比对
+> 无头单测 **974 个全绿**（覆盖率 89.99%）· 黄金图 12 张像素级比对
 >
 > **当前主线**：**GL 后端子包（`docs/22`）**——R7.5 的性能基准触发了预先写死的
-> 决策规则（三场景 p95 超 10ms 预算 40–300 倍）。GL 包的范围与验收见 docs/22，
-> **不在**已完成的 R1–R7 范围内，是下一件要动的事。
+> 决策规则（三场景 p95 超 10ms 预算 40–300 倍）。**R8.1 已完成**（驱动接缝
+> `GLDriver` + `GLRasterBackend` 逻辑层，假驱动 30 例）；**R8.2（ctypes 真机
+> 驱动）需要一台能验证 GL 的机器**，本机与 CI 都没有 GL 上下文。
 >
 > 更早的分包更新记录已归档为 git 历史；本文只描述**当前真实状态**。
 > 规矩：本文数字与"已完成"必须可复现；发现过期就改，不留"看起来还行"的旧描述。
@@ -91,6 +92,16 @@ docs/22 已定范围：**只实现现有显示列表 IR 的指令集**、沿用 
 **不改 core**、不引第二套文本栈（字形仍来自 `HbFtFontEngine`）、
 黄金图仍以软件光栅为事实源、不做 Skia。验收：三场景 p95 ≤ 10ms（参考机）。
 
+- **R8.1 已完成**：`GLDriver` 驱动接缝 + `GLRasterBackend` 逻辑层
+  （帧状态机、op.clip×脏矩形取交→scissor、半径钳制、文本取掩码/连字、
+  IME 下划线、纹理生命周期、读回校验）。无 GPU 也能测——`FakeDriver`
+  记录调用序列，30 例全绿；取字形规则 `glyph_mask_plan` 两后端共用。
+- **R8.2 待做且被环境阻塞**：ctypes 直调 GL（零新依赖，铁律 5；Windows
+  `opengl32`+WGL / Linux GLX·EGL / macOS CGL）+ SDL2 开 GL 上下文。
+  **需要一台能验证 GL 的机器**——本机与 CI 都没有 GL 上下文，
+  盲写一份无法运行的绑定等于制造假进度，所以停在这里等环境/决策。
+- R8.3 图集与合批、路径三角化；R8.4 三场景帧率验收 + 真窗口 present。
+
 ### ② 文本编辑模型（Phase 2 首项）
 
 `Input` 只能聚焦。要补：编辑模型 `text + selection(anchor, focus) + composition`
@@ -121,7 +132,7 @@ R7.1–R7.3 的事件/手势/DPI 链路在 headless 下都有确定性测试，
 
 ```bash
 cd /e/inkstone
-./.venv/Scripts/python.exe -m pytest tests -q          # 944 个必须全绿
+./.venv/Scripts/python.exe -m pytest tests -q          # 974 个必须全绿
 ./.venv/Scripts/python.exe -m ruff check src tests examples benchmarks
 ./.venv/Scripts/python.exe -m ruff format --check src tests examples benchmarks
 ./.venv/Scripts/python.exe -m mypy                     # strict，零错误
@@ -194,7 +205,7 @@ cd /e/inkstone
 ## 八、开工姿势（建议）
 
 1. 读 `AGENT.md`（**重点看 ADR 表**）→ `ROADMAP.md` → 本文档
-2. 跑一遍验证命令确认起点全绿（944 passed / mypy 干净 / 覆盖 89.8%）
+2. 跑一遍验证命令确认起点全绿（974 passed / mypy 干净 / 覆盖 90.0%）
 3. 跑一次 `python examples/notes.py` —— 看当前最完整的界面长什么样
 4. 按第三节顺序推进：**①GL 后端子包（docs/22）** → ②文本编辑 → ③macOS/Linux
    真机字体验证 → ④三平台 SDL2 验证

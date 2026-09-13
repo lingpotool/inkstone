@@ -56,9 +56,17 @@ from .display_list import (
     StrokeRectOp,
     TextRunOp,
 )
-from .glyphs import BuiltinGlyphProvider, GlyphMask, GlyphProvider, rect_of_mask
+from .glyphs import (
+    BuiltinGlyphProvider,
+    GlyphMask,
+    GlyphProvider,
+    glyph_mask_plan,
+    rect_of_mask,
+)
 from .paint import DisplayListRecorder
 from .raster.base import FrameBuffer, RasterBackend, RasterError, RasterFrameRenderer
+from .raster.gl_backend import GLRasterBackend
+from .raster.gl_driver import GLDriver
 from .raster.software import SoftwareRasterizer, encode_png
 from .transform import IDENTITY, Affine
 
@@ -77,6 +85,8 @@ __all__ = [
     "DisplayListRecorder",
     "FillRectOp",
     "FrameBuffer",
+    "GLDriver",
+    "GLRasterBackend",
     "GlyphMask",
     "GlyphProvider",
     "Op",
@@ -92,5 +102,6 @@ __all__ = [
     "StrokeRectOp",
     "TextRunOp",
     "encode_png",
+    "glyph_mask_plan",
     "rect_of_mask",
 ]
