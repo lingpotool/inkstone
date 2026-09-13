@@ -39,7 +39,7 @@ Phase 1 · 地基。真实代码覆盖布局、组件树、样式、渲染、**�
 | `examples/notes.py` | ✅ **样板 App「墨记」**：侧栏 + 滚动列表 + 表单 + 明暗主题切换；headless 出黄金图、`--sdl2` 真窗口交互，进 CI 冒烟 |
 | 其余模块（gfx GL+Skia / events 其余 / primitives / app …） | ⬜ 占位桩 |
 
-1089 个无头单测全绿，**黄金图像素级比对**也跑通（12 张基线）。
+1105 个无头单测全绿，**黄金图像素级比对**也跑通（12 张基线）。
 **地基整改 R1（正确性止血，docs/15）、R2（测试求真，docs/16）、
 R3（渲染协议重塑，docs/17）、R4（跨平台文本栈，docs/18）、
 R5（事件与 IME，docs/19）、R6（主题传播与依赖追踪，docs/20）已完成**：
@@ -79,19 +79,23 @@ R7.5 性能基准已完成（`benchmarks/run.py` 三场景出 p50/p95，规则�
 GL 子包 R8.1（驱动接缝 + 后端逻辑层）、R8.2（Windows WGL 真机驱动）、
 R8.3（热路径缓存 + 矩形合批 + 字形图集 + 帧去重）、
 R8.4（显示列表状态指令 + 滚动 repaint boundary + GL 层缓存）已完成，
-测试 → 1089 全绿（覆盖率 90.11%）。**R7.5 验收达成：GL p95 全屏 4.4ms /
+测试 → 1105 全绿（覆盖率 90.08%）。**R7.5 验收达成：GL p95 全屏 4.4ms /
 文本 8.6ms / 滚动 1.0ms，三场景全部 ≤10ms**（软件为事实源，未变）。
 R8.5 SDL2 走声明式可选依赖、R8.6 真窗口 GL 上屏完成（SDL 上下文 + FBO blit +
 换链，Windows 真机验证）。R9 焦点系统 + 文本编辑落地（ADR 无新增，见
 `events/focus.py` 与 `widgets/form.py`）；R10 窗口身份与能力落地（ADR-0022）：
 原生边框 + 平台化外观（AppUserModelID / DWM 标题栏配色 / 程序化图标 / 最小尺寸），
 应用外壳 `inkstone.app` 与 `examples/notes.py --sdl2` 已接线。
-剩余：Linux/macOS GL 驱动、路径三角化、通用脏矩形、应用外壳脏区调度、
-窗口位置尺寸记忆、macOS NSWindow appearance。
+R11 修掉 DPI 感知/坐标口径/原生 IME 候选窗/小字发虚四项真机问题（ADR-0023、0024）；
+**R12 收口 Phase 1（Windows）**：滚轮滚动（此前全库没人读 wheel 事件）、
+文本帧时间 p95 8.6→1.6ms、真机验收清单（HANDOFF）。
+剩余（Phase 2 / 跨平台工作流）：滚动条·虚拟滚动·锚点保持、Linux/macOS GL 驱动与
+真机字体、路径三角化、通用脏矩形、应用外壳脏区调度、窗口位置尺寸记忆、
+macOS NSWindow appearance。
 
-**R7 整包 + Phase 1 的"交互闭环"已闭合**（能点、能滚、能打字、能切主题、
-能缩放、真窗口观感专业）。Phase 1 剩余 DoD：macOS/Linux 真机字体验证、
-三平台 SDL2 交互验证、文本场景 p95 进 8ms。
+**Phase 1（地基）在 Windows 上 100% 达成**（能点、能滚、能打字、能切主题、
+能缩放、真窗口观感专业；6 项 DoD 全绿）。macOS/Linux 的适配独立成工作流
+（ADR-0025）——CI 三平台单元测试矩阵继续跑，被推迟的是**真机交互验证**。
 **GL 后端子包（docs/22）进行中**：R8.1 驱动接缝 + 逻辑层、R8.2 Windows WGL
 真机驱动、R8.3 热路径 + 合批 + 图集 + 帧去重、R8.4 状态指令 + 层缓存已完成，
 三场景 p95 ≤ 10ms。R8.5 把 SDL2 二进制改成**声明式可选依赖**
@@ -424,6 +428,8 @@ Phase 1 其余 DoD（文本编辑模型、macOS/Linux 真机字体验证、三�
 
 
 | ADR-0024 | **放行原生 IME 界面（`SDL_IME_SHOW_UI=1`），中文输入以系统输入法的候选窗为准** | 用户实测：中文能上屏，但**搜狗输入法的预选/候选窗不出现**，无法选字。查 SDL 源码（`SDL_windowskeyboard.c`）：SDL 默认走 "UI-less" 模式——`IME_Init` 里 `UILess_SetupSinks` + `WM_IME_SETCONTEXT` 把 `*lParam = 0`，即**主动关掉 IME 自己的窗口**，要求应用自绘组合串。微软拼音自带独立候选窗所以看不出问题，搜狗/QQ/百度把预选界面画在 IME 窗口里 → 什么都不显示。修法：初始化时设 `SDL_IME_SHOW_UI=1`（必须在第一次 `start_text_input` 之前，`IME_Init` 只读一次），SDL 保留系统 IME UI。我们仍自绘组合串与下划线（与 Chromium 一致：行内组合 + 系统候选窗并存）。**"能上屏"不等于"能输入"——中文输入的可验收标准是候选窗能出来、能选字** |
+
+| ADR-0025 | **Windows 优先：跨平台适配独立成工作流，不阻塞 Phase 1 收口** | 用户拍板：先把 Windows 端做透（"地基先完成百分百"），macOS/Linux 等 Windows 完整后再单独做适配。理由：三平台同时推进会让每个功能都要在三个真机上验一遍，而当前只有 Windows 有可验证环境——"未验证"会被迫在文档里写成"已完成"，那是最坏的结果。落地纪律：**文档必须如实分栏**——ROADMAP 的「样板 App 三平台可用」拆成「Windows 可用 ✅（真机验收清单见 HANDOFF）」+「macOS/Linux 待适配 ⬜」；`Backend` 协议与分层不变（跨平台适配仍只是"换一个后端实现"）；Windows 专有代码继续收在 `backend/windows_shell.py`，非 Windows 一律安全空操作。**CI 的三平台单元测试矩阵保留**（那是 headless 成本，必须继续绿）——被推迟的只是"真机交互验证"，不是"跨平台可运行性" |
 
 ## 已知待办
 

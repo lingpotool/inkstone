@@ -2,7 +2,7 @@
 
 > 写给下一个接手的对话。读完这份 + `AGENT.md` + `ROADMAP.md`，就能直接开工。
 > 交接时间：**2026-09-13** · 地基整改 R1–R6 + 收官包 R7 + GL 子包 R8 + R9–R11 **全部完成** ·
-> 无头单测 **1089 个全绿**（覆盖率 90.11%）· 黄金图 12 张像素级比对
+> 无头单测 **1105 个全绿**（覆盖率 90.08%）· 黄金图 12 张像素级比对
 >
 > **当前主线**：**GL 后端子包（`docs/22`）已完成**——R7.5 的性能基准触发了预先写死的
 > 决策规则（三场景 p95 超 10ms 预算 40–300 倍）。R8.1 接缝+逻辑层、R8.2
@@ -10,7 +10,8 @@
 > 滚动 repaint boundary + GL 层缓存、R8.5 SDL2 可选依赖、R8.6 真窗口上屏均已完成。
 > **R7.5 验收达成**：本机 RTX 3060 / GL 4.6 实测 p95 全屏 **4.4ms** /
 > 文本 **8.6ms** / 滚动 **1.0ms**，三场景全部 ≤10ms（软件光栅仍是黄金图
-> 的确定性事实源，未变）。
+> 的确定性事实源，未变）。**R12.2 后进一步降到 p95 全屏 ~2.2 /
+> 文本 ~1.6 / 滚动 ~0.6ms**（预计算已定位字形，见下）。
 >
 > **R9 焦点/文本编辑 + R10 窗口身份与能力也已完成**（ADR-0022）：原生边框 +
 > 平台化外观（任务栏身份 / 程序化图标 / DWM 标题栏配色 / 最小尺寸），
@@ -83,11 +84,23 @@ cb76c17 feat(core):   R7.3 DPI 缩放接线
 - [x] 100%/125%/150% 缩放（R7.3 + R11）：逻辑像素布局、物理=逻辑×scale、
       文字在物理分辨率重光栅化；150% 黄金图已肉眼核对。R11 修掉"进程 DPI
       不感知导致 Windows 位图拉伸整窗"（125% 屏实测 1:1，不再发虚）。
-- [x] 布局引擎 100% 无窗口可测，覆盖 ≥85%（实测 90.11%）
-- [ ] 样板 App 三平台可用：R7.4 交付 `examples/notes.py`，headless 三平台出图；
-      R10 已接窗口身份/图标/主题跟随；**SDL2 真窗口交互尚未在三平台各验一遍**
-- [ ] 帧时间 p95 < 8ms：GL 后端已落地（docs/22），本机实测滚动 1.0ms /
-      全屏 4.4ms / 文本 8.6ms；**文本场景仍差一点**，优化后再勾
+- [x] 布局引擎 100% 无窗口可测，覆盖 ≥85%（实测 90.08%）
+- [x] **样板 App 在 Windows 上可用**（真机验收清单见下）；macOS/Linux 待适配 ⬜
+- [x] 帧时间 p95 < 8ms（R12.2 后本机实测，p95：滚动 0.5–0.8 / 全屏 1.8–2.6 /
+      文本 1.5–1.8ms；场景定义未动）
+
+### Phase 1 Windows 真机验收清单（R12.3，逐项跑过）
+
+| 项 | 结果 |
+|---|---|
+| 点按钮 / 切筛选（全部·收藏·归档） | ✅ 高亮跟随，列表内容切换 |
+| **鼠标滚轮滚动** | ✅ R12.1 补上；实测滚 5 格内容位移 240 逻辑像素 |
+| 输入框中文输入 + 候选窗 | ✅ 搜狗候选窗出现、空格上屏中文（ADR-0024） |
+| 输入框英文输入 / 选中 / 删除 / 剪贴板 | ✅ R9 编辑模型 |
+| 切主题（含标题栏 DWM 跟随） | ✅ 暗色标题栏随主题变 |
+| 窗口缩放 / 最大化 / 贴靠 | ✅ 最大化到 1920×991 后布局重排，无拉伸无黑边；原生边框保留（snap 可用） |
+| 任务栏身份与图标 | ✅ 已接线（AppUserModelID + 程序化图标）——观感需人眼确认 |
+| 关闭 | ✅ 关窗消息正确处理 |
 
 ---
 
@@ -173,23 +186,46 @@ docs/22 已定范围：**只实现现有显示列表 IR 的指令集**、沿用 
   总是小数），图集 `GL_LINEAR` 把每个字形重采样一遍 → 小字笔画忽粗忽细。
   修法：`draw_glyph` 对齐到整设备像素。打像素放大对比：按钮/正文从"发丝"
   变为实心均匀。更优雅的亚像素相位光栅化列为后续优化。
-- **仍未做**：窗口位置/尺寸记忆（应用外壳层）；Linux GLX/EGL、macOS CGL；
+- **R12.1 滚轮滚动完成**：此前全库没有任何代码读 `wheel_dx/wheel_dy`——滚动
+  只有拖拽一条路，桌面的滚轮主路径整条漏掉（Phase 1 用程序化偏移验证过，
+  漏了真机口径）。修法：走 `handle_pointer_event` 这条非手势输入缝，只在
+  TARGET/BUBBLE 阶段消费（内→外），**偏移没变就不叫停传播**，嵌套滚动因此
+  结构成立；步长进令牌 `gestures["wheel_step"]=48`。
+- **R12.2 文本帧时间达标**：文本场景每帧重建约 2400 个字形对象是热点。
+  `ShapedLine` 构造时预计算已定位字形并缓存，`positioned_glyphs()` 只读。
+  顺带让显示列表去重比较走元组同一性短路。实测文本 p95 7.1–10.7 → 1.5–1.8ms，
+  全屏 4.5–4.9 → 1.8–2.6ms。**12 张黄金图逐字节不变**（零视觉变化）。
+- **仍未做**：窗口位置/尺寸记忆（应用外壳层）；滚动条 / 锚点保持 / 过滚动 /
+  虚拟滚动（Phase 2，`AGENT.md:441`）；Linux GLX/EGL、macOS CGL；
   路径三角化；通用脏矩形损伤跟踪；应用外壳脏区调度；macOS 的 NSWindow
   appearance 接线（`windows_shell` 目前只有 Win32 实现，其他平台是安全空操作）。
 - Linux GLX/EGL、macOS CGL 驱动照 `GLDriver` 协议补（Windows 已通过 WGL +
   SDL 上下文两条路验证）；跨平台窗口获取见 ADR-0020。
 
-### ③ macOS / Linux 真机字体验证
+### ③ Phase 1 已收口（Windows）→ 下一步是 Phase 2
 
-R4 已用**同一套 HB+FT**取代三平台原生引擎，所以不是"再写两份引擎"，而是：
-在 macOS / Linux 真机上验证系统字体目录扫描、回退链命中、内嵌兜底字体接管
-（零系统字体时中文不出豆腐块）。接口（`MetricsProvider` + `GlyphProvider`）固定。
+Phase 1 的 6 项 DoD 在 Windows 上全部达成（验收清单见第二节）。下一段主线按
+ROADMAP 走 Phase 2「可用」，建议顺序：
 
-### ④ 三平台 SDL2 交互验证
+1. **滚动条 + 锚点保持 + 虚拟滚动**（`AGENT.md:441` 划归 Phase 2）——滚轮已经
+   能用，但**没有任何视觉反馈**，用户不知道这区域能滚，这是当前最刺眼的 UX 缺口；
+2. **primitives**（portal / overlay_manager / focus_trap / popper / dismissible /
+   presence / scroll_lock）——弹层与菜单的地基；
+3. 反馈组件（Dialog / Toast / Tooltip / ContextMenu）→ 表单全家桶 → 数据展示
+   （List / Tree / Table）。
 
-R7.1–R7.3 的事件/手势/DPI 链路在 headless 下都有确定性测试，
-但 `--sdl2` 真窗口路径需要在 Windows / macOS / Linux 各跑一遍
-（点击、滚动、切主题、拖到不同 DPI 的屏幕）。
+### ④ 跨平台工作流（独立，Windows 完成后做）
+
+ADR-0025 拍板：macOS/Linux 适配独立成工作流，不阻塞 Windows 开发。
+
+- R4 已用**同一套 HB+FT**取代三平台原生引擎，所以不是"再写两份引擎"，而是在
+  真机上验证系统字体目录扫描、回退链命中、内嵌兜底字体接管（零系统字体时中文
+  不出豆腐块）。接口（`MetricsProvider` + `GlyphProvider`）固定。
+- GL 驱动照 `GLDriver` 协议补 Linux GLX/EGL 与 macOS CGL（Windows 已通过 WGL +
+  SDL 上下文两条路验证）。
+- 逐项复跑 Windows 那份真机验收清单（点击、滚轮、中文候选窗、缩放、DPI 迁移）。
+- 平台专有外观（DWM 那套）要各写一份：macOS NSWindow appearance、Linux 走 GTK
+  设置或自绘标题栏；`windows_shell` 已有"非 Windows 安全空操作"的形状可照搬。
 
 ---
 
@@ -197,12 +233,12 @@ R7.1–R7.3 的事件/手势/DPI 链路在 headless 下都有确定性测试，
 
 ```bash
 cd /e/inkstone
-./.venv/Scripts/python.exe -m pytest tests -q          # 1089 个必须全绿
+./.venv/Scripts/python.exe -m pytest tests -q          # 1105 个必须全绿
 ./.venv/Scripts/python.exe -m ruff check src tests examples benchmarks
 ./.venv/Scripts/python.exe -m ruff format --check src tests examples benchmarks
 ./.venv/Scripts/python.exe -m mypy                     # strict，零错误
 ./.venv/Scripts/python.exe -m pytest tests -q -m "not slow" \
-    --cov=src/inkstone --cov-fail-under=85             # 覆盖率（90.11%）
+    --cov=src/inkstone --cov-fail-under=85             # 覆盖率（90.08%）
 # 或一把梭：make check
 ```
 
@@ -270,18 +306,18 @@ cd /e/inkstone
 ## 八、开工姿势（建议）
 
 1. 读 `AGENT.md`（**重点看 ADR 表**）→ `ROADMAP.md` → 本文档
-2. 跑一遍验证命令确认起点全绿（1089 passed / mypy 干净 / 覆盖 90.11%）
+2. 跑一遍验证命令确认起点全绿（1105 passed / mypy 干净 / 覆盖 90.08%）
 3. 跑一次 `python examples/notes.py` —— 看当前最完整的界面长什么样；
    `--sdl2` 看真窗口（图标 / 标题栏配色 / snap）。
-4. 按第三节顺序推进：①GL 子包、②窗口身份与能力 **均已完成** →
-   ③macOS/Linux 真机字体验证 → ④三平台 SDL2 验证；再往后是
-   窗口位置尺寸记忆、路径三角化、通用脏矩形、应用外壳脏区调度
+4. 按第三节顺序推进：①②（GL 子包、焦点编辑、窗口身份）**均已完成**，
+   Phase 1 在 Windows 上收口 → 下一段是 ③Phase 2（先做滚动条与虚拟滚动），
+   ④跨平台工作流等到 Windows 做透之后（ADR-0025）
 5. 每完成一块：全量检查全绿 → commit（中文说明为什么）→ push
 
 地基是结实的：三棵树、令牌、跨平台文本栈、确定性渲染、事件/手势/DPI 闭环、
-无头测试链路、CI 全通。界面已经**能点、能滚、能切主题、能缩放**；
-剩下的是"把字真正打进去"（编辑模型）、"把帧率做上去"（GL）、
-以及"在真机上验一遍"。
+无头测试链路、CI 全通。界面**能点、能滚、能打字（含中文候选窗）、能切主题、
+能缩放**，帧时间 p95 已进 8ms——Phase 1 的 DoD 在 Windows 上全部达成。
+下一步是"把它变成能拿去做产品的东西"：组件面（Phase 2）与跨平台适配。
 
 ---
 
