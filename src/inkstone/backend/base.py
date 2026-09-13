@@ -336,6 +336,13 @@ class Backend(Protocol):
     def dpi_scale(self, window_id: int) -> float:
         """该窗口的 DPI 缩放（1.0 / 1.25 / 1.5 …）。"""
 
+    def window_size(self, window_id: int) -> tuple[float, float]:
+        """窗口客户区的**逻辑**尺寸——上层据此定视口，不必知道缩放档位。
+
+        必须有这个方法，而不是让应用去读 `SDL_GetWindowSize`：真平台给的是
+        物理像素，逻辑换算（除以 DPI 缩放）属于后端职责（ADR-0015）。
+        """
+
     def set_cursor(self, window_id: int, cursor: Cursor) -> None:
         """设置光标形状。"""
 

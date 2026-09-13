@@ -20,6 +20,8 @@ from inkstone.backend.base import WindowSpec
 from inkstone.backend.windows_shell import (
     apply_app_user_model_id,
     apply_caption_theme,
+    dpi_awareness,
+    ensure_per_monitor_awareness,
     is_supported,
 )
 
@@ -101,6 +103,35 @@ class TestHeadlessWindowCapabilities:
         backend.set_window_theme(window, dark=True, background=0x101010)
         assert backend.window_theme(window) == (True, 0x101010)
 
+    def test_window_size_is_the_logical_spec(self, backend: HeadlessBackend, window: int) -> None:
+        """视口尺寸是**逻辑**像素——应用外壳据此布局，不碰物理像素。"""
+        assert backend.window_size(window) == (320.0, 200.0)
+        backend.resize_window(window, 500.0, 400.0)
+        assert backend.window_size(window) == (500.0, 400.0)
+
+
+class TestDpiAwareness:
+    """R11.1：进程必须是 DPI 感知的，否则 Windows 会把整窗位图拉伸（界面发虚）。"""
+
+    def test_awareness_probe_is_safe_everywhere(self) -> None:
+        awareness = dpi_awareness()
+        assert awareness in (0, 1, 2)
+        if not is_supported():
+            assert awareness == 2, "非 Windows 平台没有'不感知'这回事"
+
+    def test_ensure_is_idempotent_and_reports_success(self) -> None:
+        # 首次调用会真的设置；再次调用必须直接返回 True 而不重复设置。
+        assert ensure_per_monitor_awareness() is True
+        assert ensure_per_monitor_awareness() is True
+
+    @pytest.mark.skipif(
+        sys.platform != "win32", reason="DPI 虚拟化是 Windows 的行为（macOS/Linux 恒为感知）"
+    )
+    def test_process_becomes_per_monitor_after_ensure(self) -> None:
+        """在任何窗口创建之前就该是 per-monitor 感知的——"渲染像素不被拉伸"的前提。"""
+        assert ensure_per_monitor_awareness() is True
+        assert dpi_awareness() == 2
+
 
 class TestWindowsShellIsSafeEverywhere:
     """平台外观函数的契约：返回 bool，永不抛。"""
@@ -162,6 +193,21 @@ class TestSDL2WindowCapabilities:
             backend.set_maximized(window, True)
             backend.set_maximized(window, False)
             backend.pump_events()  # 最大化会产出 RESIZED，泵一下不崩
+        finally:
+            backend.destroy_window(window)
+
+    def test_window_opens_at_the_requested_logical_size(self, backend) -> None:
+        """125% 屏上要 400×300 逻辑像素，拿到的就该是 400×300（×1.25 物理）。
+
+        这条防两个退化：忘了把逻辑换算成物理（窗口小一圈），
+        或忘了把物理换算回逻辑（布局按 1.25 倍算，右下角被切掉）。
+        """
+        window = backend.create_window(WindowSpec(title="size", width=400, height=300))
+        try:
+            width, height = backend.window_size(window)
+            assert abs(width - 400.0) <= 1.0
+            assert abs(height - 300.0) <= 1.0
+            assert backend.dpi_scale(window) > 0.0
         finally:
             backend.destroy_window(window)
 

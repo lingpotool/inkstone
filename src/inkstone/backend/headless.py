@@ -206,6 +206,12 @@ class HeadlessBackend:
         self._require_window(window_id)
         return self._dpi_scales[window_id]
 
+    def window_size(self, window_id: int) -> tuple[float, float]:
+        """客户区逻辑尺寸 = 创建/缩放时的规格（无头后端没有物理像素的概念）。"""
+        self._require_window(window_id)
+        spec = self._windows[window_id]
+        return (spec.width, spec.height)
+
     def set_dpi_scale(self, window_id: int, value: float) -> None:
         """改某个窗口的 DPI 并给它发事件——用来测 125% / 150% 缩放。
 

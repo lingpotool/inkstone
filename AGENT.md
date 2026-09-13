@@ -79,7 +79,7 @@ R7.5 性能基准已完成（`benchmarks/run.py` 三场景出 p50/p95，规则�
 GL 子包 R8.1（驱动接缝 + 后端逻辑层）、R8.2（Windows WGL 真机驱动）、
 R8.3（热路径缓存 + 矩形合批 + 字形图集 + 帧去重）、
 R8.4（显示列表状态指令 + 滚动 repaint boundary + GL 层缓存）已完成，
-测试 → 1089 全绿（覆盖率 90.15%）。**R7.5 验收达成：GL p95 全屏 4.4ms /
+测试 → 1089 全绿（覆盖率 90.11%）。**R7.5 验收达成：GL p95 全屏 4.4ms /
 文本 8.6ms / 滚动 1.0ms，三场景全部 ≤10ms**（软件为事实源，未变）。
 R8.5 SDL2 走声明式可选依赖、R8.6 真窗口 GL 上屏完成（SDL 上下文 + FBO blit +
 换链，Windows 真机验证）。R9 焦点系统 + 文本编辑落地（ADR 无新增，见
@@ -419,6 +419,9 @@ Phase 1 其余 DoD（文本编辑模型、macOS/Linux 真机字体验证、三�
 | ADR-0020 | **SDL2 二进制走"声明式可选依赖"，不在仓库放二进制；`load_sdl2` 三层优先级** | 平台窗口后端（ADR-0001）需要各平台 SDL2 二进制。专业做法不是往仓库/源码树塞 DLL，而是可选 extra `inkstone[sdl2] = pysdl2 + pysdl2-dll`：`pysdl2-dll` 发布 Windows/macOS/Linux 预编译 wheel（≈4MB，含 SDL2.dll ≈1.5MB），`pysdl2` 按平台定位；我们的 backend 仍 ctypes 直调，只借它"找到库"。加载优先级：`INKSTONE_SDL2` 环境变量（打包/私有部署）> 可选依赖 > 系统库（winget/brew/apt），全失败抛带三条修复指引的 `BackendError`。**核心包保持零依赖**——SDL2 只在开真窗口时需要，测试/CI/黄金图/基准全走无头后端 |
 | ADR-0021 | **真窗口 GL 上屏：上下文归 SDL，GL 只借；离屏 FBO 是唯一绘制目标，`end()` 时 blit 上屏** | 自建窗口（WGL 隐藏窗口）解决不了"显示到窗口"：GL 资源与上下文绑定，纹理跨上下文不可用。做法是 `WindowSpec(opengl=True)` 让 SDL 用 OPENGL 标志建窗，`sdl_gl_driver(backend, window)` 在其上下文上装配同一套驱动（`SDL_GL_CreateContext` + `SDL_GL_GetProcAddress` + `SwapWindow`，`close()` 只解除不销毁）。绘制**始终进离屏 FBO**（层缓存/读回/尺寸口径都建立在它上面），`end()` 把 FBO 纹理 blit 到默认帧缓冲再换链——"窗口"与"离屏"画出来的是同一张图。配套坑：挂载模式下 `begin()` **不得**无条件 `wglMakeCurrent(0,0)`，那会把 SDL 的上下文解绑，之后所有 GL 调用静默失败（实测 FBO 完整性校验返回 0） |
 | ADR-0022 | **保留原生窗口边框，只做平台化外观（图标 / AppUserModelID / DWM 标题栏配色），不自绘标题栏** | Win11 的 Snap Layouts、贴靠、最大化动画、无障碍与高对比主题都是 DWM 提供的能力；自绘标题栏（Chrome / VS Code 路线）要自己实现 hit-test 与 snap，且必然丢掉系统能力。Flutter / Electron 的默认路线是原生边框 + 平台化外观，我们照做：`Backend` 协议加 `set_app_identity`（任务栏身份，须在建窗前设）/ `set_title` / `set_min_size` / `set_maximized` / `set_fullscreen` / `set_window_theme` / `set_icon`；Windows 细节收在 `backend/windows_shell.py`（`SetCurrentProcessExplicitAppUserModelID` + `DwmSetWindowAttribute`，非 Windows 一律安全空操作返回 False）。**图标不进仓库**：`inkstone.app.app_icon_rgba` 用自家显示列表 + 软件光栅画图标（圆角方石 + 环形砚池 + 墨点），同一份代码逐字节确定，`tools/build_icon.py` 只在打包时导出 .ico。配套坑：`SDL_SysWMinfo` 是"版本 + 子系统 + union"，SDL 会**整段写入**，按"只声明 HWND"定义结构会栈越界（实测 DWM 调用处 access violation）——必须照实声明并留余量；窗口 resize 后视口尺寸跟 `WINDOWEVENT_RESIZED` 走 |
+
+| ADR-0023 | **进程必须声明 per-monitor-v2 DPI 感知；逻辑像素是唯一对外口径，换算全部收在后端** | 症状：125% 屏上整个界面发虚，不如 Electron 清晰。根因不是光栅器或抗锯齿——**进程 DPI 不感知**时 Windows 把整窗位图拉伸 1.25×（实测：物理 1920×1080 的屏，进程只看到 1536×864 的虚拟桌面），我们渲染的 760×520 被系统放大成 950×650。修法：`SDL_Init` 之前调 `windows_shell.ensure_per_monitor_awareness()`（`SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`，老系统退回 shcore），并设 SDL 的 `SDL_WINDOWS_DPI_AWARENESS=permonitorv2` / `SDL_WINDOWS_DPI_SCALING=0`（自己缩，不要 SDL 再缩一遍）。配套口径：`Backend.window_size()` 返回**逻辑**尺寸给应用外壳；`create_window`(规范尺寸→物理)/`set_min_size`/`set_ime_rect`(候选框跟随光标) 在 Windows 上乘缩放，macOS/X11 的 SDL 坐标本就是逻辑单位（`_window_unit_scale` 收口）。**Electron 的精致感来自这一条声明，不是它的绘制 API 更高级** |
+
 
 ## 已知待办
 

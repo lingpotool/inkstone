@@ -77,7 +77,7 @@ def _seed_notes() -> list[Note]:
         ),
         Note(
             "待办",
-            "文本编辑（可输入、可删除、光标位置）属 Phase 2；当前的输入框可聚焦并上报 IME 位置。",
+            "搜索框可聚焦、可键入、可选中删除；中文输入法直接可用，Tab 在控件间移动焦点。",
         ),
         Note("确定性", "同样的组件树在任何机器上产出同样的显示列表——黄金图与 CI 都建立在这上面。"),
     ]
@@ -210,7 +210,7 @@ class NotesAppState(State[NotesApp]):
                         gap=8.0,
                         children=(
                             Flexible(
-                                Input(placeholder="搜索或新建笔记标题（编辑属 Phase 2）"),
+                                Input(placeholder="搜索笔记标题（试试中文输入法）"),
                                 flex=1,
                             ),
                             Button("新建", on_tap=self._add_note),
@@ -383,8 +383,6 @@ def run_window(*, dark: bool, deterministic: bool) -> int:
     owner.clipboard_get = backend.clipboard_get_text
     owner.clipboard_set = backend.clipboard_set_text
 
-    # 视口尺寸跟着窗口走（R10）：原生边框可拖拽/贴靠/最大化，布局自适应当前尺寸。
-    viewport = [WIDTH, HEIGHT]
     running = True
     while running:
         for event in backend.wait_events(16.0):
@@ -398,14 +396,14 @@ def run_window(*, dark: bool, deterministic: bool) -> int:
                 owner.dispatch_ime(event)
             elif isinstance(event, WindowEvent):
                 owner.handle_window_event(event)
-                if event.kind is WindowKind.RESIZED:
-                    viewport[0] = max(1.0, event.width)
-                    viewport[1] = max(1.0, event.height)
-                elif event.kind is WindowKind.CLOSE:
+                if event.kind is WindowKind.CLOSE:
                     running = False
 
+        # 视口尺寸问后端要**逻辑**像素（R11）：缩放换算在后端，
+        # 原生边框可拖拽/贴靠/最大化，布局自适应当前尺寸。
         scale = backend.dpi_scale(window)
-        logical_w, logical_h = viewport
+        logical_w, logical_h = backend.window_size(window)
+        logical_w, logical_h = max(1.0, logical_w), max(1.0, logical_h)
         width = math.ceil(logical_w * scale)
         height = math.ceil(logical_h * scale)
         bg = (Theme.dark() if dark_now[0] else Theme.light()).color("bg")

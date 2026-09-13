@@ -14,15 +14,85 @@ from __future__ import annotations
 import ctypes
 import sys
 
-__all__ = ["apply_app_user_model_id", "apply_caption_theme", "is_supported"]
+__all__ = [
+    "apply_app_user_model_id",
+    "apply_caption_theme",
+    "dpi_awareness",
+    "ensure_per_monitor_awareness",
+    "is_supported",
+]
 
 #: DwmSetWindowAttribute 的属性号（Windows 11 SDK）
 _DWMWA_USE_IMMERSIVE_DARK_MODE = 20
 _DWMWA_CAPTION_COLOR = 35
 
+#: DPI_AWARENESS 枚举（GetAwarenessFromDpiAwarenessContext）
+_DPI_AWARENESS_UNAWARE = 0
+_DPI_AWARENESS_SYSTEM = 1
+_DPI_AWARENESS_PER_MONITOR = 2
+
+#: DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2（伪句柄 -4）
+_PER_MONITOR_AWARE_V2 = -4
+
 
 def is_supported() -> bool:
     return sys.platform == "win32"
+
+
+def dpi_awareness() -> int:
+    """当前进程的 DPI 感知级别：0=unaware / 1=system / 2=per-monitor。
+
+    非 Windows 返回 2（"感知，不需要特殊处理"）。
+
+    为什么需要这个探针：**感知级别决定我们渲染的像素算不算数**。进程若是
+    unaware，Windows 会把整个窗口按显示器缩放位图拉伸——渲染得再清晰，
+    用户看到的也是糊的（这正是本项目实测到的"界面整体发虚"根因）。
+    """
+    if not is_supported():
+        return _DPI_AWARENESS_PER_MONITOR
+    try:
+        user32 = ctypes.WinDLL("user32")
+        user32.GetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+        user32.GetAwarenessFromDpiAwarenessContext.restype = ctypes.c_int
+        user32.GetAwarenessFromDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+        return int(
+            user32.GetAwarenessFromDpiAwarenessContext(user32.GetThreadDpiAwarenessContext())
+        )
+    except (OSError, AttributeError):  # pragma: no cover - 老系统
+        return _DPI_AWARENESS_UNAWARE
+
+
+def ensure_per_monitor_awareness() -> bool:
+    """把进程声明为 per-monitor-v2 DPI 感知。返回最终是否"感知"。
+
+    **必须在创建任何窗口之前调用**（SDL_Init 会建隐藏辅助窗口）。声明之后
+    坐标不再被系统虚拟化：显示器 125% 就是 125% 的物理像素，我们按真实
+    分辨率渲染，文字与圆角都是原生清晰的——Electron / Flutter 的观感来源
+    正是这一条，而不是它们的绘制 API 更高级。
+
+    已有感知声明（清单/别处设过）时直接返回 True，不重复设置；老系统
+    （Win10 1703 之前）没有这个 API，退回 shcore 的 `SetProcessDpiAwareness`。
+    """
+    if not is_supported():
+        return True
+    if dpi_awareness() != _DPI_AWARENESS_UNAWARE:
+        return True
+    try:
+        user32 = ctypes.WinDLL("user32")
+        set_context = user32.SetProcessDpiAwarenessContext
+        set_context.argtypes = [ctypes.c_void_p]
+        set_context.restype = ctypes.c_int
+        if set_context(ctypes.c_void_p(_PER_MONITOR_AWARE_V2)):
+            return True
+    except (OSError, AttributeError):  # pragma: no cover - 老系统
+        pass
+    try:  # pragma: no cover - 只在 Win10 1703 之前走到
+        shcore = ctypes.WinDLL("shcore")
+        shcore.SetProcessDpiAwareness.argtypes = [ctypes.c_int]
+        shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+        return True
+    except (OSError, AttributeError):
+        return dpi_awareness() != _DPI_AWARENESS_UNAWARE
 
 
 def apply_app_user_model_id(app_id: str) -> bool:

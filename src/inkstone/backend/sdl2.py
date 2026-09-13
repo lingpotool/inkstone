@@ -597,8 +597,12 @@ class SDL2Backend:
         self._lib.SDL_SetWindowTitle(self._handle(window_id), title.encode("utf-8"))
 
     def set_min_size(self, window_id: int, width: float, height: float) -> None:
+        """最小尺寸按**逻辑像素**收，转成窗口坐标单位交给系统（见 window_size）。"""
         self._require_initialized()
-        self._lib.SDL_SetWindowMinimumSize(self._handle(window_id), int(width), int(height))
+        scale = self._window_unit_scale(window_id)
+        self._lib.SDL_SetWindowMinimumSize(
+            self._handle(window_id), max(1, round(width * scale)), max(1, round(height * scale))
+        )
 
     def set_icon(self, window_id: int, width: int, height: int, rgba: bytes) -> None:
         """把应用外壳画好的 RGBA 交给 SDL（`SDL_SetWindowIcon` 会拷贝）。
@@ -675,6 +679,17 @@ class SDL2Backend:
             return
         self._lib = load_sdl2()
         self._bind_signatures()
+        # DPI 感知必须在**任何窗口之前**声明（SDL_Init 会建隐藏辅助窗口）。
+        # 顺序：先 Win32 声明（老系统上的兜底也在里面），再告诉 SDL 一声，
+        # 让它的坐标换算与我们的感知级别一致。不声明的话 Windows 会把整窗
+        # 按显示器缩放位图拉伸——渲染得再清晰，用户看到的也是糊的（R11.1）。
+        if sys.platform == "win32":
+            from . import windows_shell
+
+            windows_shell.ensure_per_monitor_awareness()
+            self._lib.SDL_SetHint(b"SDL_WINDOWS_DPI_AWARENESS", b"permonitorv2")
+            # 我们自己按 dpi_scale 缩放坐标（ADR-0015），不要 SDL 再缩一遍。
+            self._lib.SDL_SetHint(b"SDL_WINDOWS_DPI_SCALING", b"0")
         if self._lib.SDL_Init(_SDL_INIT_VIDEO) != 0:
             raise BackendError(f"SDL_Init 失败：{self._last_error()}")
         self._initialized = True
@@ -698,6 +713,8 @@ class SDL2Backend:
         lib.SDL_GetWindowID.restype = c.c_uint32
         lib.SDL_GetWindowID.argtypes = [c.c_void_p]
         lib.SDL_GetWindowSize.argtypes = [c.c_void_p, p(c.c_int), p(c.c_int)]
+        lib.SDL_SetHint.restype = c.c_int
+        lib.SDL_SetHint.argtypes = [c.c_char_p, c.c_char_p]
         # 窗口能力（R10）
         lib.SDL_SetWindowTitle.argtypes = [c.c_void_p, c.c_char_p]
         lib.SDL_SetWindowMinimumSize.argtypes = [c.c_void_p, c.c_int, c.c_int]
@@ -799,12 +816,15 @@ class SDL2Backend:
             ):
                 self._lib.SDL_GL_SetAttribute(attribute, value)
             flags |= _SDL_WINDOW_OPENGL
+        # 规范里的尺寸是**逻辑像素**；Windows 上要换成物理像素，
+        # 否则 125% 屏上开出来的窗口会小一圈（其他平台本就是逻辑单位）。
+        scale = self._window_unit_scale(None)
         handle = self._lib.SDL_CreateWindow(
             spec.title.encode("utf-8"),
             _SDL_WINDOWPOS_CENTERED,
             _SDL_WINDOWPOS_CENTERED,
-            int(spec.width),
-            int(spec.height),
+            max(1, round(spec.width * scale)),
+            max(1, round(spec.height * scale)),
             flags,
         )
         if not handle:
@@ -965,16 +985,50 @@ class SDL2Backend:
         if getter is not None:
             return float(getter(handle))
         # SDL < 2.24 的兜底：查窗口所在显示器的 DPI 估算（R5.10）
-        display_dpi = getattr(self._lib, "SDL_GetDisplayDPI", None)
         display_index = getattr(self._lib, "SDL_GetWindowDisplayIndex", None)
-        if display_dpi is not None and display_index is not None:
-            ddpi = ctypes.c_float(0.0)
-            if (
-                display_dpi(display_index(handle), ctypes.byref(ddpi), None, None) == 0
-                and ddpi.value > 0
-            ):
-                return float(ddpi.value) / 96.0
+        if display_index is not None:
+            return self._display_scale(int(display_index(handle)))
         return 1.0
+
+    def _display_scale(self, display_index: int) -> float:
+        """某块显示器的缩放（1.0 / 1.25 / 1.5 …）。拿不到就按 1.0。
+
+        建窗**之前**也要用（把逻辑尺寸换成物理像素），所以不能依赖窗口句柄。
+        """
+        display_dpi = getattr(self._lib, "SDL_GetDisplayDPI", None)
+        if display_dpi is None:
+            return 1.0
+        ddpi = ctypes.c_float(0.0)
+        if display_dpi(display_index, ctypes.byref(ddpi), None, None) == 0 and ddpi.value > 0:
+            return float(ddpi.value) / 96.0
+        return 1.0
+
+    def _window_unit_scale(self, window_id: int | None = None) -> float:
+        """逻辑像素 → SDL 窗口坐标单位的系数。
+
+        Windows 上感知进程的窗口坐标是**物理像素**，所以要乘/除 DPI 缩放；
+        macOS 的 `SDL_GetWindowSize` 本身就是点（逻辑），X11 上 SDL 不做缩放
+        ——这两处系数是 1.0。把这层差异收在后端内部，上层永远只见逻辑像素
+        （与 ADR-0015 同一条纪律：平台口径不出 L0）。
+        """
+        if sys.platform != "win32":
+            return 1.0
+        if window_id is None:
+            return self._display_scale(0)
+        scale = self.dpi_scale(window_id)
+        return scale if scale > 0.0 else 1.0
+
+    def window_size(self, window_id: int) -> tuple[float, float]:
+        """窗口客户区的**逻辑**尺寸（后端负责物理→逻辑换算）。
+
+        上层（应用外壳）只需要"我能画多大"，不需要知道这台显示器缩放到几倍。
+        """
+        self._require_initialized()
+        handle = self._handle(window_id)
+        width, height = ctypes.c_int(0), ctypes.c_int(0)
+        self._lib.SDL_GetWindowSize(handle, ctypes.byref(width), ctypes.byref(height))
+        scale = self._window_unit_scale(window_id)
+        return (width.value / scale, height.value / scale)
 
     def set_cursor(self, window_id: int, cursor: Cursor) -> None:
         self._require_initialized()
@@ -1027,10 +1081,20 @@ class SDL2Backend:
         self._lib.SDL_StopTextInput()
 
     def set_ime_rect(self, window_id: int, rect: ImeRect) -> None:
-        """候选框跟随光标。SDL 的 rect 是窗口内坐标，单位与事件坐标一致。"""
+        """候选框跟随光标。`rect` 是**逻辑像素**（与布局同一口径）。
+
+        Windows 上要换成物理像素——不换算的话 125% 屏上候选框会偏到光标
+        左上方，用户会以为"输入法坏了"。
+        """
         self._require_initialized()
         self._handle(window_id)
-        sdl_rect = _SDLRect(int(rect.x), int(rect.y), int(rect.width), int(rect.height))
+        scale = self._window_unit_scale(window_id)
+        sdl_rect = _SDLRect(
+            round(rect.x * scale),
+            round(rect.y * scale),
+            round(rect.width * scale),
+            round(rect.height * scale),
+        )
         self._lib.SDL_SetTextInputRect(ctypes.byref(sdl_rect))
 
     # ------------------------------------------------------------ 呈现接缝（R5.8）
