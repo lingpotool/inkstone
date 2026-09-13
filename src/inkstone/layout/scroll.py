@@ -18,6 +18,7 @@ docs/05 §6 里有一条很容易做错的规则，Scroll 就是它的全部意�
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -52,14 +53,22 @@ class ScrollbarStyle:
 
     **只有 `can_scroll` 时才画**：内容装得下就不该出现滚动条——那是
     "这里没东西可滚"的诚实表达，也避免给静态页面加视觉噪音。
+
+    `thickness` / `hover_thickness` 是**覆盖层**的两档宽度：悬停/拖拽时变粗
+    （Chromium 的 overlay 条就是这么做的），因为不占布局空间，变粗只影响
+    画出来的样子与命中区域，不会推动内容。
     """
 
     thickness: float
+    hover_thickness: float
     min_thumb: float
     radius: float
     margin: float
     color: Color
     hover_color: Color
+    #: 闲置多久开始淡出、淡出用多久（毫秒）。`prefers-reduced-motion` 时归零。
+    hold_ms: float
+    fade_ms: float
 
 
 class RenderScroll(RenderBox):
@@ -84,6 +93,16 @@ class RenderScroll(RenderBox):
         self._thumb_drag: bool = False
         #: 抓取点相对拇指顶端的距离：拖拽时保持它不变，拇指才不会跳。
         self._thumb_grab: float = 0.0
+        #: 可见度（覆盖层，R14.2）。滚动/悬停/拖拽时亮起，闲置后淡出——
+        #: 这是 Chromium/Flutter 的 overlay 滚动条行为。默认 1.0 是给
+        #: 不驱动动效的裸用场景（没有 tick 就一直是可见的经典外观）。
+        self.opacity: float = 1.0
+        #: 最近一次滚动/拖拽的时刻，闲置计时从它算起。
+        self._last_activity_ms: float = 0.0
+        #: 动画钩子：由元素接到 `BuildOwner.request_frame`（渲染对象拿不到 owner）。
+        self.on_need_frame: Callable[[], None] | None = None
+        #: 最近一次拿到的事件时间——`wake` 需要一个时刻，而 `scroll_to` 不带时间。
+        self._now_ms: float = 0.0
         self._child: RenderBox | None = None
         self._scroll: Offset = Offset(0.0, 0.0)
         self._content_size: Size = Size(0.0, 0.0)
@@ -178,11 +197,24 @@ class RenderScroll(RenderBox):
         else:
             # 未布局：没有视口/内容尺寸可算，交给正常的布局流程
             self.mark_needs_layout()
+        # 偏移真的动了 → 条要亮起来（程序化滚动也算"有人在滚"）
+        self.wake(self._now_ms)
 
     def scroll_by(self, dx: float = 0.0, dy: float = 0.0) -> None:
         self.scroll_to(self._scroll.dx + dx, self._scroll.dy + dy)
 
     # ------------------------------------------------------------ 滚动条
+
+    @property
+    def _bar_active(self) -> bool:
+        """指针在条上/正在拖它——此时用加粗档，并把闲置计时重置。"""
+        return self._thumb_hover or self._thumb_drag
+
+    def bar_thickness(self) -> float:
+        style = self.scrollbar
+        if style is None:
+            return 0.0
+        return style.hover_thickness if self._bar_active else style.thickness
 
     def thumb_rect(self) -> Rect | None:
         """拇指的矩形（视口局部坐标）；不可滚动或不画滚动条时返回 None。
@@ -193,10 +225,13 @@ class RenderScroll(RenderBox):
         - 长度 = 视口 × 视口/内容，再夹到 `min_thumb`（长列表的拇指不能细如发丝）；
         - 位置 = 偏移占可滚动距离的比例 × 剩余轨道长度；
         - 横向滚动条贴底边，纵向贴右边，各留 `margin`。
+
+        **覆盖层**：贴的是视口边缘，不占布局空间（R14.2 起不再让槽位）。
         """
         style = self.scrollbar
         if style is None or not self.can_scroll:
             return None
+        thickness = self.bar_thickness()
         limit = self.max_scroll
         if self.direction is ScrollDirection.HORIZONTAL:
             track = self._size.width
@@ -206,12 +241,7 @@ class RenderScroll(RenderBox):
             length = max(style.min_thumb, track * (track / self._content_size.width))
             length = min(length, track)
             pos = 0.0 if travelled <= 0.0 else (track - length) * (offset / travelled)
-            return Rect(
-                pos,
-                visible - style.thickness - style.margin,
-                length,
-                style.thickness,
-            )
+            return Rect(pos, visible - thickness - style.margin, length, thickness)
         track = self._size.height
         visible = self._size.width
         travelled = limit.dy
@@ -219,7 +249,36 @@ class RenderScroll(RenderBox):
         length = max(style.min_thumb, track * (track / self._content_size.height))
         length = min(length, track)
         pos = 0.0 if travelled <= 0.0 else (track - length) * (offset / travelled)
-        return Rect(visible - style.thickness - style.margin, pos, style.thickness, length)
+        return Rect(visible - thickness - style.margin, pos, thickness, length)
+
+    # ------------------------------------------------------------ 可见度（R14.2）
+
+    @property
+    def last_activity_ms(self) -> float:
+        """最近一次滚动/拖拽的时刻——元素层据此算闲置并启动淡出。"""
+        return self._last_activity_ms
+
+    def request_fade(self) -> None:
+        """请排一帧来推进淡出。
+
+        指针**离开**视口时调它：那一刻不该把条点亮（否则永远不淡出），
+        但必须有人继续推帧，否则闲置到点也没人来开淡出。
+        """
+        if self.on_need_frame is not None:
+            self.on_need_frame()
+
+    def wake(self, now_ms: float) -> None:
+        """有活动：把条亮起来并重置闲置计时。
+
+        滚动、拖拽、指针进入视口都会调它。**必须请求一帧**——否则淡出动画
+        没有帧可推进，条会僵在半透明状态（"动效不动"最常见的成因）。
+        """
+        self._last_activity_ms = now_ms
+        if self.opacity != 1.0:
+            self.opacity = 1.0
+            self.mark_needs_paint()
+        if self.on_need_frame is not None:
+            self.on_need_frame()
 
     def _paint_scrollbar(self, context: object) -> None:
         """把拇指画在**为它让出来的槽位**里（见 ADR-0026）。
@@ -233,7 +292,7 @@ class RenderScroll(RenderBox):
         """
         style = self.scrollbar
         rect = self.thumb_rect()
-        if style is None or rect is None:
+        if style is None or rect is None or self.opacity <= 0.0:
             return
         round_rect = getattr(context, "round_rect", None)
         if not callable(round_rect):
@@ -241,8 +300,9 @@ class RenderScroll(RenderBox):
         save = getattr(context, "save", None)
         translate = getattr(context, "translate", None)
         restore = getattr(context, "restore", None)
-        active = self._thumb_drag or self._thumb_hover
-        color = style.hover_color if active else style.color
+        base = style.hover_color if self._bar_active else style.color
+        # 淡出就是把整体透明度按 opacity 缩放（颜色本身也是半透明的）
+        color = base.with_alpha(base.a * self.opacity)
         if callable(save) and callable(translate) and callable(restore):
             save()
             translate(self._offset.dx, self._offset.dy)
@@ -273,6 +333,7 @@ class RenderScroll(RenderBox):
         if dispatch.phase is DispatchPhase.CAPTURE:
             return
         event = dispatch.event
+        self._now_ms = event.time_ms
         if event.kind is PointerKind.WHEEL:
             dx = -event.wheel_dx * self.wheel_step
             dy = -event.wheel_dy * self.wheel_step
@@ -283,9 +344,19 @@ class RenderScroll(RenderBox):
             before = self._scroll
             self.scroll_by(dx, dy)
             if self._scroll != before:
+                self.wake(event.time_ms)
                 dispatch.stop_propagation()
             return
-        if event.kind in (PointerKind.MOVE, PointerKind.LEAVE, PointerKind.ENTER):
+        if event.kind is PointerKind.LEAVE:
+            self._set_thumb_hover(False)
+            self.request_fade()
+            return
+        if event.kind in (PointerKind.MOVE, PointerKind.ENTER):
+            # 能收到 MOVE 就说明指针在本节点命中链上（= 指针在我们身上或
+            # 子级上）。**指针离开时不会再收到事件**——那件事由元素每帧
+            # 查路由的 hover 链来判断，不能靠这里置位（R14.2 的坑：
+            # 靠事件置位的 pointer_inside 永远不会被清掉，条就不淡出了）。
+            self.wake(event.time_ms)
             self._set_thumb_hover(self.hit_thumb(dispatch.local_x, dispatch.local_y))
 
     # ------------------------------------------------------------ 滚动条状态
@@ -312,6 +383,7 @@ class RenderScroll(RenderBox):
             self._thumb_grab = y - rect.top
         self._thumb_drag = True
         self._set_thumb_hover(True)
+        self.wake(self._now_ms)
         self.mark_needs_paint()
 
     def drag_thumb_to(self, x: float, y: float) -> None:
@@ -352,6 +424,8 @@ class RenderScroll(RenderBox):
         if hovered != self._thumb_hover:
             self._thumb_hover = hovered
             self.mark_needs_paint()
+        if hovered:
+            self.wake(self._now_ms)
 
     # ------------------------------------------------------------ 绘制
 
@@ -477,19 +551,6 @@ class RenderScroll(RenderBox):
         # 这才是"可滚动"的本质——子级想多长就多长，超出的部分由视口裁剪。
         child_constraints = self._child_constraints(inner)
         content = self.layout_child(self._child, child_constraints)
-
-        # 溢出才让出滚动条槽位（`overflow: auto` 的语义），然后**再量一次**。
-        # 为什么必须让位而不是把滚动条画在内容上：覆盖层会挡住条目文字/按钮，
-        # 那是最廉价的做法（实测被用户一眼看穿）。让位后内容永远压在槽位左边，
-        # 与 Win32 经典 / Qt / 浏览器的滚动条是同一种正确。
-        #
-        # 二次布局是**有界**的：只可能发生一次（更窄 ⇒ 内容只会更高，不会反转），
-        # 不是迭代收敛。不溢出时不付这个成本。
-        if self.scrollbar is not None:
-            gutter = self.scrollbar.thickness + self.scrollbar.margin
-            narrowed = self._narrow_for_gutter(inner, gutter)
-            if narrowed is not None and self._main_axis_overflows(content, size):
-                content = self.layout_child(self._child, self._child_constraints(narrowed))
         self._content_size = content
 
         # 约束/内容尺寸可能变了，层缓存必须作废重录
@@ -497,31 +558,6 @@ class RenderScroll(RenderBox):
         self.scroll_to()
         self.place_child(self._child, Offset(-self._scroll.dx, -self._scroll.dy))
         return size
-
-    def _main_axis_overflows(self, content: Size, viewport: Size) -> bool:
-        """主轴方向上内容是否装不下——只有装不下才需要滚动条槽位。"""
-        vertical = self.direction is not ScrollDirection.HORIZONTAL
-        horizontal = self.direction is not ScrollDirection.VERTICAL
-        if vertical and content.height > viewport.height:
-            return True
-        return bool(horizontal and content.width > viewport.width)
-
-    def _narrow_for_gutter(self, inner: BoxConstraints, gutter: float) -> BoxConstraints | None:
-        """把滚动条槽位从内容可用空间里扣掉；轴无界（无限）时无从扣。"""
-        max_w, max_h = inner.max_width, inner.max_height
-        min_w, min_h = inner.min_width, inner.min_height
-        changed = False
-        if self.direction is not ScrollDirection.HORIZONTAL and inner.has_bounded_width:
-            max_w = max(0.0, max_w - gutter)
-            min_w = min(min_w, max_w)
-            changed = True
-        if self.direction is not ScrollDirection.VERTICAL and inner.has_bounded_height:
-            max_h = max(0.0, max_h - gutter)
-            min_h = min(min_h, max_h)
-            changed = True
-        if not changed:
-            return None
-        return BoxConstraints(min_w, max_w, min_h, max_h)
 
     def _child_constraints(self, inner: BoxConstraints) -> BoxConstraints:
         """按滚动方向决定哪个轴给子级无限空间。"""

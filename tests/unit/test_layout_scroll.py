@@ -445,6 +445,23 @@ class TestScrollViewWheelWiring:
         assert found[0].wheel_step == pytest.approx(expected)
 
 
+def _scrollbar_style(**overrides: object) -> ScrollbarStyle:
+    """测试用的滚动条外观：与 tokens.scrollbar 同档，可逐项覆盖。"""
+    base = {
+        "thickness": 10.0,
+        "hover_thickness": 14.0,
+        "min_thumb": 32.0,
+        "radius": 5.0,
+        "margin": 2.0,
+        "color": Color.from_rgba(0, 0, 0, 0.5),
+        "hover_color": Color.from_rgba(0, 0, 0, 0.8),
+        "hold_ms": 900.0,
+        "fade_ms": 250.0,
+    }
+    base.update(overrides)
+    return ScrollbarStyle(**base)  # type: ignore[arg-type]
+
+
 class TestScrollbarGeometry:
     """滚动条拇指的几何是纯函数（视口/内容/偏移 → 矩形），先把它测穿。
 
@@ -455,14 +472,7 @@ class TestScrollbarGeometry:
     @staticmethod
     def _styled(count: int = 20, item: float = 40.0, viewport: float = 100.0) -> RenderScroll:
         scroll = RenderScroll(tall_list(count, item), debug_name="Scroll")
-        scroll.scrollbar = ScrollbarStyle(
-            thickness=10.0,
-            min_thumb=32.0,
-            radius=5.0,
-            margin=2.0,
-            color=Color.from_rgba(0, 0, 0, 0.5),
-            hover_color=Color.from_rgba(0, 0, 0, 0.8),
-        )
+        scroll.scrollbar = _scrollbar_style()
         scroll.layout(BoxConstraints(max_width=120.0, max_height=viewport))
         return scroll
 
@@ -512,7 +522,7 @@ class TestScrollbarGeometry:
         scroll = RenderScroll(
             wide_content(600.0, 40.0), direction=ScrollDirection.HORIZONTAL, debug_name="H"
         )
-        scroll.scrollbar = TestScrollbarGeometry._styled().scrollbar
+        scroll.scrollbar = _scrollbar_style()
         scroll.layout(BoxConstraints(max_width=120.0, max_height=100.0))
         rect = scroll.thumb_rect()
         assert rect is not None
@@ -526,14 +536,7 @@ class TestScrollbarPainting:
     def _record(self, *, fluid: bool = False) -> tuple[RenderScroll, list[object]]:
         content = fluid_list(20, 40.0) if fluid else tall_list(20, 40.0)
         scroll = RenderScroll(content, debug_name="Scroll")
-        scroll.scrollbar = ScrollbarStyle(
-            thickness=10.0,
-            min_thumb=32.0,
-            radius=5.0,
-            margin=2.0,
-            color=Color.from_rgba(0, 0, 0, 0.5),
-            hover_color=Color.from_rgba(0, 0, 0, 0.8),
-        )
+        scroll.scrollbar = _scrollbar_style()
         scroll.layout(BoxConstraints(max_width=120.0, max_height=100.0))
         recorder = DisplayListRecorder()
         recorder.fill_rect(Rect(0.0, 0.0, 120.0, 100.0), _BG)
@@ -550,29 +553,20 @@ class TestScrollbarPainting:
         assert getattr(last, "rect", None) == rect
         assert getattr(last, "radius", None) == pytest.approx(5.0)
 
-    def test_content_is_narrowed_by_the_gutter_when_it_overflows(self) -> None:
-        """溢出时为滚动条**让出槽位**（`overflow: auto` 的语义）。
+    def test_overlay_scrollbar_reserves_no_space(self) -> None:
+        """**覆盖式**：滚动条不占布局宽度（ADR-0026 v2，Chromium/Flutter 路线）。
 
-        这是 ADR-0026 的核心承诺：滚动条绝不压在内容上。窄掉的那条
-        `thickness + margin` 就是拇指的家。"""
+        内容按整个视口排版，拇指浮在右缘之上；代价是出现时短暂压住右缘内容，
+        收益是不因"刚好溢出"而整体重排一次。"""
         scroll, _ = self._record(fluid=True)
-        gutter = 10.0 + 2.0
-        assert scroll.content_size.width == pytest.approx(120.0 - gutter)
-
-    def test_no_gutter_is_reserved_when_content_fits(self) -> None:
-        """装得下就不让位——不溢出还留一条空白是对空间的浪费。"""
-        scroll = RenderScroll(fluid_list(1, 20.0), debug_name="Fits")
-        scroll.scrollbar = TestScrollbarGeometry._styled().scrollbar
-        scroll.layout(BoxConstraints(max_width=120.0, max_height=100.0))
-        assert not scroll.can_scroll
         assert scroll.content_size.width == pytest.approx(120.0)
 
-    def test_content_never_extends_under_the_thumb(self) -> None:
-        """**不重叠**的结构性断言：内容右缘不超过拇指左缘。"""
+    def test_thumb_hugs_the_right_edge(self) -> None:
+        """拇指贴在视口右缘内侧（留 margin 的缝），这是覆盖层该有的位置。"""
         scroll, _ = self._record(fluid=True)
         rect = scroll.thumb_rect()
         assert rect is not None
-        assert scroll.content_size.width <= rect.left
+        assert rect.right == pytest.approx(120.0 - 2.0)
 
     def test_pointer_over_the_thumb_switches_to_the_hover_color(self) -> None:
         scroll, ops = self._record()
@@ -774,3 +768,87 @@ class TestThumbDragInsideAScrollView:
             )
         )
         assert scroll.scroll_offset.dy > 0.0, "超过 slop 后必须能滚"
+
+
+class TestScrollbarAutoHide:
+    """覆盖式滚动条的可见度（R14.2）：活动时亮起，闲置后淡出。
+
+    时间一律走 `tick(now_ms)` 注入——这条链路在无头测试里完全确定。
+    """
+
+    def _element_and_scroll(self, *, reduced: bool = False) -> tuple[object, RenderScroll]:
+        from inkstone.motion import reduced_motion
+        from inkstone.style import Theme
+        from inkstone.widgets import Box, Column, ScrollView
+
+        # 显式设定：否则同一条测试在开了/没开"减少动画"的机器上行为不同
+        reduced_motion.set_reduced_motion(reduced)
+        owner = BuildOwner(theme=Theme.light())
+        owner.mount(ScrollView(Column(children=[Box(height=30.0) for _ in range(40)])))
+        owner.begin_frame(BoxConstraints(max_width=200.0, max_height=120.0), now_ms=0.0)
+        found: list[RenderScroll] = []
+
+        def walk(node: object) -> None:
+            if isinstance(node, RenderScroll):
+                found.append(node)
+            for child in getattr(node, "children", ()) or ():
+                walk(child)
+
+        walk(owner.root_render_object)
+        return owner, found[0]
+
+    def test_scrolling_wakes_the_bar(self) -> None:
+        owner, scroll = self._element_and_scroll()
+        scroll.opacity = 0.0
+        origin = scroll.local_to_global(Offset(0.0, 0.0))
+        owner.dispatch_pointer(
+            PointerEvent(
+                kind=PointerKind.WHEEL,
+                x=origin.dx + 20.0,
+                y=origin.dy + 20.0,
+                window_id=0,
+                wheel_dy=-1.0,
+                time_ms=100.0,
+            )
+        )
+        assert scroll.opacity == 1.0, "滚一下必须把条亮起来"
+
+    def test_bar_fades_out_after_the_hold_window(self) -> None:
+        owner, scroll = self._element_and_scroll()
+        style = scroll.scrollbar
+        assert style is not None
+        scroll.wake(0.0)
+        # 指针不在视口内：hold 窗口内仍然可见
+        owner.begin_frame(
+            BoxConstraints(max_width=200.0, max_height=120.0), now_ms=style.hold_ms - 1
+        )
+        assert scroll.opacity == 1.0
+        # 过了 hold + fade：淡到 0 并**停止排帧**（空闲不留帧）
+        owner.begin_frame(
+            BoxConstraints(max_width=200.0, max_height=120.0),
+            now_ms=style.hold_ms + style.fade_ms + 10.0,
+        )
+        assert scroll.opacity == 0.0
+        assert owner.ticker.active == 0, "淡出跑完就该退出排帧集合"
+
+    def test_reduced_motion_hides_instantly(self) -> None:
+        from inkstone.motion import reduced_motion
+
+        try:
+            owner, scroll = self._element_and_scroll(reduced=True)
+            scroll.wake(0.0)
+            owner.begin_frame(BoxConstraints(max_width=200.0, max_height=120.0), now_ms=1000.0)
+            assert scroll.opacity == 0.0, "减少动效时应瞬时到位，不播淡出"
+        finally:
+            reduced_motion.reset_cache()
+
+    def test_hovering_the_bar_makes_it_thicker(self) -> None:
+        _, scroll = self._element_and_scroll()
+        rect = scroll.thumb_rect()
+        assert rect is not None
+        thin = rect.width
+        scroll._thumb_hover = True
+        thick_rect = scroll.thumb_rect()
+        assert thick_rect is not None
+        assert thick_rect.width > thin
+        assert thick_rect.right == pytest.approx(rect.right), "变粗只向左长，不移动右缘"

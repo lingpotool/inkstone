@@ -44,6 +44,8 @@ from ..layout import (
 )
 from ..layout.protocol import CrossAxisAlignment, MainAxisAlignment, MainAxisSize
 from ..layout.types import EdgeInsets, Offset
+from ..motion import AnimatedValue, reduced_motion
+from ..motion.ticker import Tickable
 
 __all__ = ["Column", "Flex", "Flexible", "Row", "ScrollView"]
 
@@ -203,6 +205,9 @@ class _ScrollElement(RenderObjectElement):
         super().__init__(widget)
         self._child: Element | None = None
         self._drag: DragGestureRecognizer | None = None
+        #: 滚动条淡出：动画对象归元素所有（见 `_pump_fade` 的分层说明）
+        self._fade: AnimatedValue | None = None
+        self._fade_runner: _ScrollbarFade | None = None
 
     def insert_child_render_object(self, child: RenderBox, slot: object | None) -> None:
         scroll = self.render_object
@@ -254,15 +259,22 @@ class _ScrollElement(RenderObjectElement):
         scroll.recognizers = [self._drag, self._thumb_drag(scroll)]
         # 滚轮步长同理：布局层不读主题，令牌值由元素送进去（R12）
         scroll.wheel_step = theme.gesture("wheel_step")
-        # 滚动条外观：几何来自 tokens.scrollbar，颜色来自语义色（R13.1）
+        # 滚动条外观：几何来自 tokens.scrollbar，颜色来自语义色（R13.1）；
+        # 时长过一遍"减少动效"（R14.1）——系统要求减少动画时归零 = 瞬时到位。
         scroll.scrollbar = ScrollbarStyle(
             thickness=theme.scrollbar("thickness"),
+            hover_thickness=theme.scrollbar("hover_thickness"),
             min_thumb=theme.scrollbar("min_thumb"),
             radius=theme.scrollbar("radius"),
             margin=theme.scrollbar("margin"),
             color=theme.color("scrollbar"),
             hover_color=theme.color("scrollbar-hover"),
+            hold_ms=theme.scrollbar("hold_ms"),
+            fade_ms=reduced_motion.duration(theme.scrollbar("fade_ms")),
         )
+        # 淡出动画由**元素**持有：布局层(L4)不能依赖动效层(L4.5)。
+        # 渲染对象只管"活动/可见"，元素把 visible → opacity 的过渡跑出来。
+        scroll.on_need_frame = self._pump_fade
 
     def _thumb_drag(self, scroll: RenderScroll) -> HandleDragRecognizer:
         """滚动条拇指的拖拽识别器（R13.2）。
@@ -285,6 +297,27 @@ class _ScrollElement(RenderObjectElement):
             on_end=scroll.end_thumb_drag,
         )
 
+    # ------------------------------------------------------------ 滚动条淡出（R14.2）
+
+    def _pump_fade(self) -> None:
+        """把淡出任务挂进帧循环并请求一帧。
+
+        由渲染对象在"有活动"时回调（`RenderScroll.on_need_frame`）。动画对象
+        住在元素里是**分层要求**：`layout`(L4) 在 `motion`(L4.5) 之下，
+        布局层不能 import 动效层；组件层两边都能用，所以过渡放在这里。
+        """
+        owner = self.owner
+        if owner is None:
+            return
+        owner.ticker.add(self._fade_task())
+        owner.request_frame()
+
+    def _fade_task(self) -> _ScrollbarFade:
+        if self._fade_runner is None:
+            self._fade = AnimatedValue(1.0, duration_ms=0.0)
+            self._fade_runner = _ScrollbarFade(self)
+        return self._fade_runner
+
     def _sync_child(self) -> None:
         widget = self.widget
         assert isinstance(widget, ScrollView)
@@ -303,7 +336,52 @@ class _ScrollElement(RenderObjectElement):
             visitor(self._child)
 
     def unmount(self) -> None:
+        owner = self.owner
+        if owner is not None and self._fade_runner is not None:
+            owner.ticker.remove(self._fade_runner)
         if self._child is not None:
             self._deactivate_child(self._child)
             self._child = None
         super().unmount()
+
+
+class _ScrollbarFade(Tickable):
+    """把"此刻想不想看见滚动条"翻译成 opacity 过渡。
+
+    返回 True 的条件很关键：**只有"还在淡出过程中"或"有一个待办的淡出"**
+    才继续排帧。指针停在视口里时返回 False——否则鼠标一停，应用就为了一个
+    不再变化的透明值空转 60fps。
+    """
+
+    def __init__(self, element: _ScrollElement) -> None:
+        self._element = element
+
+    def tick(self, now_ms: float) -> bool:
+        element = self._element
+        scroll = element.render_object
+        if not isinstance(scroll, RenderScroll) or element._fade is None:
+            return False
+        style = scroll.scrollbar
+        if style is None or not scroll.can_scroll:
+            scroll.opacity = 1.0
+            return False
+        value = element._fade
+        deadline = scroll.last_activity_ms + style.hold_ms
+        idle = now_ms - scroll.last_activity_ms
+        # 指针是否还在滚动容器上：**每帧问路由**，而不是靠事件置位——
+        # 指针移出去之后我们收不到任何事件，置位的标志永远清不掉。
+        owner = element.owner
+        hovered = owner is not None and scroll in owner.pointer_router.hover_chain
+        # 指针在容器上/正在拖 → 一直亮着；否则先按住 hold_ms，再淡出
+        want = 1.0 if (hovered or scroll._bar_active or idle < style.hold_ms) else 0.0
+        # 淡出从**截止时刻**起算，而不是从"哪一帧发现它到点了"起算——
+        # 否则掉帧会让淡出顺延，动画时长变得取决于帧率（不可复现）。
+        start = now_ms if want >= 1.0 else min(now_ms, deadline)
+        value.set_target(want, now_ms=start, duration_ms=style.fade_ms)
+        more = value.tick(now_ms)
+        if scroll.opacity != value.value:
+            scroll.opacity = value.value
+            scroll.mark_needs_paint()
+        # 待办淡出（hold 窗口）也要继续推进，否则永远等不到那一刻
+        pending_out = not hovered and not scroll._bar_active and scroll.opacity > 0.0
+        return more or pending_out
