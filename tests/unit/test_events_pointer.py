@@ -358,8 +358,9 @@ class TestButtonWiring:
         owner.dispatch_pointer(_event(PointerKind.UP, 500.0, 500.0))
 
         assert fired == []
-        # 离开时按压被取消；焦点仍保留（聚焦是点击的持久结果）
-        assert element.state.component_state is ComponentState.FOCUS_VISIBLE
+        # 离开时按压被取消。焦点虽然还在按钮上，但**鼠标来源不算 focus-visible**
+        # （R9.1）：按钮不该因为被点过就永久挂一圈焦点环。
+        assert element.state.component_state is ComponentState.DEFAULT
 
 
 class TestInputFocusReportsIme:

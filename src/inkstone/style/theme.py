@@ -143,6 +143,10 @@ class Theme:
         """
         return _lookup("gestures", name, self.raw.gestures)
 
+    def decoration(self, name: str) -> float:
+        """文本编辑装饰。`"caret_width" / "underline_width" / "underline_offset"`。"""
+        return _lookup("decorations", name, self.raw.decorations)
+
     @property
     def font_sans(self) -> tuple[str, ...]:
         return self.raw.font_sans

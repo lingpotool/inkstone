@@ -46,6 +46,7 @@ from ..display_list import (
     PathStrokeOp,
     StrokeRectOp,
     TextRunOp,
+    resolve_state_ops,
 )
 from ..glyphs import BuiltinGlyphProvider, GlyphProvider, glyph_mask_plan, rect_of_mask
 from .base import FrameBuffer, RasterBackend, RasterError
@@ -203,7 +204,7 @@ class SoftwareRasterizer(RasterBackend):
 
         frame = bytearray(len(self._buffer))
         row = [0.0] * self._width
-        for op in display_list.ops:
+        for op in resolve_state_ops(display_list.ops):
             self._rasterize_op(frame, self._width, self._height, row, op)
         _composite(self._buffer, frame, self._width, self._height, clip)
 

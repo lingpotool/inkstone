@@ -21,6 +21,7 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Protocol, TypeVar
 
+from ..events.focus import FocusManager
 from ..layout import RenderBox
 from ..style import Theme, default_theme
 from .scope import ThemeScope
@@ -173,6 +174,31 @@ class Element:
         if owner is None:
             return default_theme()
         return owner.theme
+
+    @property
+    def focus_manager(self) -> FocusManager | None:
+        """环境焦点管理器（与 theme / text_engine 并列的共享服务）。
+
+        组件在自己的 State 里创建 `FocusNode`，挂载时经这里注册；卸载时
+        **必须**注销（节点不认识 Element，忘了注销会留下一个永不释放的焦点）。
+        """
+        owner = self.owner
+        return owner.focus_manager if owner is not None else None
+
+    def find_render_object(self) -> RenderBox | None:
+        """向下找本子树里第一个 RenderBox。
+
+        给"State 要够到自己的渲染对象"用（如 Input 上报 IME 候选框位置）。
+        组件型 Element 自己不持有 RenderBox，真正的渲染节点在下面一层或几层。
+        """
+        pending: list[Element] = [self]
+        while pending:
+            node = pending.pop(0)
+            found = node.render_object
+            if found is not None:
+                return found
+            node.visit_children(pending.append)
+        return None
 
     @property
     def text_engine(self) -> TextEngine | None:

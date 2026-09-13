@@ -27,18 +27,19 @@ Phase 1 · 地基。真实代码覆盖布局、组件树、样式、渲染、**�
 | `gfx/color.py` | ✅ Color（hex 解析、插值、WCAG 对比度） |
 | `style/`（tokens / theme / resolve / variants） | ✅ 三层令牌 + 明暗主题 + 变体解析 |
 | `text/`（font / fallback / shaping / linebreak / paragraph / engine） | ✅ 字体度量、CJK 回退链、整形、断行（含禁则）、段落排版 |
-| `widgets/`（basic / layout / form） | ✅ Box / Card / **Text** / Row / Column / Flexible / **ScrollView** / Button / Input |
+| `widgets/`（basic / layout / form） | ✅ Box / Card / **Text** / Row / Column / Flexible / **ScrollView** / Button / **Input（可编辑：光标/选区/组合态/剪贴板）** |
 | `gfx/`（display_list / paint / transform / **glyphs** / raster.base / raster.software / **raster.gl_driver + gl_backend**） | ✅ 显示列表（`TextRunOp` + `PathFillOp`/`PathStrokeOp`）+ 录制器（**仿射变换栈**）+ 软件光栅（**帧生命周期协议** + 不透明矩形快路径）+ PNG + **GL 后端骨架**（驱动接缝 + 假驱动测逻辑）与 **Windows WGL 真机驱动**（`backend/gl_wgl.py`，SDF 矩形/描边 + 字形纹理 + 离屏 FBO 回读；Linux GLX/EGL、macOS CGL 待做） |
 | `devtools/screenshot.py` | ✅ 确定性截图 + 黄金图基线（12 张）+ **字形源自动配对** + DPI 档位 |
 | `benchmarks/run.py` | ✅ 帧耗时基准（长列表滚动 / 全屏重绘 / 文本密集，p50/p95，GL 决策依据） |
 | `events/ime.py` | ✅ IME 组合态模型（`ImeSession`：事件流 → text+composition 状态） |
+| `events/focus.py` | ✅ 焦点系统：`FocusManager`（唯一焦点 / Tab 遍历 / 点空白失焦）+ `FocusNode`（`focus-visible` 语义：环只在键盘来源显示） |
 | `events/pointer.py` | ✅ 指针路由：`HitTestResult` + 三阶段 `PointerRouter`（捕获/目标/冒泡、`stop_propagation`）+ ENTER/LEAVE 命中链差分；`layout.RenderBox.hit_test` 逆序命中 |
 | `events/gestures.py` | ✅ 手势竞技场：`GestureArena` + `GestureRecognizer` 基类 + Tap / DoubleTap / LongPress / Drag；按 pointer_id 竞争裁决、取消是一等公民、超时用注入时间轴推进 |
 | `examples/hello.py` | ✅ 可运行示例（`--dark` / `--deterministic`），进 CI 冒烟测试 |
 | `examples/notes.py` | ✅ **样板 App「墨记」**：侧栏 + 滚动列表 + 表单 + 明暗主题切换；headless 出黄金图、`--sdl2` 真窗口交互，进 CI 冒烟 |
 | 其余模块（gfx GL+Skia / events 其余 / primitives / app …） | ⬜ 占位桩 |
 
-1012 个无头单测全绿，**黄金图像素级比对**也跑通（12 张基线）。
+1058 个无头单测全绿，**黄金图像素级比对**也跑通（12 张基线）。
 **地基整改 R1（正确性止血，docs/15）、R2（测试求真，docs/16）、
 R3（渲染协议重塑，docs/17）、R4（跨平台文本栈，docs/18）、
 R5（事件与 IME，docs/19）、R6（主题传播与依赖追踪，docs/20）已完成**：
@@ -78,7 +79,7 @@ R7.5 性能基准已完成（`benchmarks/run.py` 三场景出 p50/p95，规则�
 GL 子包 R8.1（驱动接缝 + 后端逻辑层）、R8.2（Windows WGL 真机驱动）、
 R8.3（热路径缓存 + 矩形合批 + 字形图集 + 帧去重）、
 R8.4（显示列表状态指令 + 滚动 repaint boundary + GL 层缓存）已完成，
-测试 → 1012 全绿（覆盖率 89.09%）。**R7.5 验收达成：GL p95 全屏 4.4ms /
+测试 → 1058 全绿（覆盖率 89.09%）。**R7.5 验收达成：GL p95 全屏 4.4ms /
 文本 8.6ms / 滚动 1.0ms，三场景全部 ≤10ms**（软件为事实源，未变）。
 R8.6 真窗口 GL 上屏完成（SDL 上下文 + FBO blit + 换链，Windows 真机验证）。剩余：Linux/macOS GL 驱动、路径三角化、通用脏矩形、应用外壳脏区调度。
 

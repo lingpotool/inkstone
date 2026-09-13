@@ -2,7 +2,7 @@
 
 > 写给下一个接手的对话。读完这份 + `AGENT.md` + `ROADMAP.md`，就能直接开工。
 > 交接时间：**2026-09-13** · 地基整改 R1–R6 + 收官包 R7 **全部完成** ·
-> 无头单测 **1012 个全绿**（覆盖率 89.09%）· 黄金图 12 张像素级比对
+> 无头单测 **1058 个全绿**（覆盖率 89.09%）· 黄金图 12 张像素级比对
 >
 > **当前主线**：**GL 后端子包（`docs/22`）**——R7.5 的性能基准触发了预先写死的
 > 决策规则（三场景 p95 超 10ms 预算 40–300 倍）。R8.1 接缝+逻辑层、R8.2
@@ -128,23 +128,29 @@ docs/22 已定范围：**只实现现有显示列表 IR 的指令集**、沿用 
   （红块位置/底色正确、`gl_err=0`、可连续换链）；`examples/notes.py --sdl2`
   已改走 GL。踩坑：挂载模式下 `begin()` 无条件 `wglMakeCurrent(0,0)` 会把
   SDL 上下文解绑（FBO 校验静默返回 0）。
-- **仍未做**：Linux GLX/EGL、macOS CGL 驱动；路径三角化（两后端同等能力）；
-  通用脏矩形损伤跟踪；应用外壳脏区调度（`--sdl2` 目前每帧整树重绘，
-  GL 下 ~4ms 可接受，但还不是"只重画脏区"）。
+- **R9 焦点系统 + 文本编辑已完成**：`events/focus.py`（唯一焦点 / focus-visible /
+  Tab 遍历 / 点空白失焦）+ Input 编辑模型（text + selection + composition、
+  字素簇移动删除、光标/选区/组合态渲染、剪贴板、候选框跟随）；core 增加
+  `dispatch_key/text/ime`，App 主循环已接。顺带修掉"点过的控件永久带焦点环"
+  （鼠标来源不算 focus-visible）。Phase 1 的"中文输入"DoD 达成。
+- **仍未做**：窗口身份（应用图标 / AppUserModelID / 暗色标题栏）、窗口能力
+  （最小尺寸、最大化/还原、位置记忆）；Linux GLX/EGL、macOS CGL；路径三角化；
+  通用脏矩形损伤跟踪；应用外壳脏区调度。
 - Linux GLX/EGL、macOS CGL 驱动照 `GLDriver` 协议补（Windows 已通过 WGL +
   SDL 上下文两条路验证）；跨平台窗口获取见 ADR-0020。
 
-### ② 文本编辑模型（Phase 2 首项）
+### ② 窗口身份与窗口能力（观感专业化的下一步）
 
-`Input` 只能聚焦。要补：编辑模型 `text + selection(anchor, focus) + composition`
-（docs/04 §6）、光标移动、退格/删除、选区替换。地基已就绪、直接用：
-
-- `Paragraph.position_for_point(x, y)` → 点击落在哪个字符间隙
-- `Paragraph.rects_for_range(start, end)` → 光标竖线与选区矩形
-- `TextRunOp.underline` → IME 组合态下划线（已实现，尚未被使用）
-- `backend/base.py` 的 `ImeEvent`（COMPOSE / COMMIT / CANCEL）+ `events/ime.py` 的 `ImeSession`
-
-**注意**：ADR-0005 说整形与断行不自己造，但**编辑逻辑要自己写**——那是 UI 库的本职。
+现状：只用了 SDL 默认——默认图标、暗色 App 配白色系统标题栏、任务栏身份是
+`python.exe`。专业做法（对齐 Flutter / Electron）：**保留原生边框**，只做
+平台化着色，从而 Snap Layouts / 贴靠 / 无障碍 / 高对比主题全部保留：
+- `SDL_SetWindowIcon` + Windows `AppUserModelID`（任务栏身份）；
+- Windows `DwmSetWindowAttribute`（`DWMWA_USE_IMMERSIVE_DARK_MODE` /
+  `DWMWA_CAPTION_COLOR`）让标题栏跟随主题；macOS 设 NSWindow appearance；
+- 图标用 `tools/build_icon.py` 以自家文本栈 + 令牌**程序化生成**（可复现），
+  不在仓库手工维护二进制素材；
+- 窗口能力：最小尺寸、最大化/还原/全屏、标题更新、位置尺寸记忆（应用外壳）。
+自绘标题栏（保留原生按钮的原生叠加路线）是可选后置项，不默认。
 
 ### ③ macOS / Linux 真机字体验证
 
@@ -164,7 +170,7 @@ R7.1–R7.3 的事件/手势/DPI 链路在 headless 下都有确定性测试，
 
 ```bash
 cd /e/inkstone
-./.venv/Scripts/python.exe -m pytest tests -q          # 1012 个必须全绿
+./.venv/Scripts/python.exe -m pytest tests -q          # 1058 个必须全绿
 ./.venv/Scripts/python.exe -m ruff check src tests examples benchmarks
 ./.venv/Scripts/python.exe -m ruff format --check src tests examples benchmarks
 ./.venv/Scripts/python.exe -m mypy                     # strict，零错误
@@ -237,7 +243,7 @@ cd /e/inkstone
 ## 八、开工姿势（建议）
 
 1. 读 `AGENT.md`（**重点看 ADR 表**）→ `ROADMAP.md` → 本文档
-2. 跑一遍验证命令确认起点全绿（1012 passed / mypy 干净 / 覆盖 89.1%）
+2. 跑一遍验证命令确认起点全绿（1058 passed / mypy 干净 / 覆盖 89.1%）
 3. 跑一次 `python examples/notes.py` —— 看当前最完整的界面长什么样
 4. 按第三节顺序推进：**①GL 后端子包（docs/22）** → ②文本编辑 → ③macOS/Linux
    真机字体验证 → ④三平台 SDL2 验证

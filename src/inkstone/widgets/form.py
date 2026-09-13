@@ -22,7 +22,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from ..backend.base import PointerKind
+from ..backend.base import ImeEvent, KeyEvent, KeyKind, PointerKind, TextEvent
+from ..backend.headless_fonts import grapheme_clusters
 from ..core import (
     LeafRenderObjectElement,
     RenderObjectWidget,
@@ -32,12 +33,14 @@ from ..core import (
 )
 from ..core.element import _SLOT_UNCHANGED, Element
 from ..core.key import Key
+from ..events.focus import FocusNode, FocusSource
 from ..events.gestures import (
     DoubleTapGestureRecognizer,
     GestureRecognizer,
     LongPressGestureRecognizer,
     TapGestureRecognizer,
 )
+from ..events.ime import ImeSession
 from ..events.pointer import PointerDispatch
 from ..gfx.color import Color
 from ..layout import BoxConstraints, RenderBox, Size
@@ -55,6 +58,32 @@ from ..text import EllipsisMode, Paragraph, TextAlign, TextEngine, TextStyle
 from .basic import glyphs_of_layout
 
 __all__ = ["Button", "Input"]
+
+
+# ---------------------------------------------------------------- 字素簇辅助
+#
+# 编辑必须按**字素簇**走，不按码点（AGENT 铁律 2）：否则删一个键会删掉
+# emoji 的半张脸、或把 "é"（基字符 + 组合符）拆成两半。
+
+
+def _prev_index(text: str, index: int) -> int:
+    """`index` 左边**一个簇**的起点。"""
+    if index <= 0:
+        return 0
+    for start, end in grapheme_clusters(text):
+        if start < index <= end:
+            return start
+    return 0
+
+
+def _next_index(text: str, index: int) -> int:
+    """`index` 右边**一个簇**的终点。"""
+    if index >= len(text):
+        return len(text)
+    for start, end in grapheme_clusters(text):
+        if start <= index < end:
+            return end
+    return len(text)
 
 
 # ---------------------------------------------------------------- 渲染对象
@@ -106,6 +135,21 @@ class _ControlRenderObject(RenderBox):
         self.on_pointer: Callable[[PointerDispatch], None] | None = None
         #: 是否处于聚焦态（由 Element 从 State 同步，供 IME 上报使用）
         self.focused: bool = False
+        # ---- 编辑态几何（R9.3）：全部由 Element 从 State 写入 ----
+        #: 光标在**显示文本**里的下标（显示文本 = 正文 + 组合串）；None = 不画
+        self.caret: int | None = None
+        #: 选区 `[start, end)`（显示文本下标）；start == end 表示无选区
+        self.selection: tuple[int, int] | None = None
+        #: 组合串在显示文本里的区间 `[start, end)`（画下划线）
+        self.composition: tuple[int, int] | None = None
+        #: 选区底色（令牌：primary-soft）
+        self.selection_color: Color | None = None
+        #: 是否处于编辑中（决定要不要省略号、要不要裁剪内容区）
+        self.editing: bool = False
+        #: 编辑装饰尺寸（元素从主题令牌写入；组件里不许写字面量）
+        self.caret_width: float = 0.0
+        self.underline_width: float = 0.0
+        self.underline_offset: float = 0.0
 
     # ------------------------------------------------------------ 指针输入
 
@@ -121,15 +165,28 @@ class _ControlRenderObject(RenderBox):
     def caret_rect(self) -> Rect:
         """光标矩形（本节点局部坐标，零宽）。
 
-        输入框聚焦时上报给 IME 的候选框锚点。当前还没有文本编辑，
-        光标固定在内容区左端、纵向居中——等编辑模型落地后，
-        这里换成 `Paragraph.rects_for_range(caret, caret)`。
+        编辑中由 `Paragraph.rects_for_range(caret, caret)` 给出真实位置——
+        IME 候选框要跟着光标走，用固定位置会在中文输入时把候选框钉在左边。
+        还没排版（或没有编辑态）时退回"内容区左端 + 纵向居中"。
         """
+        paragraph = self.painted_paragraph
+        if paragraph is not None and paragraph.lines and self.caret is not None:
+            rects = paragraph.rects_for_range(self.caret, self.caret)
+            if rects:
+                leading = max(0.0, (self.size.height - paragraph.height) / 2.0)
+                rect = rects[0]
+                extent = max(min(rect.height, paragraph.height), self.caret_width)
+                return Rect(
+                    self.padding_h + rect.left,
+                    leading + rect.top + max(0.0, (rect.height - extent) / 2.0),
+                    0.0,
+                    extent,
+                )
         line_height = 0.0
         if self.text_style is not None:
             line_height = self.text_style.size * self.text_style.line_height
-        height = min(line_height, self.size.height) if line_height > 0.0 else self.size.height
-        return Rect(self.padding_h, (self.size.height - height) / 2.0, 0.0, height)
+        extent = min(line_height, self.size.height) if line_height > 0.0 else self.size.height
+        return Rect(self.padding_h, (self.size.height - extent) / 2.0, 0.0, extent)
 
     # ------------------------------------------------------------ 内容文字
 
@@ -179,13 +236,16 @@ class _ControlRenderObject(RenderBox):
         if not text or self.engine is None or self.text_style is None:
             return None
         available = max(0.0, size.width - 2.0 * self.padding_h)
+        # 编辑中**不能加省略号**：`rects_for_range` 的下标要对应到显示文本，
+        # 被省略号替换掉的内容会让光标/选区映射整体错位。超出部分靠裁剪挡掉。
+        ellipsis = EllipsisMode.NONE if self.editing else EllipsisMode.END
         return self.engine.paragraph(
             text,
             self.text_style,
             max_width=available,
             align=TextAlign.CENTER if self.center_text else TextAlign.START,
             max_lines=1,
-            ellipsis=EllipsisMode.END,
+            ellipsis=ellipsis,
         )
 
     def paint(self, context: object) -> None:
@@ -203,7 +263,27 @@ class _ControlRenderObject(RenderBox):
         if self.border_width > 0.0 and border is not None and border.a > 0.0 and stroke is not None:
             stroke(rect, self.border_width, border, radius)
 
-        self._paint_content(context)
+        if self.editing:
+            # 编辑中不省略号，内容可能超宽——裁到内边距里（裁剪只影响内容）
+            save = getattr(context, "save", None)
+            restore = getattr(context, "restore", None)
+            clip_rect = getattr(context, "clip_rect", None)
+            if callable(save) and callable(restore) and callable(clip_rect):
+                save()
+                clip_rect(
+                    Rect(
+                        self.padding_h,
+                        0.0,
+                        max(0.0, self.size.width - 2.0 * self.padding_h),
+                        self.size.height,
+                    )
+                )
+                self._paint_content(context)
+                restore()
+            else:
+                self._paint_content(context)
+        else:
+            self._paint_content(context)
 
         # 焦点环：2px 环 + 2px 偏移，向外长不裁切（docs/13 §5）
         ring = self.focus_ring
@@ -235,17 +315,75 @@ class _ControlRenderObject(RenderBox):
             return
 
         leading = max(0.0, (self.size.height - paragraph.height) / 2.0)
+        origin_x = self.padding_h
+        origin_y = leading
+
+        # 选区底色先画（在文字下面）
+        fill_rect = getattr(context, "fill_rect", None)
+        selection = self.selection
+        selection_color = self.selection_color
+        if (
+            fill_rect is not None
+            and selection is not None
+            and selection[0] < selection[1]
+            and selection_color is not None
+        ):
+            for rect in paragraph.rects_for_range(selection[0], selection[1]):
+                fill_rect(
+                    Rect(
+                        rect.left + origin_x,
+                        rect.top + origin_y,
+                        rect.width,
+                        rect.height,
+                    ),
+                    selection_color,
+                )
+
         for layout in paragraph.lines:
             glyphs = glyphs_of_layout(layout)
             if not glyphs:
                 continue
             text_run(
-                Offset(layout.x + self.padding_h, layout.origin_y + leading),
+                Offset(layout.x + origin_x, layout.origin_y + origin_y),
                 layout.line.baseline,
                 glyphs,
                 self.text_style.size if self.text_style else 0.0,
                 color,
             )
+
+        # IME 组合态下划线：按字符区间画一条细线（组合串还没上屏，需要可见反馈）
+        composition = self.composition
+        if (
+            fill_rect is not None
+            and composition is not None
+            and composition[0] < composition[1]
+            and selection_color is not None
+        ):
+            for rect in paragraph.rects_for_range(composition[0], composition[1]):
+                fill_rect(
+                    Rect(
+                        rect.left + origin_x,
+                        rect.top + origin_y + rect.height - self.underline_offset,
+                        rect.width,
+                        self.underline_width,
+                    ),
+                    selection_color,
+                )
+
+        # 光标：零宽矩形 → 画成一条竖线，纵向按行高居中
+        caret = self.caret
+        if fill_rect is not None and caret is not None and color is not None:
+            for rect in paragraph.rects_for_range(caret, caret):
+                caret_extent = max(min(rect.height, paragraph.height), self.caret_width)
+                fill_rect(
+                    Rect(
+                        rect.left + origin_x,
+                        rect.top + origin_y + max(0.0, (rect.height - caret_extent) / 2.0),
+                        self.caret_width,
+                        caret_extent,
+                    ),
+                    color,
+                )
 
 
 class _ControlBox(RenderObjectWidget):
@@ -263,6 +401,10 @@ class _ControlBox(RenderObjectWidget):
         focused: bool = False,
         wants_text_input: bool = False,
         recognizers: list[GestureRecognizer] | None = None,
+        editing: bool = False,
+        caret: int | None = None,
+        selection: tuple[int, int] | None = None,
+        composition: tuple[int, int] | None = None,
     ) -> None:
         self.style = style
         self.width = width
@@ -273,6 +415,10 @@ class _ControlBox(RenderObjectWidget):
         self.focused = focused
         self.wants_text_input = wants_text_input
         self.recognizers: list[GestureRecognizer] = recognizers if recognizers is not None else []
+        self.editing = editing
+        self.caret = caret
+        self.selection = selection
+        self.composition = composition
 
     def create_render_object(self) -> _ControlRenderObject:
         render_object = _ControlRenderObject()
@@ -299,6 +445,10 @@ class _ControlBox(RenderObjectWidget):
         render_object.center_text = self.center_text
         render_object.on_pointer = self.on_pointer
         render_object.focused = self.focused
+        render_object.editing = self.editing
+        render_object.caret = self.caret
+        render_object.selection = self.selection
+        render_object.composition = self.composition
         # 识别器由组件层（知道主题令牌）创建，元素写进渲染对象（R7.2）
         render_object.recognizers = list(self.recognizers)
         if isinstance(self.style, InputStyle):
@@ -313,6 +463,7 @@ class _ControlElement(LeafRenderObjectElement):
     def __init__(self, widget: _ControlBox) -> None:
         super().__init__(widget)
         self._last_focused = False
+        self._last_ime_key: tuple[object, ...] | None = None
 
     def mount(self, parent: Element | None, slot: object | None) -> None:
         super().mount(parent, slot)
@@ -338,12 +489,35 @@ class _ControlElement(LeafRenderObjectElement):
             size=float(font.px),
             line_height=font.line_height,
         )
+        if isinstance(widget.style, InputStyle):
+            # 选区底色与编辑装饰都来自令牌（render object 读不到主题，只能元素写）
+            render_object.selection_color = theme.color("primary-soft")
+            render_object.caret_width = theme.decoration("caret_width")
+            render_object.underline_width = theme.decoration("underline_width")
+            render_object.underline_offset = theme.decoration("underline_offset")
         # 环境文本引擎由元素注入（RenderObject 拿不到 BuildOwner）
         render_object.engine = self.text_engine
         render_object.mark_needs_layout()
         render_object.mark_needs_paint()
         if widget.wants_text_input:
             self._sync_text_input(render_object, widget.focused)
+            if widget.editing and widget.caret is not None:
+                # 候选框跟随光标：在**构建时**上报，此时段落几何是上一帧布局的、
+                # 光标是本次构建的新值——移动光标时段落没变，所以位置是准的。
+                # 若等 State 在事件处理里上报，渲染对象还停在旧光标上，锚点不动。
+                self._report_ime_rect(render_object)
+
+    def _report_ime_rect(self, render_object: _ControlRenderObject) -> None:
+        owner = self.owner
+        if owner is None or owner.on_ime_rect is None:
+            return
+        key = (render_object.caret, render_object.label)
+        if key == self._last_ime_key:
+            return
+        self._last_ime_key = key
+        caret = render_object.caret_rect()
+        origin = render_object.local_to_global(caret.top_left)
+        owner.on_ime_rect(Rect(origin.dx, origin.dy, caret.width, caret.height))
 
     def _sync_text_input(self, render_object: _ControlRenderObject, focused: bool) -> None:
         """输入框聚焦态变化时通知后端：开/关 IME 通道 + 上报候选框位置（R5.7/R7.1）。
@@ -419,13 +593,18 @@ class ButtonState(State["Button"]):
         )
         self._hovered = False
         self._pressed = False
-        self._focused = False
+        #: 键盘来源的聚焦才画环（focus-visible，docs/13 §5）
+        self._focus_visible = False
         self._tap: TapGestureRecognizer | None = None
         self._double: DoubleTapGestureRecognizer | None = None
         self._long: LongPressGestureRecognizer | None = None
+        self._focus_node = FocusNode(on_change=self._on_focus_change, debug_name="Button")
 
     def build(self, context: object) -> Widget:
         assert isinstance(context, Element)
+        manager = context.owner.focus_manager if context.owner is not None else None
+        if manager is not None and not self._focus_node.attached:
+            manager.attach(self._focus_node)
         style = resolve_button_style(
             context.theme,
             variant=self.widget.variant,
@@ -441,6 +620,18 @@ class ButtonState(State["Button"]):
             on_pointer=self._handle_pointer,
             recognizers=self._build_recognizers(context.theme),
         )
+
+    def _on_focus_change(self, focused: bool, visible: bool) -> None:
+        # 鼠标点击给的焦点不算 focus-visible：按钮上不该出现焦点环
+        del focused
+        self._focus_visible = visible
+        self._refresh_state()
+
+    def dispose(self) -> None:
+        self._focus_node.unfocus()
+        manager = self._focus_node._manager
+        if manager is not None:
+            manager.detach(self._focus_node)
 
     # ------------------------------------------------------------ 识别器
 
@@ -500,7 +691,9 @@ class ButtonState(State["Button"]):
 
     def _press_down(self) -> None:
         self._pressed = True
-        self._focused = True
+        # 点击让按钮获得焦点（键盘从这里接着走），但**不是** focus-visible：
+        # 环只有 Tab 导航才显示。焦点系统同时负责"点别处自动失焦"。
+        self._focus_node.request_focus(FocusSource.POINTER)
         self._refresh_state()
 
     def _press_up(self) -> None:
@@ -545,7 +738,7 @@ class ButtonState(State["Button"]):
     def _refresh_state(self) -> None:
         if self._pressed:
             state = ComponentState.ACTIVE
-        elif self._focused:
+        elif self._focus_visible:
             state = ComponentState.FOCUS_VISIBLE
         elif self._hovered:
             state = ComponentState.HOVER
@@ -569,14 +762,24 @@ class ButtonState(State["Button"]):
 
 
 class Input(StatefulWidget):
-    """输入框。当前只有值、占位符与状态——文本编辑与 IME 属 Phase 2。"""
+    """输入框：可输入、可删除、光标位置正确（Phase 1 DoD，R9.3）。
+
+    编辑模型是 `text + selection(anchor, focus) + composition`（docs/04 §6）：
+
+    - **正文**（text）与**组合串**（composition）分开存——组合态不上屏，
+      CANCEL 因此是免费的（丢掉叠加层即可，不用从正文里删字）；
+    - 选区用 `anchor/focus` 两个下标（焦点是"活动端"），移动/删除**按字素簇**
+      走（不劈 emoji）；
+    - 键盘/文本/IME 事件由**焦点系统**送到这里（`FocusNode.on_event`），
+      组件不自己去嗅探全局事件。
+    """
 
     def __init__(
         self,
         value: str = "",
         *,
         placeholder: str = "",
-        on_changed: object | None = None,
+        on_changed: Callable[[str], None] | None = None,
         size: str = "md",
         width: float | None = None,
         error: bool = False,
@@ -595,38 +798,110 @@ class Input(StatefulWidget):
 
 
 class InputState(State["Input"]):
-    """输入框的交互状态机（R7.1）。
-
-    点击获焦并通知 IME 通道（`_ControlElement` 观察 `focused` 变化后上报）。
-    文本编辑与组合态渲染仍是 Phase 2——本轮只闭合"点击能聚焦"。
-    """
+    """输入框的编辑状态机（R9.3）。"""
 
     def init_state(self) -> None:
         self.component_state = ComponentState.ERROR if self.widget.error else ComponentState.DEFAULT
+        self._text: str = self.widget.value
+        end = len(self._text)
+        #: 选区两端（焦点是活动端）；`anchor == focus` 即无选区
+        self._anchor: int = end
+        self._caret: int = end
+        self._ime = ImeSession()
+        self._composition: str | None = None
         self._focused = False
+        self._focus_visible = False
+        self._last_pointer_x: float = 0.0
         self._tap: TapGestureRecognizer | None = None
+        self._focus_node = FocusNode(
+            on_event=self._handle_event, on_change=self._on_focus_change, debug_name="Input"
+        )
+        self._manager: object | None = None
+
+    # ------------------------------------------------------------ 查询
 
     @property
     def focused(self) -> bool:
         return self._focused
 
+    @property
+    def text(self) -> str:
+        """当前正文（不含未上屏的组合串）。"""
+        return self._text
+
+    @property
+    def selection(self) -> tuple[int, int]:
+        return self._selection_range()
+
+    @property
+    def composition(self) -> str | None:
+        return self._composition
+
+    # ------------------------------------------------------------ 构建
+
     def build(self, context: object) -> Widget:
         assert isinstance(context, Element)
+        manager = context.owner.focus_manager if context.owner is not None else None
+        if manager is not None and not self._focus_node.attached:
+            manager.attach(self._focus_node)
+            self._manager = manager
         style = resolve_input_style(
             context.theme,
             size=self.widget.size,
             state=self.component_state,
         )
+        display, caret_value, selection_value, composition_value = self._display_state()
+        # 未聚焦不画光标/选区/组合线（否则黄金图里每个输入框都挂着一条竖线）
+        caret: int | None = caret_value if self._focused else None
+        selection: tuple[int, int] | None = selection_value if self._focused else None
+        composition: tuple[int, int] | None = composition_value if self._focused else None
         return _ControlBox(
             style=style,
             width=self.widget.width,
-            label=self.widget.value,
+            label=display,
             placeholder=self.widget.placeholder,
             center_text=False,
             focused=self._focused,
             wants_text_input=True,
             recognizers=self._build_recognizers(context.theme),
+            editing=self._focused,
+            caret=caret,
+            selection=selection,
+            composition=composition,
+            on_pointer=self._handle_pointer,
         )
+
+    def _display_state(
+        self,
+    ) -> tuple[str, int, tuple[int, int], tuple[int, int] | None]:
+        """渲染用的显示文本 + 光标 + 选区 + 组合区间（都是**显示文本**下标）。
+
+        组合串插在选区处（选区被组合串临时"顶替"）；组合中不显示选区——
+        这与浏览器一致，也是唯一能让组合态下划线范围无歧义的做法。
+        """
+        start, end = self._selection_range()
+        composition = self._composition
+        if composition:
+            display = self._text[:start] + composition + self._text[end:]
+            caret = start + len(composition)
+            return display, caret, (caret, caret), (start, caret)
+        return self._text, self._caret, (start, end), None
+
+    def dispose(self) -> None:
+        self._focus_node.unfocus()
+        manager = self._focus_node._manager
+        if manager is not None:
+            manager.detach(self._focus_node)
+
+    def did_update_widget(self, old_widget: Input) -> None:
+        # 外部换了 value（受控用法）：采纳新值，光标移到末尾
+        if self.widget.value != old_widget.value and self.widget.value != self._text:
+            self._text = self.widget.value
+            self._caret = self._anchor = len(self._text)
+            self._composition = None
+            self._ime.cancel()
+
+    # ------------------------------------------------------------ 识别器 / 指针
 
     def _build_recognizers(self, theme: object) -> list[GestureRecognizer]:
         """点击即聚焦。走单击识别器而不是裸 DOWN——这样"点击落在输入框上"
@@ -636,25 +911,52 @@ class InputState(State["Input"]):
         assert isinstance(theme, Theme)
         slop = theme.gesture("tap_slop")
         if self._tap is None:
-            self._tap = TapGestureRecognizer(slop=slop, on_tap_down=self._focus)
+            self._tap = TapGestureRecognizer(slop=slop, on_tap_down=self._focus_from_pointer)
         else:
             self._tap.slop = slop
         return [self._tap]
 
-    def _focus(self) -> None:
-        if self._focused:
+    def _handle_pointer(self, dispatch: PointerDispatch) -> None:
+        """记住按下的水平位置：抬手判定聚焦时据此把光标插到点击处。"""
+        if dispatch.event.kind is PointerKind.DOWN:
+            self._last_pointer_x = dispatch.local_x
+
+    def _focus_from_pointer(self) -> None:
+        self._focus_node.request_focus(FocusSource.POINTER)
+        if not self._focused:
             return
-        self._focused = True
+        # 点击定位光标：不做这一下，用户点哪儿都只能跑到末尾——不像专业输入框
+        render_object = self.context.find_render_object()
+        paragraph = getattr(render_object, "painted_paragraph", None)
+        padding = getattr(render_object, "padding_h", 0.0)
+        if paragraph is None:
+            return
+        index = paragraph.position_for_point(
+            self._last_pointer_x - padding, max(1.0, paragraph.height / 2.0)
+        )
+        index = max(0, min(index, len(self._text)))
+        self._caret = self._anchor = index
+        self._composition = None
+        self._ime.cancel()
+        self._after_edit()
+
+    def _on_focus_change(self, focused: bool, visible: bool) -> None:
+        self._focused = focused
+        self._focus_visible = visible
+        if not focused:
+            # 失焦即丢弃未上屏的组合态（不上屏是 IME 的标准行为）
+            self._composition = None
+            self._ime.cancel()
         self._refresh_state()
 
     def unfocus(self) -> None:
-        """主动失焦（点击别处、Esc）。焦点管理器属后续工作，先留显式入口。"""
-        if self._focused:
-            self._focused = False
-            self._refresh_state()
+        """主动失焦（点击别处由焦点管理器负责；这里留显式入口）。"""
+        self._focus_node.unfocus()
 
     def _refresh_state(self) -> None:
         base = ComponentState.ERROR if self.widget.error else ComponentState.DEFAULT
+        # 输入框与按钮不同：鼠标点击聚焦也要显示焦点边框（与浏览器 :focus-visible
+        # 对文本输入的行为一致——你马上要打字，反馈必须可见）
         self.set_component_state(ComponentState.FOCUS_VISIBLE if self._focused else base)
 
     def set_component_state(self, state: ComponentState) -> None:
@@ -662,6 +964,173 @@ class InputState(State["Input"]):
             return
         self.component_state = state
         self.set_state()
+
+    # ------------------------------------------------------------ 事件处理（焦点系统送达）
+
+    def _handle_event(self, event: object) -> bool:
+        if isinstance(event, (TextEvent, ImeEvent)):
+            self._apply_effect(self._ime.feed(event))
+            return True
+        if isinstance(event, KeyEvent) and event.kind is KeyKind.DOWN:
+            return self._handle_key(event)
+        return False
+
+    def _handle_key(self, event: KeyEvent) -> bool:
+        ctrl = event.modifiers.ctrl or event.modifiers.meta
+        code = event.code
+
+        if code == "Backspace":
+            self._delete_backward()
+        elif code == "Delete":
+            self._delete_forward()
+        elif code == "ArrowLeft":
+            self._move_caret(-1, extend=event.modifiers.shift)
+        elif code == "ArrowRight":
+            self._move_caret(1, extend=event.modifiers.shift)
+        elif code == "Home":
+            self._set_caret(0, extend=event.modifiers.shift)
+        elif code == "End":
+            self._set_caret(len(self._text), extend=event.modifiers.shift)
+        elif code == "KeyA" and ctrl:
+            self._anchor, self._caret = 0, len(self._text)
+            self._after_edit()
+        elif code == "KeyC" and ctrl:
+            self._copy()
+        elif code == "KeyX" and ctrl:
+            self._cut()
+        elif code == "KeyV" and ctrl:
+            self._paste()
+        elif code == "Escape" and self._composition is not None:
+            self._ime.cancel()
+            self._composition = None
+            self._after_edit()
+        else:
+            return False
+        return True
+
+    # ------------------------------------------------------------ 编辑操作
+
+    def _selection_range(self) -> tuple[int, int]:
+        return (min(self._anchor, self._caret), max(self._anchor, self._caret))
+
+    def _replace_selection(self, insert: str) -> None:
+        start, end = self._selection_range()
+        self._text = self._text[:start] + insert + self._text[end:]
+        self._caret = self._anchor = start + len(insert)
+
+    def _insert(self, text: str) -> None:
+        if not text:
+            return
+        self._composition = None
+        self._replace_selection(text)
+        self._after_edit()
+
+    def _delete_backward(self) -> None:
+        start, end = self._selection_range()
+        if start != end:
+            self._replace_selection("")
+        elif self._caret > 0:
+            prev = _prev_index(self._text, self._caret)
+            self._text = self._text[:prev] + self._text[self._caret :]
+            self._caret = self._anchor = prev
+        else:
+            return
+        self._composition = None
+        self._after_edit()
+
+    def _delete_forward(self) -> None:
+        start, end = self._selection_range()
+        if start != end:
+            self._replace_selection("")
+        elif self._caret < len(self._text):
+            nxt = _next_index(self._text, self._caret)
+            self._text = self._text[: self._caret] + self._text[nxt:]
+        else:
+            return
+        self._composition = None
+        self._after_edit()
+
+    def _move_caret(self, step: int, *, extend: bool) -> None:
+        start, end = self._selection_range()
+        if not extend and start != end:
+            # 无 Shift 时先把选区收成一点（向左收左端、向右收右端）
+            self._caret = start if step < 0 else end
+        else:
+            target = (
+                _prev_index(self._text, self._caret)
+                if step < 0
+                else _next_index(self._text, self._caret)
+            )
+            self._caret = target
+        if not extend:
+            self._anchor = self._caret
+        self._composition = None
+        self._after_edit()
+
+    def _set_caret(self, index: int, *, extend: bool) -> None:
+        self._caret = max(0, min(index, len(self._text)))
+        if not extend:
+            self._anchor = self._caret
+        self._composition = None
+        self._after_edit()
+
+    def _copy(self) -> None:
+        start, end = self._selection_range()
+        if start == end:
+            return
+        writer = self._clipboard_set()
+        if writer is not None:
+            writer(self._text[start:end])
+
+    def _cut(self) -> None:
+        start, end = self._selection_range()
+        if start == end:
+            return
+        writer = self._clipboard_set()
+        if writer is not None:
+            writer(self._text[start:end])
+        self._replace_selection("")
+        self._composition = None
+        self._after_edit()
+
+    def _paste(self) -> None:
+        reader = self._clipboard_get()
+        if reader is None:
+            return
+        text = reader()
+        if text:
+            self._insert(text)
+
+    def _clipboard_get(self) -> Callable[[], str] | None:
+        owner = self.context.owner
+        return owner.clipboard_get if owner is not None else None
+
+    def _clipboard_set(self) -> Callable[[str], None] | None:
+        owner = self.context.owner
+        return owner.clipboard_set if owner is not None else None
+
+    # ------------------------------------------------------------ 收尾
+
+    def _apply_effect(self, effect: object) -> None:
+        """把 `ImeSession` 的作用落到编辑模型上。"""
+        insert = getattr(effect, "insert", "")
+        composition = getattr(effect, "composition", None)
+        if insert:
+            self._insert(insert)
+            return
+        self._composition = None if composition is None else composition.text
+        self._after_edit()
+
+    def _after_edit(self) -> None:
+        """编辑后的统一收尾：请求重建，回调外部。
+
+        候选框位置**不在这里上报**——此刻渲染对象还停在旧光标/旧段落上，
+        要等本次构建把新光标写进去；上报由 `_ControlElement._apply` 做。
+        """
+        self.set_state()
+        callback = self.widget.on_changed
+        if callback is not None:
+            callback(self._text)
 
 
 # 供外部读取解析结果的便捷入口（检查器与测试用）

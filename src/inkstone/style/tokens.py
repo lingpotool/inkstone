@@ -160,6 +160,10 @@ class RawTokens:
     # 散落在识别器里当字面量就没人能一次改全（docs/21 R7.2）。
     gestures: Mapping[str, float]
 
+    # 文本编辑装饰：光标宽度、组合态下划线宽度与下移量。
+    # 这些是**排版细节**，但同样是设计决定（docs/13 §3），组件里不许写字面量。
+    decorations: Mapping[str, float]
+
 
 _PILL = float("inf")
 
@@ -252,6 +256,13 @@ DEFAULT_RAW = RawTokens(
         # 长按判定时长与双击第二击时窗。
         "long_press_ms": 500.0,
         "double_tap_ms": 300.0,
+    },
+    decorations={
+        # 光标竖线宽度（1px 是文本输入的通用观感）
+        "caret_width": 1.0,
+        # 组合态下划线：线宽 + 相对文本框底部的下移量
+        "underline_width": 1.5,
+        "underline_offset": 2.0,
     },
 )
 

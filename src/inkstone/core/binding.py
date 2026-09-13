@@ -29,7 +29,17 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 
-from ..backend.base import PointerEvent, WindowEvent, WindowKind
+from ..backend.base import (
+    ImeEvent,
+    KeyEvent,
+    KeyKind,
+    PointerEvent,
+    PointerKind,
+    TextEvent,
+    WindowEvent,
+    WindowKind,
+)
+from ..events.focus import FocusManager
 from ..events.pointer import HitTestResult, PointerRouter
 from ..layout import BoxConstraints, Offset, Rect, RenderBox, Size
 from ..style import Theme, default_theme
@@ -157,6 +167,11 @@ class BuildOwner:
         # 手势超时（长按/双击）需要"到点排一帧"，接到 request_frame 上（R7.2）。
         self.pointer_router = PointerRouter()
         self.pointer_router.request_timeout_check = self.request_frame
+        # 焦点（R9.1）：谁接收键盘/文本/IME。整棵树共享一个，和 router 同理。
+        self.focus_manager = FocusManager()
+        # 剪贴板钩子：编辑模型要用，但 core 不认识平台（App 组装时接到后端）
+        self.clipboard_get: Callable[[], str] | None = None
+        self.clipboard_set: Callable[[str], None] | None = None
         # 文本输入通道：输入框获焦时经这两个钩子通知后端（R5.7 的协议已就位）。
         # 为什么不直接调 backend：core 不应该认识平台对象；App 组装时把
         # `backend.start_text_input` / `set_ime_rect` 接进来即可。
@@ -332,9 +347,44 @@ class BuildOwner:
         root = self.root_render_object
         if root is None:
             return False
-        result = HitTestResult()
-        root.hit_test(Offset(event.x, event.y), result)
-        return self.pointer_router.dispatch(result, event)
+        # 按下时开启"这次点击里有没有人请求焦点"的统计：没有就失焦（点空白失焦）。
+        # 只对 DOWN 生效——MOVE/UP 不该影响焦点。
+        is_down = event.kind is PointerKind.DOWN
+        if is_down:
+            self.focus_manager.begin_pointer_dispatch()
+        try:
+            result = HitTestResult()
+            root.hit_test(Offset(event.x, event.y), result)
+            return self.pointer_router.dispatch(result, event)
+        finally:
+            if is_down:
+                self.focus_manager.end_pointer_dispatch()
+
+    # ------------------------------------------------------------ 键盘 / 文本 / IME（R9.2）
+
+    def dispatch_key(self, event: KeyEvent) -> bool:
+        """把按键交给当前焦点控件。Tab / Shift+Tab 由这里统一处理（焦点遍历）。"""
+        self._require_event_phase("派发键盘事件")
+        if event.kind is KeyKind.DOWN and event.code == "Tab":
+            return self.focus_manager.move(-1 if event.modifiers.shift else 1)
+        return self.focus_manager.dispatch(event)
+
+    def dispatch_text(self, event: TextEvent) -> bool:
+        """普通文本上屏（按字母出字、IME 选词提交）交给焦点控件。"""
+        self._require_event_phase("派发文本事件")
+        return self.focus_manager.dispatch(event)
+
+    def dispatch_ime(self, event: ImeEvent) -> bool:
+        """IME 组合态事件（拼音组合/取消/提交）交给焦点控件。"""
+        self._require_event_phase("派发 IME 事件")
+        return self.focus_manager.dispatch(event)
+
+    def _require_event_phase(self, action: str) -> None:
+        if self._phase in (FramePhase.LAYOUT, FramePhase.PAINT):
+            raise FrameError(
+                f"在 {self._phase.value} 阶段不允许{action}",
+                phase=self._phase.value,
+            )
 
     def tick_gestures(self, now_ms: float) -> bool:
         """推进手势超时（长按 / 双击时窗）。时间由调用方给（后端注入）。

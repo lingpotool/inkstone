@@ -291,7 +291,14 @@ def run_window(*, dark: bool, deterministic: bool) -> int:
     每帧**整树重绘**（`force_repaint=True`）：应用外壳的脏区调度还没落地，
     而 GL 下全屏重绘实测 ~4ms，正确性优先。（真窗口路径不在 CI 覆盖内。）
     """
-    from inkstone.backend.base import PointerEvent, WindowEvent, WindowKind
+    from inkstone.backend.base import (
+        ImeEvent,
+        KeyEvent,
+        PointerEvent,
+        TextEvent,
+        WindowEvent,
+        WindowKind,
+    )
     from inkstone.backend.gl_wgl import GLUnavailableError, sdl_gl_driver
     from inkstone.backend.sdl2 import SDL2Backend
     from inkstone.gfx import DisplayListRecorder, GLRasterBackend
@@ -330,6 +337,9 @@ def run_window(*, dark: bool, deterministic: bool) -> int:
     owner.on_ime_rect = lambda rect: backend.set_ime_rect(
         window, ImeRect(rect.left, rect.top, rect.width, rect.height)
     )
+    # 剪贴板钩子：编辑模型的 Ctrl+C/X/V 经它落到平台
+    owner.clipboard_get = backend.clipboard_get_text
+    owner.clipboard_set = backend.clipboard_set_text
     constraints = BoxConstraints(max_width=WIDTH, max_height=HEIGHT)
 
     running = True
@@ -337,6 +347,12 @@ def run_window(*, dark: bool, deterministic: bool) -> int:
         for event in backend.wait_events(16.0):
             if isinstance(event, PointerEvent):
                 owner.dispatch_pointer(event)
+            elif isinstance(event, KeyEvent):
+                owner.dispatch_key(event)
+            elif isinstance(event, TextEvent):
+                owner.dispatch_text(event)
+            elif isinstance(event, ImeEvent):
+                owner.dispatch_ime(event)
             elif isinstance(event, WindowEvent):
                 owner.handle_window_event(event)
                 if event.kind is WindowKind.CLOSE:
