@@ -2,7 +2,7 @@
 
 > 写给下一个接手的对话。读完这份 + `AGENT.md` + `ROADMAP.md`，就能直接开工。
 > 交接时间：**2026-09-13** · 地基整改 R1–R6 + 收官包 R7 + GL 子包 R8 + R9–R11 **全部完成** ·
-> 无头单测 **1105 个全绿**（覆盖率 90.08%）· 黄金图 12 张像素级比对
+> 无头单测 **1152 个全绿**（覆盖率 89.93%）· 黄金图 12 张像素级比对
 >
 > **当前主线**：**GL 后端子包（`docs/22`）已完成**——R7.5 的性能基准触发了预先写死的
 > 决策规则（三场景 p95 超 10ms 预算 40–300 倍）。R8.1 接缝+逻辑层、R8.2
@@ -84,7 +84,7 @@ cb76c17 feat(core):   R7.3 DPI 缩放接线
 - [x] 100%/125%/150% 缩放（R7.3 + R11）：逻辑像素布局、物理=逻辑×scale、
       文字在物理分辨率重光栅化；150% 黄金图已肉眼核对。R11 修掉"进程 DPI
       不感知导致 Windows 位图拉伸整窗"（125% 屏实测 1:1，不再发虚）。
-- [x] 布局引擎 100% 无窗口可测，覆盖 ≥85%（实测 90.08%）
+- [x] 布局引擎 100% 无窗口可测，覆盖 ≥85%（实测 89.93%）
 - [x] **样板 App 在 Windows 上可用**（真机验收清单见下）；macOS/Linux 待适配 ⬜
 - [x] 帧时间 p95 < 8ms（R12.2 后本机实测，p95：滚动 0.5–0.8 / 全屏 1.8–2.6 /
       文本 1.5–1.8ms；场景定义未动）
@@ -206,8 +206,20 @@ docs/22 已定范围：**只实现现有显示列表 IR 的指令集**、沿用 
   pointer_id、`translate_button` 留 0 → 竞技场对不上号，**鼠标拖动列表在真机上
   一直是失效的**（单元测试两端都手写 0，同错自洽所以全绿）。统一为
   `_pointer_id_of`，并补回归测试。
-- **仍未做**：窗口位置/尺寸记忆（应用外壳层）；滚动条自动淡出（等 `motion/`）、
-  轨道点击翻页、锚点保持 / 过滚动 / 虚拟滚动（Phase 2）；
+- **R14.1 动效基座（`motion/` 不再是空壳）**：`Ticker`（排帧；跑完自动退出集合，
+  **空闲不留帧**）+ `AnimatedValue`（标量过渡，改目标从当前值起步不跳变）+
+  `prefers-reduced-motion`（读 Windows"辅助功能→动画效果"，减少动效时时长归零）。
+  时间仍只有 `begin_frame(now_ms)` 一条来源，所以动画在无头测试里完全确定。
+- **R14.2 滚动条改覆盖式 + 自动隐藏**（ADR-0026 v2，用户拍板 Chromium/Flutter
+  路线）：撤掉槽位让位，内容回到整视口排版；活动时亮起、闲置 900ms 后 250ms
+  淡出；悬停/拖拽变粗（10→14px）。两个真机踩出来的坑：①可见性必须**每帧查
+  路由的 hover 链**——指针移出容器后收不到事件，靠事件置位的标志永远清不掉，
+  条就不淡出；②淡出要**从截止时刻起算**，否则掉帧会让时长取决于帧率。
+- **R14.3 轨道翻页 + 双轴转角**：点轨道翻 90% 视口（留 10% 重叠跟读）；
+  双轴时两条轨道各让开对方、右下角补方块。条不可见时点轨道不响应。
+- **仍未做**：窗口位置/尺寸记忆（应用外壳层）；**键盘滚动**（需要 ScrollView
+  可聚焦，属焦点系统的扩展）、Shift+滚轮横向（等 BOTH 容器有消费者）、
+  锚点保持 / 过滚动 / 虚拟滚动（Phase 2）；
   Linux GLX/EGL、macOS CGL；
   路径三角化；通用脏矩形损伤跟踪；应用外壳脏区调度；macOS 的 NSWindow
   appearance 接线（`windows_shell` 目前只有 Win32 实现，其他平台是安全空操作）。
@@ -245,12 +257,12 @@ ADR-0025 拍板：macOS/Linux 适配独立成工作流，不阻塞 Windows 开�
 
 ```bash
 cd /e/inkstone
-./.venv/Scripts/python.exe -m pytest tests -q          # 1105 个必须全绿
+./.venv/Scripts/python.exe -m pytest tests -q          # 1152 个必须全绿
 ./.venv/Scripts/python.exe -m ruff check src tests examples benchmarks
 ./.venv/Scripts/python.exe -m ruff format --check src tests examples benchmarks
 ./.venv/Scripts/python.exe -m mypy                     # strict，零错误
 ./.venv/Scripts/python.exe -m pytest tests -q -m "not slow" \
-    --cov=src/inkstone --cov-fail-under=85             # 覆盖率（90.08%）
+    --cov=src/inkstone --cov-fail-under=85             # 覆盖率（89.93%）
 # 或一把梭：make check
 ```
 
@@ -318,7 +330,7 @@ cd /e/inkstone
 ## 八、开工姿势（建议）
 
 1. 读 `AGENT.md`（**重点看 ADR 表**）→ `ROADMAP.md` → 本文档
-2. 跑一遍验证命令确认起点全绿（1105 passed / mypy 干净 / 覆盖 90.08%）
+2. 跑一遍验证命令确认起点全绿（1152 passed / mypy 干净 / 覆盖 89.93%）
 3. 跑一次 `python examples/notes.py` —— 看当前最完整的界面长什么样；
    `--sdl2` 看真窗口（图标 / 标题栏配色 / snap）。
 4. 按第三节顺序推进：①②（GL 子包、焦点编辑、窗口身份）**均已完成**，
