@@ -10,6 +10,7 @@
 import pytest
 
 from inkstone.backend.base import PointerEvent, PointerKind
+from inkstone.core import BuildOwner
 from inkstone.events.pointer import HitTestResult, PointerRouter
 from inkstone.gfx import (
     DisplayList,
@@ -632,3 +633,144 @@ class TestScrollbarHoverDoesNotDisturbScrolling:
         )
         assert scroll._thumb_hover is False
         assert scroll.scroll_offset == offset
+
+
+class TestScrollbarThumbDrag:
+    """拖拇指改偏移（R13.2）。映射是纯几何，先测穿。
+
+    命中判定与抓取点都按**视口局部坐标**；绝对定位（抓住哪一点就跟着走），
+    不是增量拖动——增量会让拇指与指针逐渐错位。
+    """
+
+    def test_grab_keeps_the_offset_while_the_pointer_has_not_moved(self) -> None:
+        scroll = TestScrollbarGeometry._styled()
+        rect = scroll.thumb_rect()
+        assert rect is not None
+        scroll.begin_thumb_drag(rect.left + 2.0, rect.top + 3.0)
+        assert scroll._thumb_drag is True
+        assert scroll.scroll_offset.dy == 0.0, "只按下不该滚动"
+
+    def test_dragging_to_the_bottom_reaches_max_scroll(self) -> None:
+        scroll = TestScrollbarGeometry._styled()
+        rect = scroll.thumb_rect()
+        assert rect is not None
+        grab_y = rect.top + 3.0
+        scroll.begin_thumb_drag(rect.left + 2.0, grab_y)
+        scroll.drag_thumb_to(rect.left + 2.0, 100.0)  # 拖到视口底
+        assert scroll.scroll_offset.dy == pytest.approx(scroll.max_scroll.dy)
+        scroll.end_thumb_drag()
+        assert scroll._thumb_drag is False
+
+    def test_dragging_to_the_top_reaches_zero(self) -> None:
+        scroll = TestScrollbarGeometry._styled()
+        scroll.scroll_to(dy=scroll.max_scroll.dy)
+        rect = scroll.thumb_rect()
+        assert rect is not None
+        scroll.begin_thumb_drag(rect.left + 2.0, rect.top + 3.0)
+        scroll.drag_thumb_to(rect.left + 2.0, 3.0)
+        assert scroll.scroll_offset.dy == pytest.approx(0.0)
+
+    def test_grab_point_is_preserved_so_the_thumb_does_not_jump(self) -> None:
+        """按在拇指下缘再拖：拇指不该"跳"到指针对齐。"""
+        scroll = TestScrollbarGeometry._styled()
+        rect = scroll.thumb_rect()
+        assert rect is not None
+        depth = rect.height - 2.0  # 抓住拇指底部附近
+        scroll.begin_thumb_drag(rect.left + 2.0, rect.top + depth)
+        scroll.drag_thumb_to(rect.left + 2.0, rect.top + depth + 10.0)
+        moved = scroll.scroll_offset.dy
+        assert moved > 0.0
+        # 拇指位移与指针位移一致（不是跳到指针处）
+        new_rect = scroll.thumb_rect()
+        assert new_rect is not None
+        assert new_rect.top == pytest.approx(rect.top + 10.0, abs=1.0)
+
+
+class TestThumbDragInsideAScrollView:
+    """整链：ScrollView 的把手识别器 + 内容拖拽识别器共处一个竞技场。"""
+
+    @staticmethod
+    def _owner() -> tuple[BuildOwner, RenderScroll]:
+        from inkstone.style import Theme
+        from inkstone.widgets import Box, Column, ScrollView
+
+        # 用固定高度的 Box 而不是 Text：这条测试不关心度量，而没注入 text_engine
+        # 的 owner 会把 Text 量成 0 高，"可滚动"就不存在了。
+        owner = BuildOwner(theme=Theme.light())
+        owner.mount(ScrollView(Column(children=[Box(height=30.0) for _ in range(40)])))
+        owner.begin_frame(BoxConstraints(max_width=200.0, max_height=120.0))
+        found: list[RenderScroll] = []
+
+        def walk(node: object) -> None:
+            if isinstance(node, RenderScroll):
+                found.append(node)
+            for child in getattr(node, "children", ()) or ():
+                walk(child)
+
+        walk(owner.root_render_object)
+        assert found
+        return owner, found[0]
+
+    def test_two_recognizers_are_registered(self) -> None:
+        _, scroll = self._owner()
+        kinds = [type(r).__name__ for r in scroll.recognizers]
+        assert kinds == ["DragGestureRecognizer", "HandleDragRecognizer"]
+
+    def test_dragging_the_thumb_scrolls_and_releasing_ends_the_drag(self) -> None:
+        owner, scroll = self._owner()
+        assert scroll.can_scroll
+        rect = scroll.thumb_rect()
+        assert rect is not None
+        origin = scroll.local_to_global(Offset(0.0, 0.0))
+        thumb_x = origin.dx + rect.left + rect.width / 2.0
+        thumb_y = origin.dy + rect.top + 2.0
+
+        owner.dispatch_pointer(
+            PointerEvent(kind=PointerKind.DOWN, x=thumb_x, y=thumb_y, window_id=0, button=1)
+        )
+        assert scroll.scroll_offset.dy == 0.0, "按住拇指不移动时不滚动"
+        owner.dispatch_pointer(
+            PointerEvent(kind=PointerKind.MOVE, x=thumb_x, y=thumb_y + 40.0, window_id=0)
+        )
+        assert scroll.scroll_offset.dy > 0.0, "往下拖拇指必须滚动内容"
+        owner.dispatch_pointer(
+            PointerEvent(kind=PointerKind.UP, x=thumb_x, y=thumb_y + 40.0, window_id=0)
+        )
+        assert scroll._thumb_drag is False
+
+    def test_a_press_on_content_does_not_scroll_before_the_slop(self) -> None:
+        """整链回归：把手识别器**不能**把内容拖拽的 slop 门槛弄丢。
+
+        这正是 `HandleDragRecognizer` 用 hold 退场而不是直接 reject 的原因——
+        没有这条，鼠标在列表上轻微一抖就会滚动（ADR-0014 修掉的 bug）。
+        """
+        owner, scroll = self._owner()
+        origin = scroll.local_to_global(Offset(0.0, 0.0))
+        owner.dispatch_pointer(
+            PointerEvent(
+                kind=PointerKind.DOWN,
+                x=origin.dx + 40.0,
+                y=origin.dy + 40.0,
+                window_id=0,
+                button=1,
+            )
+        )
+        for delta in (1.0, 2.0, 3.0):  # 都没超过 tap_slop=8
+            owner.dispatch_pointer(
+                PointerEvent(
+                    kind=PointerKind.MOVE,
+                    x=origin.dx + 40.0,
+                    y=origin.dy + 40.0 + delta,
+                    window_id=0,
+                )
+            )
+        assert scroll.scroll_offset.dy == 0.0, "8px 以内的抖动不许滚动"
+        owner.dispatch_pointer(
+            PointerEvent(
+                kind=PointerKind.MOVE,
+                x=origin.dx + 40.0,
+                y=origin.dy + 40.0 + 40.0,
+                window_id=0,
+            )
+        )
+        assert scroll.scroll_offset.dy > 0.0, "超过 slop 后必须能滚"

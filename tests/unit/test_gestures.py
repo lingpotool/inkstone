@@ -19,7 +19,9 @@ from inkstone.core import BuildOwner
 from inkstone.events.gestures import (
     DragGestureRecognizer,
     GestureArena,
+    GestureRecognizer,
     GestureState,
+    HandleDragRecognizer,
     LongPressGestureRecognizer,
     TapGestureRecognizer,
 )
@@ -291,3 +293,132 @@ class TestArenaUnit:
 
         arena.release_hold(holder)
         assert arena.resolved and holder.state is GestureState.ACCEPTED
+
+
+class TestHandleDragRecognizer:
+    """把手拖拽（R13.2）：只在按下点命中把手时参与竞争，且**不破坏**既有仲裁。
+
+    关键回归：按下点不在把手上时，识别器必须"握着不放"到抬起再退出。
+    否则竞技场"只剩一个未 hold 的成员就判胜"的规则会让滚动拖拽在 DOWN
+    当场获胜，绕过它的 slop 门槛——轻微抖动就滚动（ADR-0014 修掉的 bug）。
+    """
+
+    def _rig(self) -> tuple[HandleDragRecognizer, list[tuple[float, float]], list[str]]:
+        drags: list[tuple[float, float]] = []
+        events: list[str] = []
+        rec = HandleDragRecognizer(
+            to_local=lambda x, y: (x, y),
+            hit_test=lambda x, y: x > 50.0,  # 右半边是"把手"
+            on_start=lambda x, y: events.append("start"),
+            on_drag=lambda x, y: drags.append((x, y)),
+            on_end=lambda: events.append("end"),
+        )
+        return rec, drags, events
+
+    def _press(self, router: PointerRouter, x: float, y: float, node: RenderBox) -> None:
+        result = HitTestResult()
+        node.hit_test(Offset(x, y), result)
+        router.dispatch(
+            result, PointerEvent(kind=PointerKind.DOWN, x=x, y=y, window_id=0, time_ms=0.0)
+        )
+
+    def _node(self, rec: HandleDragRecognizer) -> RenderBox:
+        return _grip_node(rec)
+
+    def test_dragging_the_handle_tracks_the_pointer_absolutely(self) -> None:
+        rec, drags, events = self._rig()
+        node = self._node(rec)
+        router = PointerRouter()
+        self._press(router, 80.0, 10.0, node)
+        assert rec.state is GestureState.ACCEPTED, "抓住把手应当场获胜"
+        router.dispatch(
+            node_hit(node, 80.0, 40.0),
+            PointerEvent(kind=PointerKind.MOVE, x=80.0, y=40.0, window_id=0, time_ms=1.0),
+        )
+        router.dispatch(
+            node_hit(node, 80.0, 60.0),
+            PointerEvent(kind=PointerKind.UP, x=80.0, y=60.0, window_id=0, time_ms=2.0),
+        )
+        assert drags == [(80.0, 40.0), (80.0, 60.0)], "拖动要按绝对位置跟随指针"
+        assert events == ["start", "end"]
+
+    def test_press_outside_the_handle_does_not_steal_the_gesture(self) -> None:
+        """按下点不在把手上 → 退出，交给竞争的另一方。"""
+        rec, drags, events = self._rig()
+        other = _CountingRecognizer()
+        node = _grip_node(other, rec)
+
+        router = PointerRouter()
+        self._press(router, 10.0, 10.0, node)
+        # 另一个识别器持有（长按/双击会 hold），这里让它 explicitly 获胜
+        other.resolve_accept()
+        assert rec.state is GestureState.REJECTED
+        assert drags == [] and events == []
+
+    def test_bailing_out_does_not_auto_accept_a_lone_peer_on_down(self) -> None:
+        """**回归的核心**：把手不参与时，同级的拖拽不许在 DOWN 当场获胜。
+
+        直接 reject 会触发竞技场的自动判胜，让滚动拖拽跳过 slop 门槛。
+        """
+        rec, _, _ = self._rig()
+        peer = _SlopProbe(slop=8.0)
+        node = _grip_node(peer, rec)
+
+        router = PointerRouter()
+        self._press(router, 10.0, 10.0, node)  # 没命中把手
+        assert peer.state is GestureState.PENDING, "同级拖拽不该在 DOWN 就被判胜"
+        # 微动（未过 slop）仍然不许开始
+        router.dispatch(
+            node_hit(node, 12.0, 10.0),
+            PointerEvent(kind=PointerKind.MOVE, x=12.0, y=10.0, window_id=0, time_ms=1.0),
+        )
+        assert peer.started is False, "8px 以内不得开始拖拽"
+        # 超过 slop 才赢
+        router.dispatch(
+            node_hit(node, 30.0, 10.0),
+            PointerEvent(kind=PointerKind.MOVE, x=30.0, y=10.0, window_id=0, time_ms=2.0),
+        )
+        assert peer.state is GestureState.ACCEPTED and peer.started is True
+
+
+class _GripNode(RenderBox):
+    """固定 100×100 的可命中节点，用来挂识别器。"""
+
+    def perform_layout(self, constraints: BoxConstraints) -> Size:
+        return constraints.constrain(Size(100.0, 100.0))
+
+
+def _grip_node(*recognizers: GestureRecognizer) -> _GripNode:
+    node = _GripNode(debug_name="Grip")
+    node.layout(BoxConstraints(max_width=100.0, max_height=100.0))
+    node.recognizers = list(recognizers)
+    return node
+
+
+class _CountingRecognizer(GestureRecognizer):
+    pass
+
+
+class _SlopProbe(GestureRecognizer):
+    """记录"是否真的开始拖拽"，用来验证 slop 门槛没有被绕过。"""
+
+    def __init__(self, *, slop: float) -> None:
+        super().__init__(slop=slop)
+        self.started = False
+
+    def on_pointer_down(self, event: PointerEvent) -> None:
+        self._down = (event.x, event.y)
+
+    def on_pointer_move(self, event: PointerEvent) -> None:
+        if self.started or self._down is None:
+            return
+        if not self._moved_beyond_slop(event):
+            return
+        self.resolve_accept()
+        self.started = True
+
+
+def node_hit(node: RenderBox, x: float, y: float) -> HitTestResult:
+    result = HitTestResult()
+    node.hit_test(Offset(x, y), result)
+    return result

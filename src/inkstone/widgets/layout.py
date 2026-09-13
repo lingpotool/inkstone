@@ -31,7 +31,7 @@ from ..core import (
 )
 from ..core.element import _SLOT_UNCHANGED, Element
 from ..core.key import Key
-from ..events.gestures import DragGestureRecognizer
+from ..events.gestures import DragGestureRecognizer, HandleDragRecognizer
 from ..layout import (
     Axis,
     RenderBox,
@@ -43,7 +43,7 @@ from ..layout import (
     ScrollDirection,
 )
 from ..layout.protocol import CrossAxisAlignment, MainAxisAlignment, MainAxisSize
-from ..layout.types import EdgeInsets
+from ..layout.types import EdgeInsets, Offset
 
 __all__ = ["Column", "Flex", "Flexible", "Row", "ScrollView"]
 
@@ -249,7 +249,9 @@ class _ScrollElement(RenderObjectElement):
             self._drag.horizontal = horizontal
             self._drag.vertical = vertical
         # 识别器由元素写进渲染对象（RenderObject 拿不到主题令牌，R7.2）
-        scroll.recognizers = [self._drag]
+        # **顺序有意为之**：内容拖拽在前、把手拖拽在后。竞技场按注册顺序投递
+        # 抬起事件，拇指那个要在内容拖拽自决之后再退出，收敛时机才和以前一致。
+        scroll.recognizers = [self._drag, self._thumb_drag(scroll)]
         # 滚轮步长同理：布局层不读主题，令牌值由元素送进去（R12）
         scroll.wheel_step = theme.gesture("wheel_step")
         # 滚动条外观：几何来自 tokens.scrollbar，颜色来自语义色（R13.1）
@@ -260,6 +262,27 @@ class _ScrollElement(RenderObjectElement):
             margin=theme.scrollbar("margin"),
             color=theme.color("scrollbar"),
             hover_color=theme.color("scrollbar-hover"),
+        )
+
+    def _thumb_drag(self, scroll: RenderScroll) -> HandleDragRecognizer:
+        """滚动条拇指的拖拽识别器（R13.2）。
+
+        识别器住在 L1，不认识布局树，所以：
+        - `to_local` 把窗口坐标换算成滚动容器的局部坐标（沿父链取原点）；
+        - `hit_test` / `on_start` / `on_drag` / `on_end` 全部转交给渲染对象，
+          那里有拇指几何与偏移映射。
+        """
+
+        def to_local(x: float, y: float) -> tuple[float, float]:
+            origin = scroll.local_to_global(Offset(0.0, 0.0))
+            return (x - origin.dx, y - origin.dy)
+
+        return HandleDragRecognizer(
+            to_local=to_local,
+            hit_test=scroll.hit_thumb,
+            on_start=scroll.begin_thumb_drag,
+            on_drag=scroll.drag_thumb_to,
+            on_end=scroll.end_thumb_drag,
         )
 
     def _sync_child(self) -> None:

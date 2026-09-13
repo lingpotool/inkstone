@@ -29,6 +29,7 @@ __all__ = [
     "GestureArena",
     "GestureRecognizer",
     "GestureState",
+    "HandleDragRecognizer",
     "LongPressGestureRecognizer",
     "TapGestureRecognizer",
 ]
@@ -498,3 +499,76 @@ class DragGestureRecognizer(GestureRecognizer):
         if not self.vertical:
             dy = 0.0
         self._on_update(dx, dy)
+
+
+class HandleDragRecognizer(GestureRecognizer):
+    """拖拽一个"把手"（滚动条拇指；将来的 splitter / 滑块同理）。
+
+    与 `DragGestureRecognizer` 的两点不同：
+
+    1. **只在按下点落在把手上时才参与竞争**（`hit_test`），并且按**绝对位置**
+       跟随指针（抓住拇指的哪一点，那一点就跟着指针走），而不是按位移增量；
+    2. 按下点不在把手上时，它不立刻退出，而是 `hold()` 到抬起再退出。
+
+    第 2 点不是绕远路，是必须的：竞技场有一条"只剩一个未 hold 的成员就自动
+    判胜"的规则，直接 `reject()` 会让滚动容器的拖拽在 DOWN 当场获胜，从而
+    **绕过它的 slop 门槛**——轻微抖动就开始滚动，正是 ADR-0014 修掉的那个
+    bug。握着不放，竞技场的收敛时机与加这个识别器之前完全一致。
+
+    坐标换算（窗口坐标 → 把手所有者局部坐标）由 `to_local` 注入：
+    识别器住在 L1，不认识布局树，这层换算属于调用方。
+    """
+
+    def __init__(
+        self,
+        *,
+        to_local: Callable[[float, float], tuple[float, float]],
+        hit_test: Callable[[float, float], bool],
+        on_start: Callable[[float, float], None] | None = None,
+        on_drag: Callable[[float, float], None] | None = None,
+        on_end: Callable[[], None] | None = None,
+        slop: float = 0.0,
+    ) -> None:
+        super().__init__(slop=slop)
+        self._to_local = to_local
+        self._hit_test = hit_test
+        self._on_start = on_start
+        self._on_drag = on_drag
+        self._on_end = on_end
+        self._grabbed = False
+
+    def on_pointer_down(self, event: PointerEvent) -> None:
+        local = self._to_local(event.x, event.y)
+        if self._hit_test(*local):
+            self._grabbed = True
+            self.resolve_accept()  # 抓住把手：当场获胜，其余识别器出局
+            if self._on_start is not None:
+                self._on_start(*local)
+        else:
+            self.hold()
+
+    def on_pointer_move(self, event: PointerEvent) -> None:
+        if not self._grabbed or self._on_drag is None:
+            return
+        self._on_drag(*self._to_local(event.x, event.y))
+
+    def on_pointer_up(self, event: PointerEvent) -> None:
+        if self._grabbed:
+            # 抬起位置也算一步：快速拖动时最后一个 MOVE 可能早于真正松手的位置，
+            # 不补这一下，拇指会停在手指前面（"差一截"的手感）。
+            if self._on_drag is not None:
+                self._on_drag(*self._to_local(event.x, event.y))
+            self._finish()
+        else:
+            # 抬起才退出：见类文档第 2 点，早退会破坏竞技场的收敛时机
+            self.release_hold()
+            self.resolve_reject()
+
+    def on_reject(self) -> None:
+        self.release_hold()
+        self._finish()
+
+    def _finish(self) -> None:
+        if self._grabbed and self._on_end is not None:
+            self._on_end()
+        self._grabbed = False

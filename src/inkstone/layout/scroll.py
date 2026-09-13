@@ -82,6 +82,8 @@ class RenderScroll(RenderBox):
         #: 指针是否停在拇指上 / 是否正在拖它（拖拽由 R13.2 的识别器驱动）。
         self._thumb_hover: bool = False
         self._thumb_drag: bool = False
+        #: 抓取点相对拇指顶端的距离：拖拽时保持它不变，拇指才不会跳。
+        self._thumb_grab: float = 0.0
         self._child: RenderBox | None = None
         self._scroll: Offset = Offset(0.0, 0.0)
         self._content_size: Size = Size(0.0, 0.0)
@@ -284,15 +286,61 @@ class RenderScroll(RenderBox):
                 dispatch.stop_propagation()
             return
         if event.kind in (PointerKind.MOVE, PointerKind.LEAVE, PointerKind.ENTER):
-            self._set_thumb_hover(self._hit_thumb(dispatch.local_x, dispatch.local_y))
+            self._set_thumb_hover(self.hit_thumb(dispatch.local_x, dispatch.local_y))
 
     # ------------------------------------------------------------ 滚动条状态
 
-    def _hit_thumb(self, x: float, y: float) -> bool:
+    def hit_thumb(self, x: float, y: float) -> bool:
+        """视口局部坐标是否落在拇指上（把手拖拽的命中判定）。"""
         rect = self.thumb_rect()
         if rect is None:
             return False
         return rect.contains(x, y)
+
+    def begin_thumb_drag(self, x: float, y: float) -> None:
+        """抓住拇指：记住"抓住的是拇指上的哪一点"，拖拽时该点跟着指针走。
+
+        为什么要记这一点而不是直接对齐指尖：手指按在拇指下缘时若对齐指尖，
+        拇指会"跳"一下。抓取点保持相对位置是拖拽的标准手感。
+        """
+        rect = self.thumb_rect()
+        if rect is None:
+            return
+        if self.direction is ScrollDirection.HORIZONTAL:
+            self._thumb_grab = x - rect.left
+        else:
+            self._thumb_grab = y - rect.top
+        self._thumb_drag = True
+        self._set_thumb_hover(True)
+        self.mark_needs_paint()
+
+    def drag_thumb_to(self, x: float, y: float) -> None:
+        """把拇指拖到指针处（绝对定位），换算成滚动偏移。"""
+        rect = self.thumb_rect()
+        if rect is None:
+            return
+        if self.direction is ScrollDirection.HORIZONTAL:
+            track = self._size.width
+            thumb_len = rect.width
+            want = x - self._thumb_grab
+            limit = self.max_scroll.dx
+        else:
+            track = self._size.height
+            thumb_len = rect.height
+            want = y - self._thumb_grab
+            limit = self.max_scroll.dy
+        travel = track - thumb_len
+        if travel <= 0.0 or limit <= 0.0:
+            return
+        ratio = min(max(want / travel, 0.0), 1.0)
+        if self.direction is ScrollDirection.HORIZONTAL:
+            self.scroll_to(dx=ratio * limit)
+        else:
+            self.scroll_to(dy=ratio * limit)
+
+    def end_thumb_drag(self) -> None:
+        self._thumb_drag = False
+        self.mark_needs_paint()
 
     def _set_thumb_hover(self, hovered: bool) -> None:
         """悬停态只改颜色，但要**标脏重绘**——否则拇指不会变亮。
