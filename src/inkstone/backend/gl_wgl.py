@@ -70,68 +70,99 @@ _PACK_ALIGNMENT = 0x0D05
 _RGBA8 = 0x8058
 _MAX_TEXTURE_SIZE = 0x0D33
 
+#: "还没设过 scissor"的哨兵——与 None（=关闭裁剪）必须区分开
+_UNSET: Any = object()
+
 
 class GLUnavailableError(RuntimeError):
     """拿不到 GL 上下文（非 Windows、驱动缺失、或 FBO 不完整）。"""
 
 
+# 矩形合批：每个矩形的 center/half/radius/ring/color 都做成**顶点属性**，
+# 于是同一次 scissor 下的所有矩形能合成一次 glDrawArrays（R8.3）。
+# 用 uniform 的话每个矩形都得单独一次 draw（uniform 是 program 级状态），
+# 全屏 97 条指令就是 97 次 draw + 97 次 VBO 上传——实测 0.25ms/指令。
 _SDF_VERTEX = b"""#version 120
 attribute vec2 a_pos;
-attribute vec2 a_uv;
+attribute vec2 a_local;
+attribute vec2 a_half;
+attribute float a_radius;
+attribute float a_ring;
+attribute vec4 a_color;
 uniform vec2 u_viewport;
-uniform vec2 u_center;
 varying vec2 v_local;
-varying vec2 v_uv;
+varying vec2 v_half;
+varying float v_radius;
+varying float v_ring;
+varying vec4 v_color;
 void main() {
     vec2 clip = (a_pos / u_viewport) * 2.0 - 1.0;
     gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
-    v_local = a_pos - u_center;
-    v_uv = a_uv;
+    v_local = a_local;
+    v_half = a_half;
+    v_radius = a_radius;
+    v_ring = a_ring;
+    v_color = a_color;
 }
 """
 
 _SDF_FRAGMENT = b"""#version 120
-uniform vec2 u_half;
-uniform float u_radius;
-uniform float u_ring;      // 0 = filled; > 0 = draw only the inner ring of that width
-uniform vec4 u_color;
 varying vec2 v_local;
+varying vec2 v_half;
+varying float v_radius;
+varying float v_ring;
+varying vec4 v_color;
 float sd_round_rect(vec2 p, vec2 b, float r) {
     vec2 q = abs(p) - (b - r);
     return length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;
 }
 void main() {
-    float d = sd_round_rect(v_local, u_half, u_radius);
+    float d = sd_round_rect(v_local, v_half, v_radius);
     float coverage = clamp(0.5 - d, 0.0, 1.0);   // 1px analytic antialiasing
-    if (u_ring > 0.0) {
+    if (v_ring > 0.0) {
         // stroke grows inward: inside outer edge, outside inner edge
-        coverage = min(coverage, clamp(0.5 + (d + u_ring), 0.0, 1.0));
+        coverage = min(coverage, clamp(0.5 + (d + v_ring), 0.0, 1.0));
     }
-    gl_FragColor = vec4(u_color.rgb, u_color.a * coverage);
+    gl_FragColor = vec4(v_color.rgb, v_color.a * coverage);
 }
 """
 
+#: 每个矩形顶点的浮点数个数：pos(2)+local(2)+half(2)+radius(1)+ring(1)+color(4)
+_RECT_FLOATS = 12
+
+# 字形走**图集 + 合批**（R8.3）：所有字形共用一张 GL_RED 图集纹理，
+# 每个字形只贡献一个带 uv 的四边形，整段 run 一次 draw。
+# 不用图集的话每个字形要单独绑纹理 + 一次 draw（实测 37µs/字形）。
 _GLYPH_VERTEX = b"""#version 120
 attribute vec2 a_pos;
 attribute vec2 a_uv;
+attribute vec4 a_color;
 uniform vec2 u_viewport;
 varying vec2 v_uv;
+varying vec4 v_color;
 void main() {
     vec2 clip = (a_pos / u_viewport) * 2.0 - 1.0;
     gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
     v_uv = a_uv;
+    v_color = a_color;
 }
 """
 
 _GLYPH_FRAGMENT = b"""#version 120
 uniform sampler2D u_texture;
-uniform vec4 u_color;
 varying vec2 v_uv;
+varying vec4 v_color;
 void main() {
     float coverage = texture2D(u_texture, v_uv).r;
-    gl_FragColor = vec4(u_color.rgb, u_color.a * coverage);
+    gl_FragColor = vec4(v_color.rgb, v_color.a * coverage);
 }
 """
+
+#: 每个字形顶点的浮点数个数：pos(2)+uv(2)+color(4)
+_GLYPH_FLOATS = 8
+#: 字形图集边长（texel）。2048² = 4MB 单通道，够 CJK 常用字；
+#: 满了就清空重排（见 `_atlas_uv`），不会无限增长。
+_ATLAS_SIZE = 2048
 
 
 class _GL:
@@ -225,6 +256,19 @@ class _GL:
         )
         self.glDrawArrays = self._core(
             "glDrawArrays", None, ctypes.c_uint, ctypes.c_int, ctypes.c_int
+        )
+        self.glTexSubImage2D = self._core(
+            "glTexSubImage2D",
+            None,
+            ctypes.c_uint,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.c_void_p,
         )
 
     def load_extensions(self) -> None:
@@ -358,12 +402,22 @@ class WglGLDriver:
         self._fb = 0
         self._color_texture = 0
         self._vbo = 0
+        self._rect_vbo = 0
+        #: 矩形合批缓冲（每顶点 12 个 float，见 `_RECT_FLOATS`）
+        self._rect_vertices: list[float] = []
+        #: 字形合批缓冲（每顶点 8 个 float，见 `_GLYPH_FLOATS`）
+        self._glyph_vertices: list[float] = []
+        #: 字形图集：内容键 → (u0, v0, u1, v1) 归一化 uv
+        self._atlas: dict[tuple[int, int, int, int, bytes], tuple[float, float, float, float]] = {}
+        self._atlas_texture = 0
+        self._atlas_x = 0
+        self._atlas_y = 0
+        self._atlas_row_h = 0
+        #: 当前 scissor；`_UNSET` 表示"还没设过"，用于跳过重复的 GL 状态调用
+        self._scissor: Any = _UNSET
         self._width = 0
         self._height = 0
         self._textures: dict[int, int] = {}
-        #: 内容键 → 纹理句柄（见 `_glyph_texture`）
-        self._glyph_textures: dict[tuple[int, int, int, int, bytes], int] = {}
-        self._glyph_texture_limit = 2048
         self._create_context()
         self._gl.load_extensions()
         self._sdf = _Program(self._gl, _SDF_VERTEX, _SDF_FRAGMENT)
@@ -501,6 +555,9 @@ class WglGLDriver:
         vbo = ctypes.c_uint(0)
         self._gl.glGenBuffers(1, ctypes.byref(vbo))
         self._vbo = vbo.value
+        rect_vbo = ctypes.c_uint(0)
+        self._gl.glGenBuffers(1, ctypes.byref(rect_vbo))
+        self._rect_vbo = rect_vbo.value
 
     # ------------------------------------------------------------ 帧目标
 
@@ -544,12 +601,22 @@ class WglGLDriver:
         self._gl.glClear(_COLOR_BUFFER_BIT)
         self._gl.glEnable(_BLEND)
         self._gl.glBlendFunc(_SRC_ALPHA, _ONE_MINUS_SRC_ALPHA)
+        # 帧首复位合批状态：上一帧若在异常路径里没冲干净，这里兜住
+        self._rect_vertices.clear()
+        self._scissor = _UNSET
 
     def end(self) -> None:
-        # 离屏：命令已提交到 FBO，不做 unbind（读回还要用它）；上屏（swap）属 R8.4
-        pass
+        # 离屏：冲掉最后两批，不做 unbind（读回还要用它）；上屏（swap）属 R8.4
+        self._flush_rects()
+        self._flush_glyphs()
 
     def set_scissor(self, rect: Any) -> None:
+        if rect == self._scissor:
+            return
+        # scissor 与绘制顺序绑定：换裁剪前必须把上一批画掉，否则它们会被新 scissor 裁错
+        self._flush_rects()
+        self._flush_glyphs()
+        self._scissor = rect
         gl = self._gl
         if rect is None:
             gl.glDisable(_SCISSOR_TEST)
@@ -563,61 +630,178 @@ class WglGLDriver:
         gl.glScissor(x, max(0, y), max(0, width), max(0, height))
 
     def fill_rect(self, rect: Any, radius: float, color: Any) -> None:
-        self._draw_round_rect(rect, radius, color, ring=0.0)
+        self._queue_rect(rect, radius, color, ring=0.0)
 
     def stroke_rect(self, rect: Any, radius: float, width: float, color: Any) -> None:
-        self._draw_round_rect(rect, radius, color, ring=width)
+        self._queue_rect(rect, radius, color, ring=width)
 
-    def _draw_round_rect(self, rect: Any, radius: float, color: Any, ring: float) -> None:
+    def _queue_rect(self, rect: Any, radius: float, color: Any, ring: float) -> None:
+        """把一个矩形写进合批缓冲。真正下 draw 在 `_flush_rects`。"""
+        # 混合顺序相关：矩形与字形交替时必须先画已排队的字形
+        self._flush_glyphs()
+        hx, hy = rect.width / 2.0, rect.height / 2.0
+        r, g, b, a = color.r / 255.0, color.g / 255.0, color.b / 255.0, float(color.a)
+        x0, y0, x1, y1 = rect.left, rect.top, rect.right, rect.bottom
+        # 两个三角形（6 顶点），每顶点：pos, local, half, radius, ring, color
+        corners = (
+            (x0, y0, -hx, -hy),
+            (x1, y0, hx, -hy),
+            (x1, y1, hx, hy),
+            (x0, y0, -hx, -hy),
+            (x1, y1, hx, hy),
+            (x0, y1, -hx, hy),
+        )
+        for px, py, lx, ly in corners:
+            self._rect_vertices.extend((px, py, lx, ly, hx, hy, radius, ring, r, g, b, a))
+
+    def _flush_rects(self) -> None:
+        if not self._rect_vertices:
+            return
         gl = self._gl
         program = self._sdf
+        array = (ctypes.c_float * len(self._rect_vertices))(*self._rect_vertices)
         gl.glUseProgram(program.id)
-        self._set_quad(rect.left, rect.top, rect.width, rect.height)
         gl.glUniform2f(program.uniform(b"u_viewport"), float(self._width), float(self._height))
-        gl.glUniform2f(
-            program.uniform(b"u_center"),
-            rect.left + rect.width / 2.0,
-            rect.top + rect.height / 2.0,
-        )
-        gl.glUniform2f(program.uniform(b"u_half"), rect.width / 2.0, rect.height / 2.0)
-        gl.glUniform1f(program.uniform(b"u_radius"), radius)
-        gl.glUniform1f(program.uniform(b"u_ring"), ring)
-        gl.glUniform4f(
-            program.uniform(b"u_color"),
-            color.r / 255.0,
-            color.g / 255.0,
-            color.b / 255.0,
-            float(color.a),
-        )
-        self._bind_quad_attributes(program)
-        gl.glDrawArrays(_TRIANGLES, 0, 6)
+        gl.glBindBuffer(_ARRAY_BUFFER, self._rect_vbo)
+        gl.glBufferData(_ARRAY_BUFFER, ctypes.sizeof(array), array, _STREAM_DRAW)
+        self._bind_rect_attributes(program)
+        gl.glDrawArrays(_TRIANGLES, 0, len(self._rect_vertices) // _RECT_FLOATS)
+        gl.glBindBuffer(_ARRAY_BUFFER, 0)
         gl.glUseProgram(0)
+        self._rect_vertices.clear()
+
+    def _bind_rect_attributes(self, program: _Program) -> None:
+        gl = self._gl
+        stride = _RECT_FLOATS * ctypes.sizeof(ctypes.c_float)
+        layout = (
+            (b"a_pos", 2, 0),
+            (b"a_local", 2, 8),
+            (b"a_half", 2, 16),
+            (b"a_radius", 1, 24),
+            (b"a_ring", 1, 28),
+            (b"a_color", 4, 32),
+        )
+        for name, size, offset in layout:
+            location = program.attrib(name)
+            if location < 0:
+                continue
+            gl.glEnableVertexAttribArray(location)
+            gl.glVertexAttribPointer(location, size, _FLOAT, 0, stride, ctypes.c_void_p(offset))
 
     def draw_glyph(self, mask: Any, pen_x: float, baseline_y: float, color: Any) -> None:
         if mask.width == 0 or mask.height == 0:
             return
-        gl = self._gl
-        texture = self._glyph_texture(mask)
-        program = self._glyph
-        gl.glUseProgram(program.id)
+        # 混合顺序相关：字形之前排队的矩形先画掉
+        self._flush_rects()
+        uv = self._atlas_uv(mask)
+        if uv is None:  # 图集满且无法重排（掩码比整张图还大）——直接跳过不崩
+            return
+        u0, v0, u1, v1 = uv
         left = pen_x + mask.left
         top = baseline_y + mask.top
-        self._set_quad(left, top, float(mask.width), float(mask.height), uvs=True)
+        right = left + float(mask.width)
+        bottom = top + float(mask.height)
+        r, g, b, a = color.r / 255.0, color.g / 255.0, color.b / 255.0, float(color.a)
+        # 顶点顺序与 uv 对应：左上、右上、右下 / 左上、右下、左下
+        corners = (
+            (left, top, u0, v1),
+            (right, top, u1, v1),
+            (right, bottom, u1, v0),
+            (left, top, u0, v1),
+            (right, bottom, u1, v0),
+            (left, bottom, u0, v0),
+        )
+        for px, py, u, v in corners:
+            self._glyph_vertices.extend((px, py, u, v, r, g, b, a))
+
+    def _flush_glyphs(self) -> None:
+        if not self._glyph_vertices:
+            return
+        gl = self._gl
+        program = self._glyph
+        array = (ctypes.c_float * len(self._glyph_vertices))(*self._glyph_vertices)
+        gl.glUseProgram(program.id)
         gl.glUniform2f(program.uniform(b"u_viewport"), float(self._width), float(self._height))
         gl.glUniform1i(program.uniform(b"u_texture"), 0)
-        gl.glUniform4f(
-            program.uniform(b"u_color"),
-            color.r / 255.0,
-            color.g / 255.0,
-            color.b / 255.0,
-            float(color.a),
-        )
         gl.glActiveTexture(_TEXTURE0)
-        gl.glBindTexture(_TEXTURE_2D, texture)
-        self._bind_quad_attributes(program)
-        gl.glDrawArrays(_TRIANGLES, 0, 6)
+        gl.glBindTexture(_TEXTURE_2D, self._atlas_texture)
+        gl.glBindBuffer(_ARRAY_BUFFER, self._vbo)
+        gl.glBufferData(_ARRAY_BUFFER, ctypes.sizeof(array), array, _STREAM_DRAW)
+        stride = _GLYPH_FLOATS * ctypes.sizeof(ctypes.c_float)
+        for name, size, offset in ((b"a_pos", 2, 0), (b"a_uv", 2, 8), (b"a_color", 4, 16)):
+            location = program.attrib(name)
+            if location >= 0:
+                gl.glEnableVertexAttribArray(location)
+                gl.glVertexAttribPointer(location, size, _FLOAT, 0, stride, ctypes.c_void_p(offset))
+        gl.glDrawArrays(_TRIANGLES, 0, len(self._glyph_vertices) // _GLYPH_FLOATS)
+        gl.glBindBuffer(_ARRAY_BUFFER, 0)
         gl.glBindTexture(_TEXTURE_2D, 0)
         gl.glUseProgram(0)
+        self._glyph_vertices.clear()
+
+    def _ensure_atlas(self) -> None:
+        if self._atlas_texture:
+            return
+        gl = self._gl
+        texture = ctypes.c_uint(0)
+        gl.glGenTextures(1, ctypes.byref(texture))
+        gl.glBindTexture(_TEXTURE_2D, texture.value)
+        gl.glPixelStorei(_UNPACK_ALIGNMENT, 1)
+        gl.glTexImage2D(
+            _TEXTURE_2D, 0, _RED, _ATLAS_SIZE, _ATLAS_SIZE, 0, _RED, _UNSIGNED_BYTE, None
+        )
+        gl.glTexParameteri(_TEXTURE_2D, _TEXTURE_MIN_FILTER, _LINEAR)
+        gl.glTexParameteri(_TEXTURE_2D, _TEXTURE_MAG_FILTER, _LINEAR)
+        gl.glTexParameteri(_TEXTURE_2D, _TEXTURE_WRAP_S, _CLAMP_TO_EDGE)
+        gl.glTexParameteri(_TEXTURE_2D, _TEXTURE_WRAP_T, _CLAMP_TO_EDGE)
+        gl.glBindTexture(_TEXTURE_2D, 0)
+        self._atlas_texture = texture.value
+
+    def _atlas_uv(self, mask: Any) -> tuple[float, float, float, float] | None:
+        """把掩码放进图集，返回**归一化 uv**（v 的下界/上界对应掩码的下/上行）。
+
+        打包用 shelf（行式）算法：确定、零碎片整理。图集满时**先冲掉当前批次**
+        再清空重排——否则已排队的顶点还引用着旧 uv。
+        """
+        coverage = bytes(mask.coverage)
+        key = (mask.width, mask.height, mask.left, mask.top, coverage)
+        hit = self._atlas.get(key)
+        if hit is not None:
+            return hit
+        w, h = mask.width, mask.height
+        if w > _ATLAS_SIZE or h > _ATLAS_SIZE:
+            return None
+        self._ensure_atlas()
+        if self._atlas_x + w > _ATLAS_SIZE:
+            self._atlas_x = 0
+            self._atlas_y += self._atlas_row_h + 1
+            self._atlas_row_h = 0
+        if self._atlas_y + h > _ATLAS_SIZE:
+            self._flush_glyphs()
+            self._atlas.clear()
+            self._atlas_x = self._atlas_y = self._atlas_row_h = 0
+        x, y = self._atlas_x, self._atlas_y
+        # GL 纹理行序自下而上：把块放到 y_gl，并**反转行**上传，使 t 增大 = 掩码向下
+        y_gl = _ATLAS_SIZE - (y + h)
+        rows = [coverage[i * w : (i + 1) * w] for i in range(h)]
+        rows.reverse()
+        data = b"".join(rows)
+        gl = self._gl
+        gl.glBindTexture(_TEXTURE_2D, self._atlas_texture)
+        gl.glTexSubImage2D(
+            _TEXTURE_2D, 0, x, y_gl, w, h, _RED, _UNSIGNED_BYTE, ctypes.c_char_p(data)
+        )
+        gl.glBindTexture(_TEXTURE_2D, 0)
+        uv = (
+            x / _ATLAS_SIZE,
+            y_gl / _ATLAS_SIZE,
+            (x + w) / _ATLAS_SIZE,
+            (y_gl + h) / _ATLAS_SIZE,
+        )
+        self._atlas[key] = uv
+        self._atlas_x += w + 1
+        self._atlas_row_h = max(self._atlas_row_h, h)
+        return uv
 
     def create_texture(self, width: int, height: int, pixels: bytes) -> int:
         gl = self._gl
@@ -665,132 +849,13 @@ class WglGLDriver:
 
     # ------------------------------------------------------------ 内部
 
-    def _set_quad(
-        self, left: float, top: float, width: float, height: float, *, uvs: bool = False
-    ) -> None:
-        """把 6 个顶点（两个三角形）写进 VBO。属性：pos(2) + uv(2)，交错。"""
-        x0, y0, x1, y1 = left, top, left + width, top + height
-        if uvs:
-            vertices = (
-                x0,
-                y0,
-                0.0,
-                0.0,
-                x1,
-                y0,
-                1.0,
-                0.0,
-                x1,
-                y1,
-                1.0,
-                1.0,
-                x0,
-                y0,
-                0.0,
-                0.0,
-                x1,
-                y1,
-                1.0,
-                1.0,
-                x0,
-                y1,
-                0.0,
-                1.0,
-            )
-        else:
-            vertices = (
-                x0,
-                y0,
-                0.0,
-                0.0,
-                x1,
-                y0,
-                0.0,
-                0.0,
-                x1,
-                y1,
-                0.0,
-                0.0,
-                x0,
-                y0,
-                0.0,
-                0.0,
-                x1,
-                y1,
-                0.0,
-                0.0,
-                x0,
-                y1,
-                0.0,
-                0.0,
-            )
-        array = (ctypes.c_float * len(vertices))(*vertices)
-        gl = self._gl
-        gl.glBindBuffer(_ARRAY_BUFFER, self._vbo)
-        gl.glBufferData(_ARRAY_BUFFER, ctypes.sizeof(array), array, _STREAM_DRAW)
-
-    def _bind_quad_attributes(self, program: _Program) -> None:
-        gl = self._gl
-        stride = 4 * ctypes.sizeof(ctypes.c_float)
-        pos = program.attrib(b"a_pos")
-        uv = program.attrib(b"a_uv")
-        # 驱动会把没被片元着色器用到的属性优化掉，位置返回 -1。
-        # 对 -1 调 glEnableVertexAttribArray 会报 GL_INVALID_VALUE（0x501）——
-        # 结果看似正确但错误状态在累积，后面真出问题时就难查了。
-        if pos >= 0:
-            gl.glEnableVertexAttribArray(pos)
-            gl.glVertexAttribPointer(pos, 2, _FLOAT, 0, stride, ctypes.c_void_p(0))
-        if uv >= 0:
-            gl.glEnableVertexAttribArray(uv)
-            gl.glVertexAttribPointer(uv, 2, _FLOAT, 0, stride, ctypes.c_void_p(8))
-        gl.glBindBuffer(_ARRAY_BUFFER, 0)
-
-    def _glyph_texture(self, mask: Any) -> int:
-        """按**内容**缓存字形纹理。
-
-        不能用 `id(mask)`：provider 完全可能每次返回新的 `GlyphMask` 对象
-        （内置确定性 provider 就是），id 不稳定 → 每画一次重传一次纹理，
-        滚动场景直接慢一个数量级（R8.2 实测 0.8ms/指令）。内容键对任何
-        provider 都成立。
-
-        容量用 FIFO 淘汰：不同字符/字号会持续产生新掩码，不设上界就是显存泄漏。
-        """
-        coverage = bytes(mask.coverage)
-        key = (mask.width, mask.height, mask.left, mask.top, coverage)
-        cached = self._glyph_textures.get(key)
-        if cached is not None:
-            return cached
-        gl = self._gl
-        texture = ctypes.c_uint(0)
-        gl.glGenTextures(1, ctypes.byref(texture))
-        gl.glBindTexture(_TEXTURE_2D, texture.value)
-        gl.glPixelStorei(_UNPACK_ALIGNMENT, 1)
-        gl.glTexImage2D(
-            _TEXTURE_2D,
-            0,
-            _RED,
-            mask.width,
-            mask.height,
-            0,
-            _RED,
-            _UNSIGNED_BYTE,
-            ctypes.c_char_p(coverage),
-        )
-        gl.glTexParameteri(_TEXTURE_2D, _TEXTURE_MIN_FILTER, _LINEAR)
-        gl.glTexParameteri(_TEXTURE_2D, _TEXTURE_MAG_FILTER, _LINEAR)
-        gl.glBindTexture(_TEXTURE_2D, 0)
-        if len(self._glyph_textures) >= self._glyph_texture_limit:
-            oldest = next(iter(self._glyph_textures))
-            self._delete_texture(self._glyph_textures.pop(oldest))
-        self._glyph_textures[key] = texture.value
-        return texture.value
-
-    def _delete_texture(self, handle: int) -> None:
-        texture = ctypes.c_uint(handle)
-        self._gl.glDeleteTextures(1, ctypes.byref(texture))
-
     def close(self) -> None:
         gl = self._gl
+        for buffer_id in (self._vbo, self._rect_vbo):
+            if buffer_id:
+                buffer = ctypes.c_uint(buffer_id)
+                gl.glDeleteBuffers(1, ctypes.byref(buffer))
+        self._vbo = self._rect_vbo = 0
         if self._fb:
             fb = ctypes.c_uint(self._fb)
             gl.glDeleteFramebuffers(1, ctypes.byref(fb))
@@ -799,9 +864,11 @@ class WglGLDriver:
             tex = ctypes.c_uint(self._color_texture)
             gl.glDeleteTextures(1, ctypes.byref(tex))
             self._color_texture = 0
-        for handle in self._glyph_textures.values():
-            self._delete_texture(handle)
-        self._glyph_textures.clear()
+        if self._atlas_texture:
+            tex = ctypes.c_uint(self._atlas_texture)
+            gl.glDeleteTextures(1, ctypes.byref(tex))
+            self._atlas_texture = 0
+            self._atlas.clear()
         for handle in list(self._textures):
             tex = ctypes.c_uint(handle)
             gl.glDeleteTextures(1, ctypes.byref(tex))

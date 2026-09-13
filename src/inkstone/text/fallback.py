@@ -31,6 +31,7 @@ from __future__ import annotations
 import unicodedata
 from dataclasses import dataclass
 from enum import Enum
+from functools import lru_cache
 
 from .font import FontResolver
 
@@ -96,13 +97,21 @@ def _in_ranges(code: int, ranges: tuple[tuple[int, int], ...]) -> bool:
     return any(low <= code <= high for low, high in ranges)
 
 
+@lru_cache(maxsize=8192)
 def script_of(char: str) -> FontScript:
     """判断单个字符属于哪个文字系统。
 
     判定顺序有讲究：**先查 emoji，再查宽字符**——
     因为 emoji 里有些码点在 East Asian Width 里是 `W`，
     先判宽字符会把它们错分到 CJK 链，结果 emoji 用了中文字体渲染成黑白方框。
+
+    纯函数 + 逐字符调用，所以加 `lru_cache`（R8.3）：断行时每个字符都要问一次，
+    实测文本密集页 14 帧 5.6 万次调用，其中绝大多数是重复字符。
     """
+    return _script_of_uncached(char)
+
+
+def _script_of_uncached(char: str) -> FontScript:
     if not char:
         return FontScript.COMMON
 

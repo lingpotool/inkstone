@@ -2,12 +2,14 @@
 
 > 写给下一个接手的对话。读完这份 + `AGENT.md` + `ROADMAP.md`，就能直接开工。
 > 交接时间：**2026-09-13** · 地基整改 R1–R6 + 收官包 R7 **全部完成** ·
-> 无头单测 **983 个全绿**（覆盖率 89.99%）· 黄金图 12 张像素级比对
+> 无头单测 **988 个全绿**（覆盖率 89.99%）· 黄金图 12 张像素级比对
 >
 > **当前主线**：**GL 后端子包（`docs/22`）**——R7.5 的性能基准触发了预先写死的
-> 决策规则（三场景 p95 超 10ms 预算 40–300 倍）。**R8.1（驱动接缝 + 逻辑层）
-> 与 R8.2（Windows WGL 真机驱动）已完成**；本机 NVIDIA RTX 3060 / GL 4.6 实测
-> 比软件快 5–90 倍，但离 p95 ≤ 10ms 还差（全屏 p95 34ms），R8.3 做图集与合批。
+> 决策规则（三场景 p95 超 10ms 预算 40–300 倍）。R8.1（接缝+逻辑层）、
+> R8.2（Windows WGL 真机驱动）、R8.3 前半（热路径缓存 + 矩形合批 + 字形图集）
+> 已完成；本机 RTX 3060 / GL 4.6 实测 p95：全屏 3125→28ms、文本 576→45ms、
+> 滚动 859→153ms。**离 10ms 还差**，剩余瓶颈见下（合批被文本交替切断、
+> 滚动无 repaint boundary）。
 >
 > 更早的分包更新记录已归档为 git 历史；本文只描述**当前真实状态**。
 > 规矩：本文数字与"已完成"必须可复现；发现过期就改，不留"看起来还行"的旧描述。
@@ -103,9 +105,12 @@ docs/22 已定范围：**只实现现有显示列表 IR 的指令集**、沿用 
   文本 576→109ms、滚动 859→203ms。踩掉两个真 bug：扩展入口必须在
   上下文 current 之后加载；字形纹理按 `id(mask)` 缓存会每帧重传（内置
   provider 每次新建对象），改内容键 + FIFO。
-- **R8.3 待做**：字形图集 + 合批（按 program 排序、共享 VBO/纹理，去掉
-  每指令 `glUseProgram`/`glBufferData`）、文本布局与录制的纯 Python 开销、
-  路径三角化。目标：三场景 p95 ≤ 10ms。
+- **R8.3 进行中（先热路径后 GL）**：已加两个确定性缓存（段落排版结果、
+  逐字符脚本判定），文本页纯 Python"布局+绘制+录制"37→6.9ms；GL 侧做了
+  矩形顶点属性合批 + 2048² 字形图集（整段 run 一次 draw）。
+  实测 GL p95：全屏 34→28ms、文本 109→45ms、滚动 203→153ms。
+  **仍未达 10ms**：瓶颈是矩形与字形交替切断合批 + 滚动每帧全量重排
+  （无 repaint boundary）。路径三角化未做（两后端同等能力）。
 - R8.4：真窗口 present（SDL2 GL 窗口）与三场景帧率验收。Linux GLX/EGL、
   macOS CGL 驱动在 R8.2 基础上照 `GLDriver` 协议补。
 
@@ -139,12 +144,12 @@ R7.1–R7.3 的事件/手势/DPI 链路在 headless 下都有确定性测试，
 
 ```bash
 cd /e/inkstone
-./.venv/Scripts/python.exe -m pytest tests -q          # 983 个必须全绿
+./.venv/Scripts/python.exe -m pytest tests -q          # 988 个必须全绿
 ./.venv/Scripts/python.exe -m ruff check src tests examples benchmarks
 ./.venv/Scripts/python.exe -m ruff format --check src tests examples benchmarks
 ./.venv/Scripts/python.exe -m mypy                     # strict，零错误
 ./.venv/Scripts/python.exe -m pytest tests -q -m "not slow" \
-    --cov=src/inkstone --cov-fail-under=85             # 覆盖率（89.8%）
+    --cov=src/inkstone --cov-fail-under=85             # 覆盖率（90.0%）
 # 或一把梭：make check
 ```
 
@@ -212,7 +217,7 @@ cd /e/inkstone
 ## 八、开工姿势（建议）
 
 1. 读 `AGENT.md`（**重点看 ADR 表**）→ `ROADMAP.md` → 本文档
-2. 跑一遍验证命令确认起点全绿（983 passed / mypy 干净 / 覆盖 90.0%）
+2. 跑一遍验证命令确认起点全绿（988 passed / mypy 干净 / 覆盖 90.0%）
 3. 跑一次 `python examples/notes.py` —— 看当前最完整的界面长什么样
 4. 按第三节顺序推进：**①GL 后端子包（docs/22）** → ②文本编辑 → ③macOS/Linux
    真机字体验证 → ④三平台 SDL2 验证
