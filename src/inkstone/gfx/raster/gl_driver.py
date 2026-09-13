@@ -29,7 +29,15 @@ class GLDriver(Protocol):
     """一个 GL 实现要提供的能力。真机实现属 R8.2（ctypes 直调 opengl32/EGL/GLX）。"""
 
     def begin(self, width_px: int, height_px: int, scale: float) -> None:
-        """准备物理尺寸为 `width_px × height_px` 的帧目标（FBO 或窗口后备缓冲）。"""
+        """准备物理尺寸为 `width_px × height_px` 的帧目标（FBO 或窗口后备缓冲）。
+
+        **不清屏**：清屏由 `clear()` 显式完成。这样"这一帧内容和上一帧一模一样"
+        时可以整帧跳过（帧去重），而不是每帧先擦掉再重画——真实 UI 里
+        "没有脏就不重画"就是这条（Flutter 的 repaint boundary / Skia 的 damage）。
+        """
+
+    def clear(self, color: Color) -> None:
+        """把帧目标清成 `color`（通常是全透明）。每帧第一次真正绘制前调用。"""
 
     def end(self) -> None:
         """结束一帧（提交；swap 由上层的呈现接缝决定，见 `FrameRenderer`）。"""

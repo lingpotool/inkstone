@@ -53,6 +53,9 @@ class FakeDriver:
         self._width, self._height = width, height
         self.began += 1
 
+    def clear(self, color: Color) -> None:
+        self.calls.append(("clear", color))
+
     def end(self) -> None:
         self.calls.append(("end",))
         self.ended += 1
@@ -154,6 +157,52 @@ class TestFrameLifecycle:
         assert (frame.width, frame.height) == (100, 50)
         assert driver.kinds().count("begin") == 1
         assert driver.kinds().count("end") == 1
+
+    def test_identical_frame_skips_clear_and_draws(self) -> None:
+        """内容和上一帧完全一致 → 复用帧缓冲，连 clear 都不做（帧去重）。"""
+        driver = FakeDriver()
+        backend = GLRasterBackend(driver)
+        display_list = _dl(100, 50, FillRectOp(Rect(0, 0, 10, 10), RED))
+
+        backend.begin_frame(SIZE, 1.0)
+        backend.execute(display_list)
+        backend.end_frame()
+        first_draws = len(driver.fills())
+        first_clears = driver.kinds().count("clear")
+        assert first_draws == 1 and first_clears == 1
+
+        backend.begin_frame(SIZE, 1.0)
+        backend.execute(display_list)
+        backend.end_frame()
+        assert len(driver.fills()) == first_draws, "相同内容不该重画"
+        assert driver.kinds().count("clear") == first_clears, "相同内容不该重清屏"
+
+    def test_changed_frame_redraws(self) -> None:
+        driver = FakeDriver()
+        backend = GLRasterBackend(driver)
+        backend.begin_frame(SIZE, 1.0)
+        backend.execute(_dl(100, 50, FillRectOp(Rect(0, 0, 10, 10), RED)))
+        backend.end_frame()
+
+        backend.begin_frame(SIZE, 1.0)
+        backend.execute(_dl(100, 50, FillRectOp(Rect(0, 0, 20, 20), RED)))
+        backend.end_frame()
+        assert len(driver.fills()) == 2, "内容变了必须重画"
+        assert driver.kinds().count("clear") == 2
+
+    def test_resize_invalidates_frame_dedup(self) -> None:
+        driver = FakeDriver()
+        backend = GLRasterBackend(driver)
+        display_list = _dl(100, 50, FillRectOp(Rect(0, 0, 10, 10), RED))
+        backend.begin_frame(SIZE, 1.0)
+        backend.execute(display_list)
+        backend.end_frame()
+
+        # 换了物理尺寸：帧目标重建，上一帧内容不再有效
+        backend.begin_frame(SIZE, 2.0)
+        backend.execute(_dl(200, 100, FillRectOp(Rect(0, 0, 10, 10), RED)))
+        backend.end_frame()
+        assert len(driver.fills()) == 2
 
     def test_short_readback_is_an_error(self) -> None:
         driver = FakeDriver()

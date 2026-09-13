@@ -597,13 +597,16 @@ class WglGLDriver:
         self._ensure_target(width_px, height_px)
         self._gl.glViewport(0, 0, width_px, height_px)
         self._gl.glDisable(_SCISSOR_TEST)
-        self._gl.glClearColor(0.0, 0.0, 0.0, 0.0)
-        self._gl.glClear(_COLOR_BUFFER_BIT)
         self._gl.glEnable(_BLEND)
         self._gl.glBlendFunc(_SRC_ALPHA, _ONE_MINUS_SRC_ALPHA)
         # 帧首复位合批状态：上一帧若在异常路径里没冲干净，这里兜住
         self._rect_vertices.clear()
         self._scissor = _UNSET
+        # 注意：这里**不清屏**——清屏由 clear() 显式做，好让上层能整帧跳过（帧去重）
+
+    def clear(self, color: Any) -> None:
+        self._gl.glClearColor(color.r / 255.0, color.g / 255.0, color.b / 255.0, float(color.a))
+        self._gl.glClear(_COLOR_BUFFER_BIT)
 
     def end(self) -> None:
         # 离屏：冲掉最后两批，不做 unbind（读回还要用它）；上屏（swap）属 R8.4

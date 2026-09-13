@@ -30,6 +30,7 @@ import math
 from enum import Enum
 
 from ...layout.types import Rect, Size
+from ..color import Color
 from ..display_list import (
     DisplayList,
     FillRectOp,
@@ -73,6 +74,11 @@ class GLRasterBackend:
         self._width = 0
         self._height = 0
         self._clip: Rect | None = None
+        # 帧去重（R8.3）：上一帧画了什么。显示列表是不可变数据、`==` 是逐指令
+        # 逐坐标比对，所以"内容没变"可以被精确判定——真实 UI 里绝大多数帧
+        # （光标闪烁之外）都没有脏，跳过整帧的 clear + 全部 draw call。
+        self._last_render: tuple[DisplayList, Rect | None] | None = None
+        self._drew_this_frame = False
 
     # ------------------------------------------------------------ 帧生命周期
 
@@ -85,8 +91,13 @@ class GLRasterBackend:
             )
         if scale <= 0.0:
             raise ValueError(f"设备像素比必须为正，收到 {scale}")
+        previous = (self._width, self._height)
         self._width = max(1, math.ceil(size.width * scale))
         self._height = max(1, math.ceil(size.height * scale))
+        if (self._width, self._height) != previous:
+            # 帧目标重建了，上一次的内容不再有效——去重缓存必须作废
+            self._last_render = None
+        self._drew_this_frame = False
         self._driver.begin(self._width, self._height, scale)
         self._phase = _Phase.FRAME
 
@@ -104,14 +115,24 @@ class GLRasterBackend:
                 f"与帧目标 {self._width}×{self._height} 不一致。"
                 f"帧尺寸由 begin_frame(size, scale) 决定，显示列表应当在**设备像素**下录制"
             )
+        # 帧去重：内容和上一帧完全一致（且本帧还没画过别的东西）→ 直接复用帧缓冲。
+        # 用整帧 skip 换掉"clear + 全部 draw call"，是静态界面/无脏帧的最大一笔节省。
+        if not self._drew_this_frame and self._last_render == (display_list, clip):
+            self._drew_this_frame = True
+            return
+
         self._clip = clip
         try:
+            if not self._drew_this_frame:
+                self._driver.clear(Color(0, 0, 0, 0))
             for op in display_list.ops:
                 self._execute_op(op)
         finally:
             # scissor 是整帧状态，用完复位——下一帧/下一个后端调用者不该继承它
             self._driver.set_scissor(None)
             self._clip = None
+        self._drew_this_frame = True
+        self._last_render = (display_list, clip)
 
     def end_frame(self) -> None:
         if self._phase is not _Phase.FRAME:
