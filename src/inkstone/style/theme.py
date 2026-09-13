@@ -144,6 +144,12 @@ class Theme:
         """
         return _lookup("gestures", name, self.raw.gestures)
 
+    def scrollbar(self, name: str) -> float:
+        """滚动条几何令牌。`"thickness"=10 / "min_thumb"=32 / "radius"=5 /
+        "margin"=2`。颜色不走这里——拇指颜色是语义色（`scrollbar` /
+        `scrollbar-hover`），要参与明暗主题重新映射。"""
+        return _lookup("scrollbar", name, self.raw.scrollbar)
+
     def decoration(self, name: str) -> float:
         """文本编辑装饰。`"caret_width" / "underline_width" / "underline_offset"`。"""
         return _lookup("decorations", name, self.raw.decorations)
@@ -184,7 +190,7 @@ def _semantic_map(semantic: SemanticTokens) -> dict[str, Color]:
     """把 SemanticTokens 摊平成 dict，供 color() 按名取用。
 
     缓存（R6.3）：`Theme.color()` 是热路径（每帧每控件多次），
-    每次重建 26 键 dict 纯属浪费。SemanticTokens 是 frozen 可哈希的，
+    每次重建 28 键 dict 纯属浪费。SemanticTokens 是 frozen 可哈希的，
     直接按实例缓存。返回的 dict 是共享的——**只读，别改**。
     """
     return {
@@ -202,6 +208,8 @@ def _semantic_map(semantic: SemanticTokens) -> dict[str, Color]:
         "primary-soft": semantic.primary_soft,
         "on-primary": semantic.on_primary,
         "focus-ring": semantic.focus_ring,
+        "scrollbar": semantic.scrollbar,
+        "scrollbar-hover": semantic.scrollbar_hover,
         "success-bg": semantic.success_bg,
         "success-text": semantic.success_text,
         "warning-bg": semantic.warning_bg,

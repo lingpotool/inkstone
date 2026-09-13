@@ -59,7 +59,7 @@ from .protocol import (
     resolve_sizing,
     size_from,
 )
-from .scroll import RenderScroll, ScrollDirection
+from .scroll import RenderScroll, ScrollbarStyle, ScrollDirection
 from .stack import PositionedSpec, RenderAlign, RenderStack, StackItem
 from .types import (
     INF,
@@ -106,6 +106,7 @@ __all__ = [
     "RenderSized",
     "RenderStack",
     "ScrollDirection",
+    "ScrollbarStyle",
     "Size",
     "Sizing",
     "SizingKind",

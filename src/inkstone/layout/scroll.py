@@ -18,7 +18,9 @@ docs/05 §6 里有一条很容易做错的规则，Scroll 就是它的全部意�
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from ..backend.base import PointerKind
 from ..events.pointer import DispatchPhase, PointerDispatch
@@ -30,7 +32,10 @@ from .protocol import (
 )
 from .types import BoxConstraints, Offset, Rect, Size
 
-__all__ = ["RenderScroll", "ScrollDirection"]
+if TYPE_CHECKING:  # 只为注解：运行期不导入 gfx，避免包导入期的循环依赖
+    from ..gfx.color import Color
+
+__all__ = ["RenderScroll", "ScrollDirection", "ScrollbarStyle"]
 
 
 class ScrollDirection(Enum):
@@ -39,6 +44,22 @@ class ScrollDirection(Enum):
     VERTICAL = "vertical"
     HORIZONTAL = "horizontal"
     BOTH = "both"
+
+
+@dataclass(frozen=True, slots=True)
+class ScrollbarStyle:
+    """滚动条外观。几何来自 `tokens.scrollbar`，颜色来自语义色。
+
+    **只有 `can_scroll` 时才画**：内容装得下就不该出现滚动条——那是
+    "这里没东西可滚"的诚实表达，也避免给静态页面加视觉噪音。
+    """
+
+    thickness: float
+    min_thumb: float
+    radius: float
+    margin: float
+    color: Color
+    hover_color: Color
 
 
 class RenderScroll(RenderBox):
@@ -56,6 +77,11 @@ class RenderScroll(RenderBox):
         #: 滚轮一格滚多少逻辑像素。由元素从主题令牌写进来（L4 不读 L6），
         #: 默认值与 `tokens.gestures["wheel_step"]` 一致，便于裸用渲染对象。
         self.wheel_step: float = 48.0
+        #: 滚动条外观；None = 不画（纯渲染对象裸用时保持最小行为）。
+        self.scrollbar: ScrollbarStyle | None = None
+        #: 指针是否停在拇指上 / 是否正在拖它（拖拽由 R13.2 的识别器驱动）。
+        self._thumb_hover: bool = False
+        self._thumb_drag: bool = False
         self._child: RenderBox | None = None
         self._scroll: Offset = Offset(0.0, 0.0)
         self._content_size: Size = Size(0.0, 0.0)
@@ -154,6 +180,75 @@ class RenderScroll(RenderBox):
     def scroll_by(self, dx: float = 0.0, dy: float = 0.0) -> None:
         self.scroll_to(self._scroll.dx + dx, self._scroll.dy + dy)
 
+    # ------------------------------------------------------------ 滚动条
+
+    def thumb_rect(self) -> Rect | None:
+        """拇指的矩形（视口局部坐标）；不可滚动或不画滚动条时返回 None。
+
+        几何是纯函数（视口 / 内容 / 偏移 → 矩形），所以能直接单测，
+        不需要起渲染管线：
+
+        - 长度 = 视口 × 视口/内容，再夹到 `min_thumb`（长列表的拇指不能细如发丝）；
+        - 位置 = 偏移占可滚动距离的比例 × 剩余轨道长度；
+        - 横向滚动条贴底边，纵向贴右边，各留 `margin`。
+        """
+        style = self.scrollbar
+        if style is None or not self.can_scroll:
+            return None
+        limit = self.max_scroll
+        if self.direction is ScrollDirection.HORIZONTAL:
+            track = self._size.width
+            visible = self._size.height
+            travelled = limit.dx
+            offset = self._scroll.dx
+            length = max(style.min_thumb, track * (track / self._content_size.width))
+            length = min(length, track)
+            pos = 0.0 if travelled <= 0.0 else (track - length) * (offset / travelled)
+            return Rect(
+                pos,
+                visible - style.thickness - style.margin,
+                length,
+                style.thickness,
+            )
+        track = self._size.height
+        visible = self._size.width
+        travelled = limit.dy
+        offset = self._scroll.dy
+        length = max(style.min_thumb, track * (track / self._content_size.height))
+        length = min(length, track)
+        pos = 0.0 if travelled <= 0.0 else (track - length) * (offset / travelled)
+        return Rect(visible - style.thickness - style.margin, pos, style.thickness, length)
+
+    def _paint_scrollbar(self, context: object) -> None:
+        """把拇指画在**为它让出来的槽位**里（见 ADR-0026）。
+
+        内容已按"视口宽 − 槽位"排版（`_narrow_for_gutter`），所以拇指与条目
+        永不重叠；绘制在内容之后，只是保证它盖住的是那条空槽位。
+
+        调用点（`paint_tree` 的两个分支）都在**父级坐标系**里，所以这里自己
+        压一次 `self._offset` 的平移——不然拇指会整体偏到左上（实测：画在了
+        搜索行上）。`thumb_rect()` 给的是视口局部坐标，两者必须对齐。
+        """
+        style = self.scrollbar
+        rect = self.thumb_rect()
+        if style is None or rect is None:
+            return
+        round_rect = getattr(context, "round_rect", None)
+        if not callable(round_rect):
+            return
+        save = getattr(context, "save", None)
+        translate = getattr(context, "translate", None)
+        restore = getattr(context, "restore", None)
+        active = self._thumb_drag or self._thumb_hover
+        color = style.hover_color if active else style.color
+        if callable(save) and callable(translate) and callable(restore):
+            save()
+            translate(self._offset.dx, self._offset.dy)
+            round_rect(rect, style.radius, color)
+            restore()
+        else:
+            round_rect(rect, style.radius, color)
+
     # ------------------------------------------------------------ 输入
 
     def handle_pointer_event(self, dispatch: PointerDispatch) -> None:
@@ -176,18 +271,39 @@ class RenderScroll(RenderBox):
         if dispatch.phase is DispatchPhase.CAPTURE:
             return
         event = dispatch.event
-        if event.kind is not PointerKind.WHEEL:
+        if event.kind is PointerKind.WHEEL:
+            dx = -event.wheel_dx * self.wheel_step
+            dy = -event.wheel_dy * self.wheel_step
+            if self.direction is ScrollDirection.VERTICAL:
+                dx = 0.0
+            elif self.direction is ScrollDirection.HORIZONTAL:
+                dy = 0.0
+            before = self._scroll
+            self.scroll_by(dx, dy)
+            if self._scroll != before:
+                dispatch.stop_propagation()
             return
-        dx = -event.wheel_dx * self.wheel_step
-        dy = -event.wheel_dy * self.wheel_step
-        if self.direction is ScrollDirection.VERTICAL:
-            dx = 0.0
-        elif self.direction is ScrollDirection.HORIZONTAL:
-            dy = 0.0
-        before = self._scroll
-        self.scroll_by(dx, dy)
-        if self._scroll != before:
-            dispatch.stop_propagation()
+        if event.kind in (PointerKind.MOVE, PointerKind.LEAVE, PointerKind.ENTER):
+            self._set_thumb_hover(self._hit_thumb(dispatch.local_x, dispatch.local_y))
+
+    # ------------------------------------------------------------ 滚动条状态
+
+    def _hit_thumb(self, x: float, y: float) -> bool:
+        rect = self.thumb_rect()
+        if rect is None:
+            return False
+        return rect.contains(x, y)
+
+    def _set_thumb_hover(self, hovered: bool) -> None:
+        """悬停态只改颜色，但要**标脏重绘**——否则拇指不会变亮。
+
+        指针移出视口时我们收不到后续 MOVE（不在命中链里），所以悬停会在
+        "从拇指上直接移出窗口"这种极端路径上滞留到下次移回；代价只是拇指
+        亮着，不足以引入全局 hover 跟踪。
+        """
+        if hovered != self._thumb_hover:
+            self._thumb_hover = hovered
+            self.mark_needs_paint()
 
     # ------------------------------------------------------------ 绘制
 
@@ -261,9 +377,11 @@ class RenderScroll(RenderBox):
                 pop_state()
             if has_layer_ops and pop_layer_fn is not None:
                 pop_layer_fn()
+            self._paint_scrollbar(context)
             self._needs_paint = False
             return
         super().paint_tree(context)
+        self._paint_scrollbar(context)
 
     def _rebuild_layer(self) -> None:
         """把子树录成"内容局部坐标"的指令，供后续帧重放。"""
@@ -310,13 +428,52 @@ class RenderScroll(RenderBox):
         # 关键一步：给子级**无限主轴**约束。
         # 这才是"可滚动"的本质——子级想多长就多长，超出的部分由视口裁剪。
         child_constraints = self._child_constraints(inner)
-        self._content_size = self.layout_child(self._child, child_constraints)
+        content = self.layout_child(self._child, child_constraints)
+
+        # 溢出才让出滚动条槽位（`overflow: auto` 的语义），然后**再量一次**。
+        # 为什么必须让位而不是把滚动条画在内容上：覆盖层会挡住条目文字/按钮，
+        # 那是最廉价的做法（实测被用户一眼看穿）。让位后内容永远压在槽位左边，
+        # 与 Win32 经典 / Qt / 浏览器的滚动条是同一种正确。
+        #
+        # 二次布局是**有界**的：只可能发生一次（更窄 ⇒ 内容只会更高，不会反转），
+        # 不是迭代收敛。不溢出时不付这个成本。
+        if self.scrollbar is not None:
+            gutter = self.scrollbar.thickness + self.scrollbar.margin
+            narrowed = self._narrow_for_gutter(inner, gutter)
+            if narrowed is not None and self._main_axis_overflows(content, size):
+                content = self.layout_child(self._child, self._child_constraints(narrowed))
+        self._content_size = content
 
         # 约束/内容尺寸可能变了，层缓存必须作废重录
         self.invalidate_layer()
         self.scroll_to()
         self.place_child(self._child, Offset(-self._scroll.dx, -self._scroll.dy))
         return size
+
+    def _main_axis_overflows(self, content: Size, viewport: Size) -> bool:
+        """主轴方向上内容是否装不下——只有装不下才需要滚动条槽位。"""
+        vertical = self.direction is not ScrollDirection.HORIZONTAL
+        horizontal = self.direction is not ScrollDirection.VERTICAL
+        if vertical and content.height > viewport.height:
+            return True
+        return bool(horizontal and content.width > viewport.width)
+
+    def _narrow_for_gutter(self, inner: BoxConstraints, gutter: float) -> BoxConstraints | None:
+        """把滚动条槽位从内容可用空间里扣掉；轴无界（无限）时无从扣。"""
+        max_w, max_h = inner.max_width, inner.max_height
+        min_w, min_h = inner.min_width, inner.min_height
+        changed = False
+        if self.direction is not ScrollDirection.HORIZONTAL and inner.has_bounded_width:
+            max_w = max(0.0, max_w - gutter)
+            min_w = min(min_w, max_w)
+            changed = True
+        if self.direction is not ScrollDirection.VERTICAL and inner.has_bounded_height:
+            max_h = max(0.0, max_h - gutter)
+            min_h = min(min_h, max_h)
+            changed = True
+        if not changed:
+            return None
+        return BoxConstraints(min_w, max_w, min_h, max_h)
 
     def _child_constraints(self, inner: BoxConstraints) -> BoxConstraints:
         """按滚动方向决定哪个轴给子级无限空间。"""

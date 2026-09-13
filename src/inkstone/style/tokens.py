@@ -164,6 +164,11 @@ class RawTokens:
     # 这些是**排版细节**，但同样是设计决定（docs/13 §3），组件里不许写字面量。
     decorations: Mapping[str, float]
 
+    # 滚动条几何：粗细、最小拇指长度、圆角、离视口边缘的距离。
+    # 颜色走语义色（`scrollbar` / `scrollbar-hover`），几何走这里——
+    # 两处分开是因为颜色要参与明暗主题与对比度检查，几何不用。
+    scrollbar: Mapping[str, float]
+
 
 _PILL = float("inf")
 
@@ -268,6 +273,17 @@ DEFAULT_RAW = RawTokens(
         "underline_width": 1.5,
         "underline_offset": 2.0,
     },
+    scrollbar={
+        # 10px 是 Win32 经典滚动条的档位：够点得到，又不至于白占宽度
+        # （只有真溢出时才从内容区扣掉这一条，见 ADR-0026）。
+        "thickness": 10.0,
+        # 拇指最短长度：内容再长也要留出可抓的一段，否则长列表的拇指细如发丝。
+        "min_thumb": 32.0,
+        # 圆角取宽度一半 = 胶囊形。
+        "radius": 5.0,
+        # 离视口右/下边缘的留白，让拇指看起来是"浮"在上面的。
+        "margin": 2.0,
+    },
 )
 
 
@@ -306,6 +322,11 @@ class SemanticTokens:
     # 焦点环（键盘导航专用，focus-visible 语义）
     focus_ring: Color
 
+    # 滚动条拇指：静止 / 悬停与拖拽。带一点透明度是为了不与内容抢视觉，
+    # 但它画在**专用槽位**里、不压在条目上（见 ADR-0026）。
+    scrollbar: Color
+    scrollbar_hover: Color
+
     # 状态语义：各配 浅底 + 深字
     success_bg: Color
     success_text: Color
@@ -340,6 +361,9 @@ LIGHT_SEMANTIC = SemanticTokens(
     primary_soft=_hex("#E0E7FF"),
     on_primary=_hex("#FFFFFF"),
     focus_ring=_hex("#6366F1"),
+    # 对比度检查不覆盖它们（滚动条不是文字）；半透明让它在浅底/深底上都协调。
+    scrollbar=Color.from_rgba(100, 116, 139, 0.55),
+    scrollbar_hover=Color.from_rgba(71, 85, 105, 0.80),
     success_bg=_hex("#ECFDF5"),
     success_text=_hex("#065F46"),
     warning_bg=_hex("#FFFBEB"),
@@ -372,6 +396,9 @@ DARK_SEMANTIC = SemanticTokens(
     primary_soft=_hex("#1E1B4B"),
     on_primary=_hex("#1E1B4B"),
     focus_ring=_hex("#A5B4FC"),
+    # 暗色下拇指要**更亮**（深底上的浅灰），这是重新映射不是反色。
+    scrollbar=Color.from_rgba(148, 163, 184, 0.50),
+    scrollbar_hover=Color.from_rgba(203, 213, 225, 0.75),
     success_bg=_hex("#064E3B"),
     success_text=_hex("#A7F3D0"),
     warning_bg=_hex("#78350F"),

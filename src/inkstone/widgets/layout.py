@@ -39,6 +39,7 @@ from ..layout import (
     RenderFlex,
     RenderRow,
     RenderScroll,
+    ScrollbarStyle,
     ScrollDirection,
 )
 from ..layout.protocol import CrossAxisAlignment, MainAxisAlignment, MainAxisSize
@@ -251,6 +252,15 @@ class _ScrollElement(RenderObjectElement):
         scroll.recognizers = [self._drag]
         # 滚轮步长同理：布局层不读主题，令牌值由元素送进去（R12）
         scroll.wheel_step = theme.gesture("wheel_step")
+        # 滚动条外观：几何来自 tokens.scrollbar，颜色来自语义色（R13.1）
+        scroll.scrollbar = ScrollbarStyle(
+            thickness=theme.scrollbar("thickness"),
+            min_thumb=theme.scrollbar("min_thumb"),
+            radius=theme.scrollbar("radius"),
+            margin=theme.scrollbar("margin"),
+            color=theme.color("scrollbar"),
+            hover_color=theme.color("scrollbar-hover"),
+        )
 
     def _sync_child(self) -> None:
         widget = self.widget

@@ -28,6 +28,7 @@ from inkstone.layout import (
     RenderContainer,
     RenderScroll,
     RenderSized,
+    ScrollbarStyle,
     ScrollDirection,
     Sizing,
 )
@@ -41,6 +42,19 @@ def tall_list(count: int = 5, item_height: float = 40.0) -> RenderColumn:
             RenderSized(
                 width=Sizing.fixed(100), height=Sizing.fixed(item_height), debug_name=f"I{i}"
             )
+        )
+    return col
+
+
+def fluid_list(count: int = 5, item_height: float = 40.0) -> RenderColumn:
+    """宽度**跟着约束走**的列表——用来观察"滚动条槽位"这类对可用宽度的改动。
+
+    `tall_list` 用的是固定宽度子级，约束变化看不出来；这里换成 fill。
+    """
+    col = RenderColumn(debug_name="Fluid")
+    for i in range(count):
+        col.add(
+            RenderSized(height=Sizing.fixed(item_height), width=Sizing.fill(), debug_name=f"F{i}")
         )
     return col
 
@@ -428,3 +442,193 @@ class TestScrollViewWheelWiring:
         assert found, "挂载 ScrollView 之后应该能在渲染树里找到 RenderScroll"
         expected = Theme.light().gesture("wheel_step")
         assert found[0].wheel_step == pytest.approx(expected)
+
+
+class TestScrollbarGeometry:
+    """滚动条拇指的几何是纯函数（视口/内容/偏移 → 矩形），先把它测穿。
+
+    渲染层拿到的是"画在哪"，算错的表现是拇指跑出轨道、长度不随内容变化、
+    或者内容装得下时还杵着一根条——都是肉眼可见的错。
+    """
+
+    @staticmethod
+    def _styled(count: int = 20, item: float = 40.0, viewport: float = 100.0) -> RenderScroll:
+        scroll = RenderScroll(tall_list(count, item), debug_name="Scroll")
+        scroll.scrollbar = ScrollbarStyle(
+            thickness=10.0,
+            min_thumb=32.0,
+            radius=5.0,
+            margin=2.0,
+            color=Color.from_rgba(0, 0, 0, 0.5),
+            hover_color=Color.from_rgba(0, 0, 0, 0.8),
+        )
+        scroll.layout(BoxConstraints(max_width=120.0, max_height=viewport))
+        return scroll
+
+    def test_no_thumb_when_content_fits(self) -> None:
+        """装得下就不画——"这里没东西可滚"要被诚实表达，也不给静态页加噪音。"""
+        scroll = self._styled(count=2, item=20.0)
+        assert not scroll.can_scroll
+        assert scroll.thumb_rect() is None
+
+    def test_thumb_sits_against_the_right_edge(self) -> None:
+        scroll = self._styled()
+        rect = scroll.thumb_rect()
+        assert rect is not None
+        assert rect.width == pytest.approx(10.0)
+        assert rect.left == pytest.approx(120.0 - 10.0 - 2.0)
+        assert rect.top == pytest.approx(0.0), "在顶部时拇指贴顶"
+
+    def test_thumb_length_is_proportional_and_has_a_floor(self) -> None:
+        scroll = self._styled(count=20, item=40.0, viewport=100.0)
+        rect = scroll.thumb_rect()
+        assert rect is not None
+        # 视口 100 / 内容 800 → 拇指 12.5px，被最小长度 32 顶住
+        assert rect.height == pytest.approx(32.0)
+
+    def test_thumb_grows_with_shorter_content(self) -> None:
+        short = self._styled(count=5, item=40.0, viewport=100.0)  # 内容 200，视口 100
+        long = self._styled(count=20, item=40.0, viewport=100.0)  # 内容 800
+        short_rect, long_rect = short.thumb_rect(), long.thumb_rect()
+        assert short_rect is not None and long_rect is not None
+        assert short_rect.height > long_rect.height
+
+    def test_thumb_reaches_the_bottom_at_max_scroll(self) -> None:
+        scroll = self._styled()
+        scroll.scroll_to(dy=scroll.max_scroll.dy)
+        rect = scroll.thumb_rect()
+        assert rect is not None
+        assert rect.bottom == pytest.approx(100.0), "滚到底时拇指必须贴底，否则像没滚完"
+
+    def test_thumb_travels_proportionally(self) -> None:
+        scroll = self._styled()
+        scroll.scroll_to(dy=scroll.max_scroll.dy / 2.0)
+        rect = scroll.thumb_rect()
+        assert rect is not None
+        assert rect.top == pytest.approx((100.0 - rect.height) / 2.0, abs=0.5)
+
+    def test_horizontal_scrollbar_sits_against_the_bottom(self) -> None:
+        scroll = RenderScroll(
+            wide_content(600.0, 40.0), direction=ScrollDirection.HORIZONTAL, debug_name="H"
+        )
+        scroll.scrollbar = TestScrollbarGeometry._styled().scrollbar
+        scroll.layout(BoxConstraints(max_width=120.0, max_height=100.0))
+        rect = scroll.thumb_rect()
+        assert rect is not None
+        assert rect.height == pytest.approx(10.0)
+        assert rect.top == pytest.approx(100.0 - 10.0 - 2.0)
+
+
+class TestScrollbarPainting:
+    """拇指画在专用槽位里；内容为它让位，两者不重叠（ADR-0026）。"""
+
+    def _record(self, *, fluid: bool = False) -> tuple[RenderScroll, list[object]]:
+        content = fluid_list(20, 40.0) if fluid else tall_list(20, 40.0)
+        scroll = RenderScroll(content, debug_name="Scroll")
+        scroll.scrollbar = ScrollbarStyle(
+            thickness=10.0,
+            min_thumb=32.0,
+            radius=5.0,
+            margin=2.0,
+            color=Color.from_rgba(0, 0, 0, 0.5),
+            hover_color=Color.from_rgba(0, 0, 0, 0.8),
+        )
+        scroll.layout(BoxConstraints(max_width=120.0, max_height=100.0))
+        recorder = DisplayListRecorder()
+        recorder.fill_rect(Rect(0.0, 0.0, 120.0, 100.0), _BG)
+        scroll.mark_subtree_needs_paint()
+        scroll.paint_tree(recorder)
+        return scroll, list(resolve_state_ops(recorder.finish(120, 100).ops))
+
+    def test_thumb_is_painted_after_the_content(self) -> None:
+        scroll, ops = self._record()
+        rect = scroll.thumb_rect()
+        assert rect is not None
+        # 拇指是最后一个圆角矩形，且几何与 thumb_rect 一致
+        last = ops[-1]
+        assert getattr(last, "rect", None) == rect
+        assert getattr(last, "radius", None) == pytest.approx(5.0)
+
+    def test_content_is_narrowed_by_the_gutter_when_it_overflows(self) -> None:
+        """溢出时为滚动条**让出槽位**（`overflow: auto` 的语义）。
+
+        这是 ADR-0026 的核心承诺：滚动条绝不压在内容上。窄掉的那条
+        `thickness + margin` 就是拇指的家。"""
+        scroll, _ = self._record(fluid=True)
+        gutter = 10.0 + 2.0
+        assert scroll.content_size.width == pytest.approx(120.0 - gutter)
+
+    def test_no_gutter_is_reserved_when_content_fits(self) -> None:
+        """装得下就不让位——不溢出还留一条空白是对空间的浪费。"""
+        scroll = RenderScroll(fluid_list(1, 20.0), debug_name="Fits")
+        scroll.scrollbar = TestScrollbarGeometry._styled().scrollbar
+        scroll.layout(BoxConstraints(max_width=120.0, max_height=100.0))
+        assert not scroll.can_scroll
+        assert scroll.content_size.width == pytest.approx(120.0)
+
+    def test_content_never_extends_under_the_thumb(self) -> None:
+        """**不重叠**的结构性断言：内容右缘不超过拇指左缘。"""
+        scroll, _ = self._record(fluid=True)
+        rect = scroll.thumb_rect()
+        assert rect is not None
+        assert scroll.content_size.width <= rect.left
+
+    def test_pointer_over_the_thumb_switches_to_the_hover_color(self) -> None:
+        scroll, ops = self._record()
+        rect = scroll.thumb_rect()
+        assert rect is not None
+        idle = ops[-1].color
+        result = HitTestResult()
+        scroll.hit_test(Offset(rect.left + 2.0, rect.top + 2.0), result)
+        PointerRouter().dispatch(
+            result,
+            PointerEvent(kind=PointerKind.MOVE, x=0.0, y=0.0, window_id=0, time_ms=0.0),
+        )
+        assert scroll._thumb_hover is True
+        scroll.mark_subtree_needs_paint()
+        recorder = DisplayListRecorder()
+        scroll.paint_tree(recorder)
+        hovered = list(resolve_state_ops(recorder.finish(120, 100).ops))[-1].color
+        assert hovered != idle, "悬停时拇指必须变亮，否则用户不知道它可拖"
+
+
+class TestScrollbarHoverDoesNotDisturbScrolling:
+    """悬停只改颜色——曾经怀疑它会把偏移打回 0（真机截图有歧义）。
+
+    这条用确定性事件把它钉死：移动指针到拇指上不得改变偏移，
+    否则"鼠标划过滚动条，列表跳回顶部"会成为最难查的那类 bug。
+    """
+
+    def test_hovering_the_thumb_keeps_the_offset(self) -> None:
+        scroll = TestScrollbarGeometry._styled()
+        scroll.scroll_to(dy=120.0)
+        offset = scroll.scroll_offset
+        rect = scroll.thumb_rect()
+        assert rect is not None
+
+        result = HitTestResult()
+        scroll.hit_test(Offset(rect.left + 2.0, rect.top + 2.0), result)
+        router = PointerRouter()
+        for _ in range(3):
+            router.dispatch(
+                result,
+                PointerEvent(kind=PointerKind.MOVE, x=0.0, y=0.0, window_id=0, time_ms=0.0),
+            )
+        assert scroll.scroll_offset == offset
+        assert scroll._thumb_hover is True
+
+    def test_leaving_the_thumb_clears_hover_without_scrolling(self) -> None:
+        scroll = TestScrollbarGeometry._styled()
+        scroll.scroll_to(dy=120.0)
+        offset = scroll.scroll_offset
+        rect = scroll.thumb_rect()
+        assert rect is not None
+        # 指针在视口内、但不在拇指上（偏左）
+        result = HitTestResult()
+        scroll.hit_test(Offset(10.0, 10.0), result)
+        PointerRouter().dispatch(
+            result,
+            PointerEvent(kind=PointerKind.MOVE, x=0.0, y=0.0, window_id=0, time_ms=0.0),
+        )
+        assert scroll._thumb_hover is False
+        assert scroll.scroll_offset == offset
