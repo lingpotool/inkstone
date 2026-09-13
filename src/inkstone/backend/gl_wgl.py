@@ -976,8 +976,13 @@ class WglGLDriver:
             return
         u0, v0, u1, v1 = uv
         ox, oy = self._origin
-        left = pen_x + mask.left - ox
-        top = baseline_y + mask.top - oy
+        # **对齐到整设备像素再画**：掩码是按整数 ppem 光栅化的，若落在小数
+        # 坐标上，`GL_LINEAR` 会把每个字形重采样一遍——125% 屏上笔画忽粗忽细、
+        # 小字发虚（正是"不如 Electron 清晰"的观感来源）。等比 DPI 下笔位几乎
+        # 总是小数，所以这一步不是可选项。真正优雅的解是亚像素相位光栅化
+        # （按 1/4 像素出多份掩码），那是后续优化；对齐是当下正确的那一档。
+        left = float(round(pen_x + mask.left - ox))
+        top = float(round(baseline_y + mask.top - oy))
         right = left + float(mask.width)
         bottom = top + float(mask.height)
         r, g, b, a = color.r / 255.0, color.g / 255.0, color.b / 255.0, float(color.a)
