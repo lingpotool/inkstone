@@ -42,6 +42,7 @@ from ..backend.base import (
 from ..events.focus import FocusManager
 from ..events.pointer import HitTestResult, PointerRouter
 from ..layout import BoxConstraints, Offset, Rect, RenderBox, Size
+from ..motion.ticker import Ticker
 from ..style import Theme, default_theme
 from ..text import TextEngine
 from .element import Element
@@ -166,6 +167,8 @@ class BuildOwner:
         # 一个 owner 一棵树，所以 router 的 hover 状态也归它。
         # 手势超时（长按/双击）需要"到点排一帧"，接到 request_frame 上（R7.2）。
         self.pointer_router = PointerRouter()
+        #: 动效推进（滚动条淡出等）。时间同样来自 begin_frame(now_ms)。
+        self.ticker = Ticker()
         self.pointer_router.request_timeout_check = self.request_frame
         # 焦点（R9.1）：谁接收键盘/文本/IME。整棵树共享一个，和 router 同理。
         self.focus_manager = FocusManager()
@@ -527,6 +530,10 @@ class BuildOwner:
         try:
             if now_ms is not None:
                 self.tick_gestures(now_ms)
+                # 动效推进：还有没跑完的动画就再排一帧，跑完了就自然停下
+                # （空闲不留帧——这是 Ticker 返回值的全部意义）。
+                if self.ticker.tick(now_ms):
+                    self.request_frame()
             self.flush_effects()
             self.flush_build()
             size = self.flush_layout(constraints)

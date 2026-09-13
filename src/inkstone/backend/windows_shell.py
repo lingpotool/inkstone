@@ -15,12 +15,16 @@ import ctypes
 import sys
 
 __all__ = [
+    "animations_enabled",
     "apply_app_user_model_id",
     "apply_caption_theme",
     "dpi_awareness",
     "ensure_per_monitor_awareness",
     "is_supported",
 ]
+
+#: SystemParametersInfo 的动作码：客户端区域动画是否开启（"辅助功能 → 视觉效果"）
+_SPI_GETCLIENTAREAANIMATION = 0x1042
 
 #: DwmSetWindowAttribute 的属性号（Windows 11 SDK）
 _DWMWA_USE_IMMERSIVE_DARK_MODE = 20
@@ -37,6 +41,30 @@ _PER_MONITOR_AWARE_V2 = -4
 
 def is_supported() -> bool:
     return sys.platform == "win32"
+
+
+def animations_enabled() -> bool:
+    """系统是否允许动画（"辅助功能 → 视觉效果 → 动画效果"）。
+
+    查不到就当**允许**：把"读不到设置"当成"用户要求关动画"会让所有机器上的
+    动效静默消失，那比多播一个淡出更糟。非 Windows 也返回 True（各平台的
+    等价开关在跨平台工作流里补）。
+    """
+    if not is_supported():
+        return True
+    try:
+        user32 = ctypes.WinDLL("user32")
+        user32.SystemParametersInfoW.argtypes = [
+            ctypes.c_uint,
+            ctypes.c_uint,
+            ctypes.c_void_p,
+            ctypes.c_uint,
+        ]
+        enabled = ctypes.c_int(1)
+        ok = user32.SystemParametersInfoW(_SPI_GETCLIENTAREAANIMATION, 0, ctypes.byref(enabled), 0)
+        return bool(enabled.value) if ok else True
+    except OSError:  # pragma: no cover - 取决于机器
+        return True
 
 
 def dpi_awareness() -> int:
