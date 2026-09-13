@@ -129,6 +129,46 @@ _CURSOR_TO_SDL = {
 }
 
 
+class _SDL_version(ctypes.Structure):
+    """SDL_version：三个 uint8。`SDL_GetWindowWMInfo` 要求调用方填好版本号。"""
+
+    _fields_ = [
+        ("major", ctypes.c_uint8),
+        ("minor", ctypes.c_uint8),
+        ("patch", ctypes.c_uint8),
+    ]
+
+
+class _SysWMinfoWin(ctypes.Structure):
+    """`SDL_SysWMinfo.info.win`：句柄、设备上下文、实例句柄。"""
+
+    _fields_ = [
+        ("window", ctypes.c_void_p),
+        ("hdc", ctypes.c_void_p),
+        ("hinstance", ctypes.c_void_p),
+    ]
+
+
+class _SysWMinfo(ctypes.Structure):
+    """`SDL_SysWMinfo` 的 Windows 布局：version + subsystem + info union。
+
+    SDL 会**整段写入**这个结构（union 按最大成员算大小），所以按"只声明
+    Windows 需要的字段"来定义会写入越界、踩坏调用方的栈。这里照实声明
+    Win32 成员，并留出足够余量：多要一点内存换来的是不会内存越界。
+
+    取不到（非 Windows / SDL 版本不匹配）时 `SDL_GetWindowWMInfo` 返回 0，
+    上层拿到 0 并跳过平台外观调用。
+    """
+
+    _fields_ = [
+        ("version", _SDL_version),
+        ("subsystem", ctypes.c_uint32),
+        ("win", _SysWMinfoWin),
+        # 余量：不同 SDL 构建的 union 可能有更大的成员（WinRT 等）。
+        ("_reserve", ctypes.c_byte * 64),
+    ]
+
+
 # 按平台列候选库名。用查表而不是 if 链：mypy 会按当前平台收窄 sys.platform，
 # if 链会被判成"不可达"。
 _LIBRARY_CANDIDATES: dict[str, tuple[str, ...]] = {
@@ -543,6 +583,91 @@ class SDL2Backend:
         self._require_initialized()
         return self._handle(window_id)
 
+    # ------------------------------------------------------------ 窗口能力（R10）
+
+    def set_app_identity(self, app_id: str) -> None:
+        """任务栏身份。Windows 上必须在建窗之前设，否则会先以解释器身份注册。"""
+        if sys.platform == "win32":
+            from . import windows_shell
+
+            windows_shell.apply_app_user_model_id(app_id)
+
+    def set_title(self, window_id: int, title: str) -> None:
+        self._require_initialized()
+        self._lib.SDL_SetWindowTitle(self._handle(window_id), title.encode("utf-8"))
+
+    def set_min_size(self, window_id: int, width: float, height: float) -> None:
+        self._require_initialized()
+        self._lib.SDL_SetWindowMinimumSize(self._handle(window_id), int(width), int(height))
+
+    def set_icon(self, window_id: int, width: int, height: int, rgba: bytes) -> None:
+        """把应用外壳画好的 RGBA 交给 SDL（`SDL_SetWindowIcon` 会拷贝）。
+
+        用 `SDL_CreateRGBSurfaceFrom` 包住这段像素，调用完立刻释放——
+        缓冲区是 Python 的，`SDL_FreeSurface` 不会去 free 它（From 系列不接管内存）。
+        """
+        self._require_initialized()
+        if len(rgba) != width * height * 4:
+            raise BackendError(f"图标像素长度应为 {width * height * 4}，收到 {len(rgba)}")
+        buf = (ctypes.c_ubyte * len(rgba)).from_buffer_copy(rgba)
+        # 小端机器上内存序即 R,G,B,A；SDL 的 mask 描述的是整数的位段。
+        surface = self._lib.SDL_CreateRGBSurfaceFrom(
+            ctypes.byref(buf),
+            width,
+            height,
+            32,
+            width * 4,
+            0x000000FF,
+            0x0000FF00,
+            0x00FF0000,
+            0xFF000000,
+        )
+        if not surface:
+            return
+        try:
+            self._lib.SDL_SetWindowIcon(self._handle(window_id), surface)
+        finally:
+            self._lib.SDL_FreeSurface(surface)
+
+    def set_maximized(self, window_id: int, maximized: bool) -> None:
+        self._require_initialized()
+        handle = self._handle(window_id)
+        if maximized:
+            self._lib.SDL_MaximizeWindow(handle)
+        else:
+            self._lib.SDL_RestoreWindow(handle)
+
+    def set_fullscreen(self, window_id: int, enabled: bool) -> None:
+        self._require_initialized()
+        # SDL_WINDOW_FULLSCREEN_DESKTOP：无模式切换，比真改分辨率更适合桌面 App
+        flag = 0x00001001 if enabled else 0
+        self._lib.SDL_SetWindowFullscreen(self._handle(window_id), flag)
+
+    def set_window_theme(
+        self, window_id: int, *, dark: bool, background: int | None = None
+    ) -> None:
+        """把主题告诉窗口系统：Windows 上染 DWM 标题栏（原生边框保留）。"""
+        if sys.platform != "win32":
+            return
+        from . import windows_shell
+
+        windows_shell.apply_caption_theme(
+            self.native_window_handle(window_id), dark=dark, background=background
+        )
+
+    def native_window_handle(self, window_id: int) -> int:
+        """平台原生窗口句柄（Windows 上是 HWND；其他平台返回 0）。
+
+        只有需要调用平台外观 API（DWM）时才用它——句柄不往 L0 之外流。
+        """
+        if sys.platform != "win32":
+            return 0
+        info = _SysWMinfo()
+        self._lib.SDL_GetVersion(ctypes.byref(info.version))
+        if not self._lib.SDL_GetWindowWMInfo(self._handle(window_id), ctypes.byref(info)):
+            return 0
+        return int(info.win.window or 0)
+
     # ------------------------------------------------------------ 生命周期
 
     def initialize(self) -> None:
@@ -573,6 +698,30 @@ class SDL2Backend:
         lib.SDL_GetWindowID.restype = c.c_uint32
         lib.SDL_GetWindowID.argtypes = [c.c_void_p]
         lib.SDL_GetWindowSize.argtypes = [c.c_void_p, p(c.c_int), p(c.c_int)]
+        # 窗口能力（R10）
+        lib.SDL_SetWindowTitle.argtypes = [c.c_void_p, c.c_char_p]
+        lib.SDL_SetWindowMinimumSize.argtypes = [c.c_void_p, c.c_int, c.c_int]
+        lib.SDL_MaximizeWindow.argtypes = [c.c_void_p]
+        lib.SDL_RestoreWindow.argtypes = [c.c_void_p]
+        lib.SDL_SetWindowFullscreen.restype = c.c_int
+        lib.SDL_SetWindowFullscreen.argtypes = [c.c_void_p, c.c_uint32]
+        lib.SDL_GetVersion.argtypes = [c.c_void_p]
+        lib.SDL_GetWindowWMInfo.restype = c.c_int
+        lib.SDL_GetWindowWMInfo.argtypes = [c.c_void_p, c.c_void_p]
+        lib.SDL_SetWindowIcon.argtypes = [c.c_void_p, c.c_void_p]
+        lib.SDL_CreateRGBSurfaceFrom.restype = c.c_void_p
+        lib.SDL_CreateRGBSurfaceFrom.argtypes = [
+            c.c_void_p,
+            c.c_int,
+            c.c_int,
+            c.c_int,
+            c.c_int,
+            c.c_uint32,
+            c.c_uint32,
+            c.c_uint32,
+            c.c_uint32,
+        ]
+        lib.SDL_FreeSurface.argtypes = [c.c_void_p]
         # DPI：SDL 2.24+ 的 scale 返回 float（不声明 restype 会被当 int 解读）；
         # 老版本兜底走 display index + display DPI。这三个按版本可选，缺失就跳过。
         for name, restype, argtypes in (

@@ -94,6 +94,14 @@ class HeadlessBackend:
         # 帧接缝（R5.8）：记录帧边界，测试可以断言"这帧真的上过屏"。
         self._frames_presented = 0
         self._in_frame = False
+        # 窗口能力（R10）：记录调用，供应用外壳测试断言
+        self._titles: dict[int, str] = {}
+        self._min_sizes: dict[int, tuple[float, float]] = {}
+        self._icons: dict[int, tuple[int, int, bytes]] = {}
+        self._maximized: dict[int, bool] = {}
+        self._fullscreen: dict[int, bool] = {}
+        self._window_themes: dict[int, tuple[bool, int | None]] = {}
+        self.app_id: str = ""
         # 字体度量：默认走确定性表（跨平台一致，黄金图才能逐字节比对）。
         # `font_engine` 允许注入任意 MetricsProvider；`system_fonts=True`
         # 是"尽量用系统真字体"的糖，拿不到引擎时静默退回确定性表。
@@ -117,6 +125,7 @@ class HeadlessBackend:
         self._text_input_windows.clear()
         self._ime_rects.clear()
         self._pending.clear()
+        self._icons.clear()
 
     # ------------------------------------------------------------ 窗口
 
@@ -137,6 +146,7 @@ class HeadlessBackend:
         self._dpi_scales.pop(window_id, None)
         self._text_input_windows.discard(window_id)
         self._ime_rects.pop(window_id, None)
+        self._icons.pop(window_id, None)
 
     def window_spec(self, window_id: int) -> WindowSpec:
         self._require_window(window_id)
@@ -244,6 +254,61 @@ class HeadlessBackend:
     def request_redraw(self, window_id: int) -> None:
         self._require_window(window_id)
         self._redraw_requests += 1
+
+    # ------------------------------------------------------------ 窗口能力（R10）
+    #
+    # 无头后端把它们**记录下来**而不是丢弃：应用外壳的行为（标题、最小尺寸、
+    # 主题跟随）因此在 CI 里可断言，不需要真窗口。
+
+    def set_app_identity(self, app_id: str) -> None:
+        self.app_id = app_id
+
+    def set_title(self, window_id: int, title: str) -> None:
+        self._require_window(window_id)
+        self._titles[window_id] = title
+
+    def set_min_size(self, window_id: int, width: float, height: float) -> None:
+        self._require_window(window_id)
+        self._min_sizes[window_id] = (width, height)
+
+    def set_icon(self, window_id: int, width: int, height: int, rgba: bytes) -> None:
+        self._require_window(window_id)
+        if len(rgba) != width * height * 4:
+            raise BackendError(f"图标像素长度应为 {width * height * 4}，收到 {len(rgba)}")
+        self._icons[window_id] = (width, height, rgba)
+
+    def set_maximized(self, window_id: int, maximized: bool) -> None:
+        self._require_window(window_id)
+        self._maximized[window_id] = maximized
+
+    def set_fullscreen(self, window_id: int, enabled: bool) -> None:
+        self._require_window(window_id)
+        self._fullscreen[window_id] = enabled
+
+    def set_window_theme(
+        self, window_id: int, *, dark: bool, background: int | None = None
+    ) -> None:
+        self._require_window(window_id)
+        self._window_themes[window_id] = (dark, background)
+
+    def window_title(self, window_id: int) -> str | None:
+        return self._titles.get(window_id)
+
+    def window_min_size(self, window_id: int) -> tuple[float, float] | None:
+        return self._min_sizes.get(window_id)
+
+    def window_icon(self, window_id: int) -> tuple[int, int, bytes] | None:
+        """窗口图标 (宽, 高, RGBA)——测试断言"图标真的交到了后端"。"""
+        return self._icons.get(window_id)
+
+    def window_theme(self, window_id: int) -> tuple[bool, int | None] | None:
+        return self._window_themes.get(window_id)
+
+    def is_maximized(self, window_id: int) -> bool:
+        return self._maximized.get(window_id, False)
+
+    def is_fullscreen(self, window_id: int) -> bool:
+        return self._fullscreen.get(window_id, False)
 
     @property
     def redraw_requests(self) -> int:

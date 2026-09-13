@@ -39,7 +39,7 @@ Phase 1 · 地基。真实代码覆盖布局、组件树、样式、渲染、**�
 | `examples/notes.py` | ✅ **样板 App「墨记」**：侧栏 + 滚动列表 + 表单 + 明暗主题切换；headless 出黄金图、`--sdl2` 真窗口交互，进 CI 冒烟 |
 | 其余模块（gfx GL+Skia / events 其余 / primitives / app …） | ⬜ 占位桩 |
 
-1058 个无头单测全绿，**黄金图像素级比对**也跑通（12 张基线）。
+1089 个无头单测全绿，**黄金图像素级比对**也跑通（12 张基线）。
 **地基整改 R1（正确性止血，docs/15）、R2（测试求真，docs/16）、
 R3（渲染协议重塑，docs/17）、R4（跨平台文本栈，docs/18）、
 R5（事件与 IME，docs/19）、R6（主题传播与依赖追踪，docs/20）已完成**：
@@ -79,14 +79,19 @@ R7.5 性能基准已完成（`benchmarks/run.py` 三场景出 p50/p95，规则�
 GL 子包 R8.1（驱动接缝 + 后端逻辑层）、R8.2（Windows WGL 真机驱动）、
 R8.3（热路径缓存 + 矩形合批 + 字形图集 + 帧去重）、
 R8.4（显示列表状态指令 + 滚动 repaint boundary + GL 层缓存）已完成，
-测试 → 1058 全绿（覆盖率 89.09%）。**R7.5 验收达成：GL p95 全屏 4.4ms /
+测试 → 1089 全绿（覆盖率 90.15%）。**R7.5 验收达成：GL p95 全屏 4.4ms /
 文本 8.6ms / 滚动 1.0ms，三场景全部 ≤10ms**（软件为事实源，未变）。
-R8.6 真窗口 GL 上屏完成（SDL 上下文 + FBO blit + 换链，Windows 真机验证）。剩余：Linux/macOS GL 驱动、路径三角化、通用脏矩形、应用外壳脏区调度。
+R8.5 SDL2 走声明式可选依赖、R8.6 真窗口 GL 上屏完成（SDL 上下文 + FBO blit +
+换链，Windows 真机验证）。R9 焦点系统 + 文本编辑落地（ADR 无新增，见
+`events/focus.py` 与 `widgets/form.py`）；R10 窗口身份与能力落地（ADR-0022）：
+原生边框 + 平台化外观（AppUserModelID / DWM 标题栏配色 / 程序化图标 / 最小尺寸），
+应用外壳 `inkstone.app` 与 `examples/notes.py --sdl2` 已接线。
+剩余：Linux/macOS GL 驱动、路径三角化、通用脏矩形、应用外壳脏区调度、
+窗口位置尺寸记忆、macOS NSWindow appearance。
 
-**R7 整包完成，Phase 1 的"交互闭环"闭合**（能点、能滚、能打字的前半程：
-聚焦与 IME 通道、能切主题、能缩放）。Phase 1 剩余 DoD：文本编辑模型
-（可输入/可删除/光标，Phase 2 首项）、macOS/Linux 真机字体验证、
-三平台 SDL2 交互验证。
+**R7 整包 + Phase 1 的"交互闭环"已闭合**（能点、能滚、能打字、能切主题、
+能缩放、真窗口观感专业）。Phase 1 剩余 DoD：macOS/Linux 真机字体验证、
+三平台 SDL2 交互验证、文本场景 p95 进 8ms。
 **GL 后端子包（docs/22）进行中**：R8.1 驱动接缝 + 逻辑层、R8.2 Windows WGL
 真机驱动、R8.3 热路径 + 合批 + 图集 + 帧去重、R8.4 状态指令 + 层缓存已完成，
 三场景 p95 ≤ 10ms。R8.5 把 SDL2 二进制改成**声明式可选依赖**
@@ -413,6 +418,7 @@ Phase 1 其余 DoD（文本编辑模型、macOS/Linux 真机字体验证、三�
 | ADR-0019 | **显示列表增加状态指令（变换/裁剪）与层标记；滚动/静态子树作为 repaint boundary 做 RasterCache** | 坐标在录制时被 bake 成绝对值，导致滚动每帧都要把新偏移重新烤进几百条指令、并重排重绘整棵子树——这是滚动做不到专业帧率的根因（Flutter 的答案是 layer + repaint boundary，Skia 是 damage）。落地：`PushTranslateOp`/`PushClipOp`/`PopOp` 作为运行时状态，`resolve_state_ops` 保证与烘焙**逐像素等价**（两个后端共用，黄金图不动）；`PushLayerOp(key, rect)` 标记可缓存层，GL 后端渲染进离屏 FBO 纹理、命中 key 即复用，每帧只画一个四边形。配套两条纪律：**光栅后端不自动清屏**（背景由显示列表的指令负责，否则脏子树重绘会擦掉未变区域）；**层 key 用单调代号而非 `id()`**（对象回收后 id 复用会让旧纹理顶包） |
 | ADR-0020 | **SDL2 二进制走"声明式可选依赖"，不在仓库放二进制；`load_sdl2` 三层优先级** | 平台窗口后端（ADR-0001）需要各平台 SDL2 二进制。专业做法不是往仓库/源码树塞 DLL，而是可选 extra `inkstone[sdl2] = pysdl2 + pysdl2-dll`：`pysdl2-dll` 发布 Windows/macOS/Linux 预编译 wheel（≈4MB，含 SDL2.dll ≈1.5MB），`pysdl2` 按平台定位；我们的 backend 仍 ctypes 直调，只借它"找到库"。加载优先级：`INKSTONE_SDL2` 环境变量（打包/私有部署）> 可选依赖 > 系统库（winget/brew/apt），全失败抛带三条修复指引的 `BackendError`。**核心包保持零依赖**——SDL2 只在开真窗口时需要，测试/CI/黄金图/基准全走无头后端 |
 | ADR-0021 | **真窗口 GL 上屏：上下文归 SDL，GL 只借；离屏 FBO 是唯一绘制目标，`end()` 时 blit 上屏** | 自建窗口（WGL 隐藏窗口）解决不了"显示到窗口"：GL 资源与上下文绑定，纹理跨上下文不可用。做法是 `WindowSpec(opengl=True)` 让 SDL 用 OPENGL 标志建窗，`sdl_gl_driver(backend, window)` 在其上下文上装配同一套驱动（`SDL_GL_CreateContext` + `SDL_GL_GetProcAddress` + `SwapWindow`，`close()` 只解除不销毁）。绘制**始终进离屏 FBO**（层缓存/读回/尺寸口径都建立在它上面），`end()` 把 FBO 纹理 blit 到默认帧缓冲再换链——"窗口"与"离屏"画出来的是同一张图。配套坑：挂载模式下 `begin()` **不得**无条件 `wglMakeCurrent(0,0)`，那会把 SDL 的上下文解绑，之后所有 GL 调用静默失败（实测 FBO 完整性校验返回 0） |
+| ADR-0022 | **保留原生窗口边框，只做平台化外观（图标 / AppUserModelID / DWM 标题栏配色），不自绘标题栏** | Win11 的 Snap Layouts、贴靠、最大化动画、无障碍与高对比主题都是 DWM 提供的能力；自绘标题栏（Chrome / VS Code 路线）要自己实现 hit-test 与 snap，且必然丢掉系统能力。Flutter / Electron 的默认路线是原生边框 + 平台化外观，我们照做：`Backend` 协议加 `set_app_identity`（任务栏身份，须在建窗前设）/ `set_title` / `set_min_size` / `set_maximized` / `set_fullscreen` / `set_window_theme` / `set_icon`；Windows 细节收在 `backend/windows_shell.py`（`SetCurrentProcessExplicitAppUserModelID` + `DwmSetWindowAttribute`，非 Windows 一律安全空操作返回 False）。**图标不进仓库**：`inkstone.app.app_icon_rgba` 用自家显示列表 + 软件光栅画图标（圆角方石 + 环形砚池 + 墨点），同一份代码逐字节确定，`tools/build_icon.py` 只在打包时导出 .ico。配套坑：`SDL_SysWMinfo` 是"版本 + 子系统 + union"，SDL 会**整段写入**，按"只声明 HWND"定义结构会栈越界（实测 DWM 调用处 access violation）——必须照实声明并留余量；窗口 resize 后视口尺寸跟 `WINDOWEVENT_RESIZED` 走 |
 
 ## 已知待办
 

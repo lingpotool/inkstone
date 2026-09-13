@@ -1,16 +1,20 @@
 # HANDOFF —— 交接文档
 
 > 写给下一个接手的对话。读完这份 + `AGENT.md` + `ROADMAP.md`，就能直接开工。
-> 交接时间：**2026-09-13** · 地基整改 R1–R6 + 收官包 R7 **全部完成** ·
-> 无头单测 **1058 个全绿**（覆盖率 89.09%）· 黄金图 12 张像素级比对
+> 交接时间：**2026-09-13** · 地基整改 R1–R6 + 收官包 R7 + GL 子包 R8 + R9/R10 **全部完成** ·
+> 无头单测 **1089 个全绿**（覆盖率 90.15%）· 黄金图 12 张像素级比对
 >
-> **当前主线**：**GL 后端子包（`docs/22`）**——R7.5 的性能基准触发了预先写死的
+> **当前主线**：**GL 后端子包（`docs/22`）已完成**——R7.5 的性能基准触发了预先写死的
 > 决策规则（三场景 p95 超 10ms 预算 40–300 倍）。R8.1 接缝+逻辑层、R8.2
-> Windows WGL 真机驱动、R8.3 热路径+合批+图集+帧去重、**R8.4 状态指令 +
-> 滚动 repaint boundary + GL 层缓存**均已完成。
+> Windows WGL 真机驱动、R8.3 热路径+合批+图集+帧去重、R8.4 状态指令 +
+> 滚动 repaint boundary + GL 层缓存、R8.5 SDL2 可选依赖、R8.6 真窗口上屏均已完成。
 > **R7.5 验收达成**：本机 RTX 3060 / GL 4.6 实测 p95 全屏 **4.4ms** /
 > 文本 **8.6ms** / 滚动 **1.0ms**，三场景全部 ≤10ms（软件光栅仍是黄金图
 > 的确定性事实源，未变）。
+>
+> **R9 焦点/文本编辑 + R10 窗口身份与能力也已完成**（ADR-0022）：原生边框 +
+> 平台化外观（任务栏身份 / 程序化图标 / DWM 标题栏配色 / 最小尺寸），
+> 样板 App 真窗口路径已接线。
 >
 > 更早的分包更新记录已归档为 git 历史；本文只描述**当前真实状态**。
 > 规矩：本文数字与"已完成"必须可复现；发现过期就改，不留"看起来还行"的旧描述。
@@ -78,16 +82,17 @@ cb76c17 feat(core):   R7.3 DPI 缩放接线
 - [x] 100%/125%/150% 缩放（R7.3）：逻辑像素布局、物理=逻辑×scale、
       文字在物理分辨率重光栅化；150% 黄金图已肉眼核对。125% 只有尺寸断言，
       未单独建黄金图（要更全可补 125%/200% 基线）。
-- [x] 布局引擎 100% 无窗口可测，覆盖 ≥85%（实测 89.8%）
+- [x] 布局引擎 100% 无窗口可测，覆盖 ≥85%（实测 90.15%）
 - [ ] 样板 App 三平台可用：R7.4 交付 `examples/notes.py`，headless 三平台出图；
-      **SDL2 真窗口交互尚未在三平台各验一遍**
-- [ ] 帧时间 p95 < 8ms：软件光栅实测差两个数量级，由 docs/22 的 GL 后端达成
+      R10 已接窗口身份/图标/主题跟随；**SDL2 真窗口交互尚未在三平台各验一遍**
+- [ ] 帧时间 p95 < 8ms：GL 后端已落地（docs/22），本机实测滚动 1.0ms /
+      全屏 4.4ms / 文本 8.6ms；**文本场景仍差一点**，优化后再勾
 
 ---
 
 ## 三、下一步（按 ROADMAP 顺序，别跳）
 
-### ① GL 后端子包（`docs/22`）—— 当前主线
+### ① GL 后端子包（`docs/22`）—— 已完成
 
 R7.5 的规则先写死（p95 > 10ms），实测三场景 p95 = 859 / 3125 / 576ms，
 热点是软件光栅的纯 Python 逐像素 SDF 与"整份显示列表全量光栅"。
@@ -128,29 +133,28 @@ docs/22 已定范围：**只实现现有显示列表 IR 的指令集**、沿用 
   （红块位置/底色正确、`gl_err=0`、可连续换链）；`examples/notes.py --sdl2`
   已改走 GL。踩坑：挂载模式下 `begin()` 无条件 `wglMakeCurrent(0,0)` 会把
   SDL 上下文解绑（FBO 校验静默返回 0）。
+### ② 焦点/文本编辑（R9）与窗口身份能力（R10）—— 已完成
+
 - **R9 焦点系统 + 文本编辑已完成**：`events/focus.py`（唯一焦点 / focus-visible /
   Tab 遍历 / 点空白失焦）+ Input 编辑模型（text + selection + composition、
   字素簇移动删除、光标/选区/组合态渲染、剪贴板、候选框跟随）；core 增加
   `dispatch_key/text/ime`，App 主循环已接。顺带修掉"点过的控件永久带焦点环"
   （鼠标来源不算 focus-visible）。Phase 1 的"中文输入"DoD 达成。
-- **仍未做**：窗口身份（应用图标 / AppUserModelID / 暗色标题栏）、窗口能力
-  （最小尺寸、最大化/还原、位置记忆）；Linux GLX/EGL、macOS CGL；路径三角化；
-  通用脏矩形损伤跟踪；应用外壳脏区调度。
+- **R10 窗口身份与能力已完成**（ADR-0022，`backend/windows_shell.py` +
+  `Backend` 协议扩展）：`set_app_identity`（任务栏身份，建窗前设）/
+  `set_title` / `set_min_size` / `set_maximized` / `set_fullscreen` /
+  `set_window_theme`（DWM 深色 + 标题栏底色，**保留原生边框** → Snap
+  Layouts / 贴靠 / 无障碍全在）/ `set_icon`。图标**不在仓库**：
+  `inkstone.app.app_icon_rgba` 用自家显示列表 + 软件光栅画（圆角方石 +
+  环形砚池 + 墨点），逐字节确定，`tools/build_icon.py` 打包时导出 .ico。
+  `examples/notes.py --sdl2` 已接身份/最小尺寸/图标/主题跟随，且窗口可缩放
+  （视口跟 `WINDOWEVENT_RESIZED` 走，原生 snap 因此可用）。踩坑：
+  `SDL_SysWMinfo` 必须照实声明+留余量（SDL 整段写入，只声明 HWND 会栈越界）。
+- **仍未做**：窗口位置/尺寸记忆（应用外壳层）；Linux GLX/EGL、macOS CGL；
+  路径三角化；通用脏矩形损伤跟踪；应用外壳脏区调度；macOS 的 NSWindow
+  appearance 接线（`windows_shell` 目前只有 Win32 实现，其他平台是安全空操作）。
 - Linux GLX/EGL、macOS CGL 驱动照 `GLDriver` 协议补（Windows 已通过 WGL +
   SDL 上下文两条路验证）；跨平台窗口获取见 ADR-0020。
-
-### ② 窗口身份与窗口能力（观感专业化的下一步）
-
-现状：只用了 SDL 默认——默认图标、暗色 App 配白色系统标题栏、任务栏身份是
-`python.exe`。专业做法（对齐 Flutter / Electron）：**保留原生边框**，只做
-平台化着色，从而 Snap Layouts / 贴靠 / 无障碍 / 高对比主题全部保留：
-- `SDL_SetWindowIcon` + Windows `AppUserModelID`（任务栏身份）；
-- Windows `DwmSetWindowAttribute`（`DWMWA_USE_IMMERSIVE_DARK_MODE` /
-  `DWMWA_CAPTION_COLOR`）让标题栏跟随主题；macOS 设 NSWindow appearance；
-- 图标用 `tools/build_icon.py` 以自家文本栈 + 令牌**程序化生成**（可复现），
-  不在仓库手工维护二进制素材；
-- 窗口能力：最小尺寸、最大化/还原/全屏、标题更新、位置尺寸记忆（应用外壳）。
-自绘标题栏（保留原生按钮的原生叠加路线）是可选后置项，不默认。
 
 ### ③ macOS / Linux 真机字体验证
 
@@ -170,12 +174,12 @@ R7.1–R7.3 的事件/手势/DPI 链路在 headless 下都有确定性测试，
 
 ```bash
 cd /e/inkstone
-./.venv/Scripts/python.exe -m pytest tests -q          # 1058 个必须全绿
+./.venv/Scripts/python.exe -m pytest tests -q          # 1089 个必须全绿
 ./.venv/Scripts/python.exe -m ruff check src tests examples benchmarks
 ./.venv/Scripts/python.exe -m ruff format --check src tests examples benchmarks
 ./.venv/Scripts/python.exe -m mypy                     # strict，零错误
 ./.venv/Scripts/python.exe -m pytest tests -q -m "not slow" \
-    --cov=src/inkstone --cov-fail-under=85             # 覆盖率（89.1%）
+    --cov=src/inkstone --cov-fail-under=85             # 覆盖率（90.15%）
 # 或一把梭：make check
 ```
 
@@ -243,10 +247,12 @@ cd /e/inkstone
 ## 八、开工姿势（建议）
 
 1. 读 `AGENT.md`（**重点看 ADR 表**）→ `ROADMAP.md` → 本文档
-2. 跑一遍验证命令确认起点全绿（1058 passed / mypy 干净 / 覆盖 89.1%）
-3. 跑一次 `python examples/notes.py` —— 看当前最完整的界面长什么样
-4. 按第三节顺序推进：**①GL 后端子包（docs/22）** → ②文本编辑 → ③macOS/Linux
-   真机字体验证 → ④三平台 SDL2 验证
+2. 跑一遍验证命令确认起点全绿（1089 passed / mypy 干净 / 覆盖 90.15%）
+3. 跑一次 `python examples/notes.py` —— 看当前最完整的界面长什么样；
+   `--sdl2` 看真窗口（图标 / 标题栏配色 / snap）。
+4. 按第三节顺序推进：①GL 子包、②窗口身份与能力 **均已完成** →
+   ③macOS/Linux 真机字体验证 → ④三平台 SDL2 验证；再往后是
+   窗口位置尺寸记忆、路径三角化、通用脏矩形、应用外壳脏区调度
 5. 每完成一块：全量检查全绿 → commit（中文说明为什么）→ push
 
 地基是结实的：三棵树、令牌、跨平台文本栈、确定性渲染、事件/手势/DPI 闭环、

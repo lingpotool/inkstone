@@ -16,9 +16,9 @@
 - 组件里不写死颜色/尺寸（一律 `context.theme` 的令牌）；
 - 交互只经事件路由与手势识别器（`owner.dispatch_pointer`），不自己解析裸事件。
 
-文本编辑（可输入可删除）属 Phase 2，所以这个 App 的"新建"用按钮而不是键入——
-Input 在这里演示的是"能聚焦、能让 IME 候选框跟随"（R7.1）。这个缺口记在
-docs/20 §R6.4 的后补清单里，不在 App 层糊一个假的输入框。
+文本编辑（R9）已经落地：搜索框可以聚焦、键入、选中、删除、Ctrl+C/X/V。
+真窗口模式（`--sdl2`）还会把应用身份、最小尺寸与明暗主题交给窗口系统——
+任务栏认得出这是「墨记」，标题栏跟着主题换色，原生贴靠（Snap Layouts）保留。
 """
 
 from __future__ import annotations
@@ -26,10 +26,12 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from inkstone import __version__
+from inkstone.app import app_icon_rgba
 from inkstone.backend import HeadlessBackend, ImeRect, WindowSpec, hbft_font_engine
 from inkstone.core import BuildOwner, State, StatefulWidget, ThemeScope, Widget
 from inkstone.devtools import render_to_png
@@ -40,6 +42,9 @@ from inkstone.widgets import Box, Button, Card, Column, Flexible, Input, Row, Sc
 
 WIDTH = 760.0
 HEIGHT = 520.0
+
+#: 窗口图标边长（物理像素）。256 是 Windows 取大图标的档位，其余由系统缩放。
+_ICON_PX = 256
 
 _FILTERS = (("all", "全部"), ("starred", "收藏"), ("archived", "归档"))
 
@@ -81,8 +86,16 @@ def _seed_notes() -> list[Note]:
 class NotesApp(StatefulWidget):
     """根组件：持有笔记数据、当前筛选与主题档位。"""
 
-    def __init__(self, *, initial_dark: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        initial_dark: bool = False,
+        on_theme: Callable[[bool], None] | None = None,
+    ) -> None:
         self.initial_dark = initial_dark
+        #: 主题切换的对外通知（应用外壳拿它同步窗口标题栏配色）。
+        #: 组件不知道窗口的存在——它只报告"我换档了"，这是 App↔平台的边界。
+        self.on_theme = on_theme
 
     def create_state(self) -> NotesAppState:
         return NotesAppState()
@@ -128,7 +141,12 @@ class NotesAppState(State[NotesApp]):
             self.set_state(lambda: setattr(self, "filter", value))
 
     def _toggle_theme(self) -> None:
-        self.set_state(lambda: setattr(self, "dark", not self.dark))
+        def mutate() -> None:
+            self.dark = not self.dark
+            if self.widget.on_theme is not None:
+                self.widget.on_theme(self.dark)
+
+        self.set_state(mutate)
 
     def _visible_notes(self) -> list[tuple[int, Note]]:
         """当前筛选下可见的 (原始下标, 笔记)——下标用于回写收藏/归档。"""
@@ -243,13 +261,19 @@ class NotesAppState(State[NotesApp]):
         )
 
 
-def build(owner: BuildOwner, *, dark: bool = False) -> None:
+def build(
+    owner: BuildOwner,
+    *,
+    dark: bool = False,
+    on_theme: Callable[[bool], None] | None = None,
+) -> None:
     """挂载样板 App。测试与截图都从这里进入。
 
     主题由 App 自己持有（根上包 `ThemeScope`），所以初始档位从参数进——
     只改 `owner.theme` 是没用的：App 会在自己下面把作用域覆盖掉。
+    `on_theme` 是给真窗口路径用的：换档时通知窗口系统。
     """
-    owner.mount(NotesApp(initial_dark=dark))
+    owner.mount(NotesApp(initial_dark=dark, on_theme=on_theme))
 
 
 # ---------------------------------------------------------------- 运行
@@ -306,16 +330,34 @@ def run_window(*, dark: bool, deterministic: bool) -> int:
 
     metrics = None if deterministic else hbft_font_engine()
     backend = SDL2Backend()
+    # 任务栏身份在建窗**之前**设：Windows 认的是注册时刻的身份，
+    # 晚设会让窗口先以解释器（python.exe）的身份出现在任务栏上。
+    backend.set_app_identity("Inkstone.Notes")
     backend.initialize()
     window = backend.create_window(
         WindowSpec(
             title="墨记 · inkstone",
             width=WIDTH,
             height=HEIGHT,
-            resizable=False,  # 视口尺寸暂时固定：窗口缩放接线属应用外壳工作
+            resizable=True,
             opengl=True,
         )
     )
+    # 最小尺寸：再小布局就装不下侧栏 + 主区了，窗口系统替我们先挡一道。
+    backend.set_min_size(window, 480.0, 320.0)
+    # 图标由自家渲染器画出来（R10.3）——仓库里没有 .ico，任务栏认的是这份像素。
+    backend.set_icon(window, _ICON_PX, _ICON_PX, app_icon_rgba(_ICON_PX))
+
+    dark_now = [dark]
+
+    def apply_window_theme(is_dark: bool) -> None:
+        """主题换档 → 窗口系统跟着换（标题栏配色；原生边框保留）。"""
+        dark_now[0] = is_dark
+        theme = Theme.dark() if is_dark else Theme.light()
+        bg = theme.color("bg")
+        backend.set_window_theme(window, dark=is_dark, background=(bg.r << 16) | (bg.g << 8) | bg.b)
+
+    apply_window_theme(dark)
     try:
         driver = sdl_gl_driver(backend, window)
     except GLUnavailableError as error:
@@ -330,7 +372,7 @@ def run_window(*, dark: bool, deterministic: bool) -> int:
         theme=Theme.dark() if dark else Theme.light(),
         text_engine=TextEngine(metrics if metrics is not None else HeadlessBackend()),
     )
-    build(owner, dark=dark)
+    build(owner, dark=dark, on_theme=apply_window_theme)
     owner.on_text_input = lambda active: (
         backend.start_text_input(window) if active else backend.stop_text_input(window)
     )
@@ -340,8 +382,9 @@ def run_window(*, dark: bool, deterministic: bool) -> int:
     # 剪贴板钩子：编辑模型的 Ctrl+C/X/V 经它落到平台
     owner.clipboard_get = backend.clipboard_get_text
     owner.clipboard_set = backend.clipboard_set_text
-    constraints = BoxConstraints(max_width=WIDTH, max_height=HEIGHT)
 
+    # 视口尺寸跟着窗口走（R10）：原生边框可拖拽/贴靠/最大化，布局自适应当前尺寸。
+    viewport = [WIDTH, HEIGHT]
     running = True
     while running:
         for event in backend.wait_events(16.0):
@@ -355,17 +398,22 @@ def run_window(*, dark: bool, deterministic: bool) -> int:
                 owner.dispatch_ime(event)
             elif isinstance(event, WindowEvent):
                 owner.handle_window_event(event)
-                if event.kind is WindowKind.CLOSE:
+                if event.kind is WindowKind.RESIZED:
+                    viewport[0] = max(1.0, event.width)
+                    viewport[1] = max(1.0, event.height)
+                elif event.kind is WindowKind.CLOSE:
                     running = False
 
         scale = backend.dpi_scale(window)
-        width = math.ceil(WIDTH * scale)
-        height = math.ceil(HEIGHT * scale)
+        logical_w, logical_h = viewport
+        width = math.ceil(logical_w * scale)
+        height = math.ceil(logical_h * scale)
+        bg = (Theme.dark() if dark_now[0] else Theme.light()).color("bg")
         recorder = DisplayListRecorder()
-        recorder.fill_rect(Rect(0.0, 0.0, float(width), float(height)), owner.theme.color("bg"))
-        raster.begin_frame(Size(WIDTH, HEIGHT), scale)
+        recorder.fill_rect(Rect(0.0, 0.0, float(width), float(height)), bg)
+        raster.begin_frame(Size(logical_w, logical_h), scale)
         owner.begin_frame(
-            constraints,
+            BoxConstraints(max_width=logical_w, max_height=logical_h),
             recorder,
             now_ms=backend.now_ms(),
             dpi_scale=scale,

@@ -355,6 +355,50 @@ class Backend(Protocol):
     def request_redraw(self, window_id: int) -> None:
         """请求下一帧重绘。"""
 
+    # -------------------------------------------------------- 窗口能力（R10）
+
+    # 这些是"应用外壳"要用的能力：标题、最小尺寸、最大化/全屏、标题栏外观。
+    # 它们都进协议而不是让 App 直接摸平台——上层代码里不该出现 Win32 调用。
+
+    def set_app_identity(self, app_id: str) -> None:
+        """设置应用身份（任务栏分组 / 图标归属）。**建窗口之前**调用。
+
+        Windows 上映射到 AppUserModelID；不设的话任务栏显示解释器（`python.exe`）
+        的名字与图标——那是"脚本"而不是"应用"。
+        """
+
+    def set_title(self, window_id: int, title: str) -> None:
+        """更新窗口标题。"""
+
+    def set_min_size(self, window_id: int, width: float, height: float) -> None:
+        """设置窗口最小尺寸（逻辑像素）。"""
+
+    def set_icon(self, window_id: int, width: int, height: int, rgba: bytes) -> None:
+        """设置窗口/任务栏图标。
+
+        `rgba` 是 `width × height × 4` 字节的**原始像素**——图标由应用外壳
+        用自己的渲染器画出来（`inkstone.app.app_icon_rgba`），后端只负责把它
+        交给窗口系统。这样后端不必认识显示列表、字体或主题令牌（L0 纪律），
+        图标也不必以二进制形式进仓库。
+        """
+
+    def set_maximized(self, window_id: int, maximized: bool) -> None:
+        """最大化 / 还原。"""
+
+    def set_fullscreen(self, window_id: int, enabled: bool) -> None:
+        """进入 / 退出全屏。"""
+
+    def set_window_theme(
+        self, window_id: int, *, dark: bool, background: int | None = None
+    ) -> None:
+        """把应用主题告诉窗口系统（标题栏配色）。
+
+        `background` 是 `0xRRGGBB`（L0 不认识 gfx 的 Color 类型）；None = 用
+        平台默认。Windows 上映射到 DWM 的深色标题栏 + 标题栏底色——**保留
+        原生边框**（Snap Layouts / 贴靠 / 无障碍全都还在），只是把它染成
+        与应用一致的颜色。
+        """
+
     # -------------------------------------------------------- 文本输入 / IME
 
     # 中文输入的三条命脉（R5.7）。SDL2 的 TEXTINPUT/TEXTEDITING 事件
