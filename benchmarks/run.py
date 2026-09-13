@@ -150,7 +150,24 @@ SCENES: dict[str, Scene] = {
 # ---------------------------------------------------------------- 测量
 
 
-def measure(scene: Scene, *, frames: int, warmup: int = 10) -> list[float]:
+def _make_raster(backend: str) -> object:
+    """建光栅后端。`gl` 走真机 WGL（Windows + 有 GL 驱动才可用）。"""
+    if backend == "software":
+        return SoftwareRasterizer()
+    try:
+        from inkstone.backend.gl_wgl import windows_gl_driver
+        from inkstone.gfx import GLRasterBackend
+    except ImportError as exc:  # 非 Windows：ctypes.wintypes 不可用
+        raise SystemExit(f"当前平台没有 GL 驱动实现（{exc}）") from exc
+    driver = windows_gl_driver()
+    if driver is None:
+        raise SystemExit("本机没有可用的 OpenGL 驱动，无法跑 --backend gl")
+    return GLRasterBackend(driver)
+
+
+def measure(
+    scene: Scene, *, frames: int, warmup: int = 10, backend: str = "software"
+) -> list[float]:
     """跑 `warmup + frames` 帧，返回每帧耗时（ms）。"""
     owner = _owner()
     scene.build(owner)
@@ -160,22 +177,31 @@ def measure(scene: Scene, *, frames: int, warmup: int = 10) -> list[float]:
     )
     width = int(constraints.max_width)
     height = int(constraints.max_height)
-    raster = SoftwareRasterizer()
+    raster = _make_raster(backend)
 
     durations: list[float] = []
-    for frame in range(warmup + frames):
-        scene.mutate(owner, frame)
-        start = time.perf_counter()
-        recorder = DisplayListRecorder()
-        recorder.fill_rect(Rect(0.0, 0.0, float(width), float(height)), owner.theme.color("bg"))
-        owner.begin_frame(constraints, recorder, force_repaint=scene.force_repaint)
-        display_list = recorder.finish(width, height)
-        raster.begin_frame(Size(float(width), float(height)), 1.0)
-        raster.execute(display_list)
-        raster.end_frame()
-        elapsed = (time.perf_counter() - start) * 1000.0
-        if frame >= warmup:
-            durations.append(elapsed)
+    try:
+        for frame in range(warmup + frames):
+            scene.mutate(owner, frame)
+            start = time.perf_counter()
+            recorder = DisplayListRecorder()
+            recorder.fill_rect(Rect(0.0, 0.0, float(width), float(height)), owner.theme.color("bg"))
+            owner.begin_frame(constraints, recorder, force_repaint=scene.force_repaint)
+            display_list = recorder.finish(width, height)
+            raster.begin_frame(Size(float(width), float(height)), 1.0)  # type: ignore[attr-defined]
+            raster.execute(display_list)  # type: ignore[attr-defined]
+            raster.end_frame()  # type: ignore[attr-defined]
+            elapsed = (time.perf_counter() - start) * 1000.0
+            if frame >= warmup:
+                durations.append(elapsed)
+    finally:
+        close = getattr(raster, "close", None)
+        if close is not None:
+            close()
+        else:
+            driver = getattr(raster, "_driver", None)
+            if driver is not None and hasattr(driver, "close"):
+                driver.close()
     return durations
 
 
@@ -205,14 +231,24 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="inkstone R7.5 性能基准")
     parser.add_argument("--scene", choices=[*SCENES, "all"], default="all")
     parser.add_argument("--frames", type=int, default=120, help="每场景测量帧数（不含预热）")
+    parser.add_argument(
+        "--backend",
+        choices=["software", "gl"],
+        default="software",
+        help="光栅后端（gl 走真机 WGL，仅 Windows + 有 GL 驱动时可用）",
+    )
     parser.add_argument("--json", type=Path, default=None, help="把结果写成 JSON")
     args = parser.parse_args(argv)
 
     names = list(SCENES) if args.scene == "all" else [args.scene]
-    results = {name: measure(SCENES[name], frames=args.frames) for name in names}
+    results = {
+        name: measure(SCENES[name], frames=args.frames, backend=args.backend) for name in names
+    }
     summary, needs_gl = report(results)
 
-    print(f"inkstone 性能基准 · 预算 p95 ≤ {P95_BUDGET_MS:g}ms（60fps 的六成）")
+    print(
+        f"inkstone 性能基准 · 预算 p95 ≤ {P95_BUDGET_MS:g}ms（60fps 的六成） · 后端 {args.backend}"
+    )
     print(f"{'场景':<12}{'p50':>9}{'p95':>9}{'max':>9}{'mean':>9}  说明")
     for name in names:
         stats = summary[name]
