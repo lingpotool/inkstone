@@ -24,7 +24,7 @@ ADR-0005 的边界在这里落地：
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..gfx.display_list import PositionedGlyph
 from .fallback import FallbackChain, FontScript, script_of, split_by_script
@@ -103,6 +103,16 @@ class ShapedLine:
     #: 行内最大 ascent / descent（混排时各字体取并集）。
     ascent: float
     descent: float
+    #: 显示列表要的已定位字形。**派生缓存**：由 `clusters` 唯一定出，
+    #: 构造时算一次（R12.2）。`compare=False` 是刻意的——它是缓存，
+    #: 不是行的身份；让它参与相等/哈希只会在热路径上白付一遍 O(字形数)。
+    _positioned: tuple[PositionedGlyph, ...] = field(default=(), repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        # frozen dataclass 里填派生字段：用 object.__setattr__ 绕过只读保护。
+        # 在构造时算（而不是首次绘制时惰性算）是因为整形结果本就进了段落缓存，
+        # 一棵被复用的树不该每帧重建同样的字形对象（R12.2 实测的帧时间热点）。
+        object.__setattr__(self, "_positioned", self._build_positioned())
 
     @property
     def width(self) -> float:
@@ -146,8 +156,8 @@ class ShapedLine:
                 return cluster
         return None
 
-    def positioned_glyphs(self) -> tuple[PositionedGlyph, ...]:
-        """转成显示列表要的**已定位字形**序列（L3 → L2 的唯一转换点）。
+    def _build_positioned(self) -> tuple[PositionedGlyph, ...]:
+        """把簇转成显示列表要的**已定位字形**（L3 → L2 的唯一转换点）。
 
         为什么收在这里：此前 `widgets/basic.py` 与 `widgets/form.py` 各写了
         一份一模一样的转换，两份副本意味着"加一个字段要改两处，漏一处就静默
@@ -167,6 +177,16 @@ class ShapedLine:
             )
             for cluster in self.clusters
         )
+
+    def positioned_glyphs(self) -> tuple[PositionedGlyph, ...]:
+        """本行的已定位字形（构造时算好，这里只读缓存）。
+
+        R12.2：此前每次绘制都重建一遍。文本密集页每帧约 2400 个字形对象，
+        而底层段落是缓存复用的**不可变**对象——重复构造纯属浪费，正是
+        文本场景帧时间超标的那一块。缓存后同一个 `ShapedLine` 永远返回
+        同一个元组，顺带让显示列表的逐指令去重比较走元组**同一性短路**。
+        """
+        return self._positioned
 
 
 class Shaper:

@@ -867,6 +867,43 @@ class TestGlyphOffsetWiring:
         line = ShapedLine(text="A", clusters=(cluster,), line_height=20.0, ascent=8.0, descent=2.0)
         assert line.positioned_glyphs()[0].y_offset == 0.0
 
+    def test_positioned_glyphs_are_computed_once(self):
+        """R12.2：文本密集页每帧重建约 2400 个字形对象曾让帧时间超标。
+
+        同一个 `ShapedLine` 必须返回**同一个元组**——这既省掉重复构造，
+        也让显示列表去重比较走元组同一性短路（文本场景 p95 从 ~8ms 到 ~1.6ms）。
+        """
+        cluster = ShapedCluster(
+            index=0,
+            start=0,
+            end=1,
+            x=0.0,
+            advance=10.0,
+            family="F",
+            script=FontScript.COMMON,
+            ascent=8.0,
+            descent=2.0,
+        )
+        line = ShapedLine(text="A", clusters=(cluster,), line_height=20.0, ascent=8.0, descent=2.0)
+        assert line.positioned_glyphs() is line.positioned_glyphs()
+
+    def test_positioned_cache_is_not_part_of_identity(self):
+        """缓存字段 `compare=False`：两行内容相同就相等，别为缓存白比一遍字形。"""
+        cluster = ShapedCluster(
+            index=0,
+            start=0,
+            end=1,
+            x=0.0,
+            advance=10.0,
+            family="F",
+            script=FontScript.COMMON,
+            ascent=8.0,
+            descent=2.0,
+        )
+        a = ShapedLine(text="A", clusters=(cluster,), line_height=20.0, ascent=8.0, descent=2.0)
+        b = ShapedLine(text="A", clusters=(cluster,), line_height=20.0, ascent=8.0, descent=2.0)
+        assert a == b and hash(a) == hash(b)
+
     def test_text_and_controls_share_one_adapter(self):
         """`Text` 与 `Button`/`Input` 必须走同一个适配入口。
 
