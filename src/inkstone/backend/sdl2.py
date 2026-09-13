@@ -415,6 +415,17 @@ def _pointer_type_of(which: int) -> PointerType:
     return PointerType.TOUCH if which == _SDL_TOUCH_MOUSEID else PointerType.MOUSE
 
 
+def _pointer_id_of(which: int) -> int:
+    """指针身份。竞技场按它配对 DOWN / MOVE / UP**必须整条链用同一个值**。
+
+    历史 bug（R13.2 真机验证时抓到）：motion 用 `raw.which` 当 id，button 却
+    留默认 0——于是鼠标按下后，MOVE 带着 id=1 去找竞技场，找不到，**拖拽在
+    真机上完全失效**（单元测试里 DOWN/MOVE 都用手写的 pointer_id=0，所以一直
+    是绿的）。触摸合成的鼠标事件（id 是 `SDL_TOUCH_MOUSEID`）统一归 0。
+    """
+    return 0 if which == _SDL_TOUCH_MOUSEID else int(which)
+
+
 def translate_keyboard(raw: Any, *, down: bool, code_name: str, key_name: str) -> KeyEvent:
     """键盘事件。`code_name` 来自 scancode（物理位），`key_name` 来自 keysym（布局）。"""
     return KeyEvent(
@@ -462,7 +473,7 @@ def translate_motion(raw: Any) -> PointerEvent:
         window_id=int(raw.window_id),
         time_ms=float(raw.timestamp),
         pointer_type=_pointer_type_of(int(raw.which)),
-        pointer_id=0 if int(raw.which) == _SDL_TOUCH_MOUSEID else int(raw.which),
+        pointer_id=_pointer_id_of(int(raw.which)),
     )
 
 
@@ -476,6 +487,7 @@ def translate_button(raw: Any, *, down: bool) -> PointerEvent:
         time_ms=float(raw.timestamp),
         button=int(raw.button),
         clicks=int(raw.clicks),
+        pointer_id=_pointer_id_of(int(raw.which)),
         pointer_type=_pointer_type_of(int(raw.which)),
     )
 
@@ -506,6 +518,7 @@ def translate_wheel(raw: Any, fallback_x: float, fallback_y: float) -> PointerEv
         time_ms=float(raw.timestamp),
         wheel_dx=dx,
         wheel_dy=dy,
+        pointer_id=_pointer_id_of(int(raw.which)),
         pointer_type=_pointer_type_of(int(raw.which)),
     )
 

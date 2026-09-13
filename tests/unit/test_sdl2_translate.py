@@ -148,6 +148,25 @@ class TestTranslatePointer:
         assert event.pointer_type is PointerType.TOUCH
         assert event.pointer_id == 0
 
+    def test_down_move_up_share_one_pointer_id(self):
+        """**回归**：同一次拖拽的 DOWN / MOVE / UP 必须带同一个 pointer_id。
+
+        竞技场按 pointer_id 找"这次按下的局"，对不上就整条拖拽链失效。
+        历史 bug：motion 用 `raw.which`、button 却留默认 0——真机上鼠标拖拽
+        （滚动列表）完全没反应，而单元测试手写 pointer_id=0 所以一直是绿的。
+        """
+        motion = _MouseMotionEvent()
+        motion.which = 1
+        button = _MouseButtonEvent()
+        button.which = 1
+
+        down = translate_button(button, down=True)
+        move = translate_motion(motion)
+        up = translate_button(button, down=False)
+
+        assert down.pointer_id == move.pointer_id == up.pointer_id != 0
+        assert translate_motion(motion).pointer_type is PointerType.MOUSE
+
     def test_button_carries_clicks(self):
         """R5.5：双击信息（SDL 算好的 clicks）必须进事件。"""
         raw = _MouseButtonEvent()
