@@ -124,13 +124,14 @@ class TestDpiAwareness:
         assert ensure_per_monitor_awareness() is True
         assert ensure_per_monitor_awareness() is True
 
-    @pytest.mark.skipif(
-        sys.platform != "win32", reason="DPI 虚拟化是 Windows 的行为（macOS/Linux 恒为感知）"
-    )
-    def test_process_becomes_per_monitor_after_ensure(self) -> None:
-        """在任何窗口创建之前就该是 per-monitor 感知的——"渲染像素不被拉伸"的前提。"""
-        assert ensure_per_monitor_awareness() is True
-        assert dpi_awareness() == 2
+    def test_ensure_is_callable_and_idempotent(self) -> None:
+        """兜底函数随时可调、幂等、返回 bool。
+
+        **故意不在这里断言"调用后变感知"**：那会走先设 Win32 的路径，实测会
+        让同进程后续的 SDL IME 组合事件失效（R11.1）。真正的感知不变量由
+        `TestSDL2WindowCapabilities` 在真后端上断言（那条走 SDL 自己的 hint）。
+        """
+        assert isinstance(ensure_per_monitor_awareness(), bool)
 
 
 class TestWindowsShellIsSafeEverywhere:
@@ -179,6 +180,13 @@ class TestSDL2WindowCapabilities:
 
     def test_identity_before_window_does_not_raise(self, backend) -> None:
         backend.set_app_identity("Inkstone.Notes")
+
+    @pytest.mark.skipif(
+        sys.platform != "win32", reason="DPI 虚拟化是 Windows 的行为（macOS/Linux 恒为感知）"
+    )
+    def test_initializing_declares_per_monitor_awareness(self, backend) -> None:
+        """界面发虚的根因是进程不感知（Windows 拉伸整窗）——初始化后必须已感知。"""
+        assert dpi_awareness() == 2
 
     def test_window_capability_calls_do_not_raise(self, backend) -> None:
         window = backend.create_window(WindowSpec(title="inkstone test", width=200, height=160))

@@ -680,18 +680,25 @@ class SDL2Backend:
         self._lib = load_sdl2()
         self._bind_signatures()
         # DPI 感知必须在**任何窗口之前**声明（SDL_Init 会建隐藏辅助窗口）。
-        # 顺序：先 Win32 声明（老系统上的兜底也在里面），再告诉 SDL 一声，
-        # 让它的坐标换算与我们的感知级别一致。不声明的话 Windows 会把整窗
-        # 按显示器缩放位图拉伸——渲染得再清晰，用户看到的也是糊的（R11.1）。
+        # 不声明的话 Windows 会把整窗按显示器缩放位图拉伸——渲染得再清晰，
+        # 用户看到的也是糊的（R11.1）。
+        #
+        # **交给 SDL 设，不要自己先调 Win32**：实测（SDL 2.32 / Win11）先调
+        # `SetProcessDpiAwarenessContext` 再 SDL_Init，IME 组合事件会被扣住，
+        # 直到上屏才一次性吐出来——输入法没有候选框，中文等于打不了。
+        # 同样的 per-monitor-v2 由 SDL 的 hint 设置则一切正常（A/B 实测）。
         if sys.platform == "win32":
-            from . import windows_shell
-
-            windows_shell.ensure_per_monitor_awareness()
             self._lib.SDL_SetHint(b"SDL_WINDOWS_DPI_AWARENESS", b"permonitorv2")
             # 我们自己按 dpi_scale 缩放坐标（ADR-0015），不要 SDL 再缩一遍。
             self._lib.SDL_SetHint(b"SDL_WINDOWS_DPI_SCALING", b"0")
         if self._lib.SDL_Init(_SDL_INIT_VIDEO) != 0:
             raise BackendError(f"SDL_Init 失败：{self._last_error()}")
+        # 老 SDL 不认识上面那个 hint 时兜底（对 IME 有副作用，所以只在真没设上
+        # 时才动手；SDL 设上了这里就是一个纯读取）。
+        if sys.platform == "win32":
+            from . import windows_shell
+
+            windows_shell.ensure_per_monitor_awareness()
         self._initialized = True
 
     def _bind_signatures(self) -> None:
@@ -876,10 +883,33 @@ class SDL2Backend:
         return events
 
     def _translate(self, buffer: Any) -> Event | None:
-        """把一个 SDL 事件分发给对应的纯函数翻译器，并重映射窗口 id。"""
+        """把一个 SDL 事件分发给对应的纯函数翻译器，并重映射窗口 id / 坐标单位。"""
         kind = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_uint32)).contents.value
         event = self._translate_kind(kind, buffer)
-        return self._remap_window_id(event) if event is not None else None
+        if event is None:
+            return None
+        return self._to_logical(self._remap_window_id(event))
+
+    def _to_logical(self, event: Event) -> Event:
+        """把事件里的**窗口坐标**换成逻辑像素。
+
+        SDL 的鼠标/窗口尺寸在 Windows 感知进程里是物理像素，而 `events/` 的
+        命中测试、手势阈值、布局都在逻辑像素上（`PointerEvent` 的文档也是这么
+        承诺的）。不换算的话 125% 屏上点击位置整体偏 25%——用户实测反馈的
+        "点按钮位置偏移"就是这里（R11.1）。
+        滚轮增量不换：它是滚动量（逻辑距离），不是窗口坐标。
+        """
+        window_id = getattr(event, "window_id", 0)
+        if not window_id:
+            return event
+        scale = self._window_scales.get(window_id, 1.0)
+        if scale == 1.0 or scale <= 0.0:
+            return event
+        if isinstance(event, PointerEvent):
+            return replace(event, x=event.x / scale, y=event.y / scale)
+        if isinstance(event, WindowEvent) and event.kind is WindowKind.RESIZED:
+            return replace(event, width=event.width / scale, height=event.height / scale)
+        return event
 
     def _translate_kind(self, kind: int, buffer: Any) -> Event | None:
         if kind in (_SDL_KEYDOWN, _SDL_KEYUP):
@@ -953,7 +983,7 @@ class SDL2Backend:
         if scale == self._window_scales.get(window_id):
             return None
         self._window_scales[window_id] = scale
-        spec_width, spec_height = self._window_size(window_id)
+        spec_width, spec_height = self.window_size(window_id)
         # 事件里先放 SDL 的 id，由 _translate 出口统一重映射成我们的窗口 id
         return WindowEvent(
             kind=WindowKind.DPI_CHANGED,
@@ -970,7 +1000,8 @@ class SDL2Backend:
         self._lib.SDL_GetMouseState(ctypes.byref(x), ctypes.byref(y))
         return float(x.value), float(y.value)
 
-    def _window_size(self, window_id: int) -> tuple[float, float]:
+    def _physical_window_size(self, window_id: int) -> tuple[float, float]:
+        """`SDL_GetWindowSize` 的原始值——Windows 上是**物理像素**，别直接给上层。"""
         w, h = ctypes.c_int(0), ctypes.c_int(0)
         self._lib.SDL_GetWindowSize(self._handle(window_id), ctypes.byref(w), ctypes.byref(h))
         return float(w.value), float(h.value)
@@ -1024,11 +1055,9 @@ class SDL2Backend:
         上层（应用外壳）只需要"我能画多大"，不需要知道这台显示器缩放到几倍。
         """
         self._require_initialized()
-        handle = self._handle(window_id)
-        width, height = ctypes.c_int(0), ctypes.c_int(0)
-        self._lib.SDL_GetWindowSize(handle, ctypes.byref(width), ctypes.byref(height))
+        width, height = self._physical_window_size(window_id)
         scale = self._window_unit_scale(window_id)
-        return (width.value / scale, height.value / scale)
+        return (width / scale, height / scale)
 
     def set_cursor(self, window_id: int, cursor: Cursor) -> None:
         self._require_initialized()
@@ -1109,7 +1138,9 @@ class SDL2Backend:
         if self._renderer is None:
             return
         scale = self.dpi_scale(window_id)
-        width, height = self._window_size(window_id)
+        # 呈现器要的是**逻辑**尺寸 + 缩放因子（RasterFrameRenderer 的契约），
+        # 它自己算物理像素；这里给物理值会让 125% 屏上被放大两次（R11.1）。
+        width, height = self.window_size(window_id)
         self._renderer.begin_frame(width, height, scale)
 
     def end_frame(self, window_id: int, *, present: bool = True) -> None:

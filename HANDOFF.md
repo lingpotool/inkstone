@@ -151,14 +151,18 @@ docs/22 已定范围：**只实现现有显示列表 IR 的指令集**、沿用 
   `examples/notes.py --sdl2` 已接身份/最小尺寸/图标/主题跟随，且窗口可缩放
   （视口跟 `WINDOWEVENT_RESIZED` 走，原生 snap 因此可用）。踩坑：
   `SDL_SysWMinfo` 必须照实声明+留余量（SDL 整段写入，只声明 HWND 会栈越界）。
-- **R11 真机观感修复已完成**（ADR-0023）：用户实测反馈"整个界面发虚、不如
-  Electron 清晰"。根因：**进程 DPI 不感知**——Windows 在 125% 屏上把整窗位图
-  拉伸 1.25×（实测物理 1920×1080，进程只见 1536×864 虚拟桌面）。修法：建窗前
-  `ensure_per_monitor_awareness()` + SDL 的 `SDL_WINDOWS_DPI_AWARENESS=permonitorv2`；
-  新增 `Backend.window_size()` 返回逻辑尺寸，建窗/最小尺寸/IME 候选框按
-  `_window_unit_scale` 换算（macOS/X11 本就是逻辑单位）。修后实测：窗口客户区
-  950×650 物理 = 760×520 逻辑 × 1.25，渲染与显示 1:1，文字锐利；真机驱动 IME
-  输入中文并截图确认（`脏欧能` 落在输入框里，候选框跟随光标）。
+- **R11 真机观感修复已完成**（ADR-0023）：用户实测反馈"整个界面发虚、点按钮
+  位置偏移、中文输入法不工作"。三个症状同一个根：**坐标单位与 DPI 感知**。
+  ① 发虚：进程 DPI 不感知，Windows 在 125% 屏上把整窗位图拉伸 1.25×（实测
+  物理 1920×1080，进程只见 1536×864 虚拟桌面）→ 建窗前设 SDL 的
+  `SDL_WINDOWS_DPI_AWARENESS=permonitorv2`。② 点击偏移：感知之后 SDL 给的
+  指针坐标是物理像素，命中测试却是逻辑像素 → 新增 `_to_logical()` 统一换算
+  （`RESIZED` 宽高同理，`begin_frame` 也修了给物理尺寸导致的二次放大）。
+  ③ 输入法：**千万别在建窗前先调 Win32 的 `SetProcessDpiAwarenessContext`**
+  ——实测会让 IME 组合事件扣到上屏才吐，候选框不出、拼音不可见；交给 SDL 的
+  hint 设就正常（A/B 实测；Win32 那条只留作老 SDL 兜底）。修后真机实测：
+  客户区 950×650 物理 = 760×520 逻辑 × 1.25（1:1 清晰）；点「深色主题」准确
+  换主题；输入 `zhongguo` 组合串在输入框内实时可见。
 - **仍未做**：窗口位置/尺寸记忆（应用外壳层）；Linux GLX/EGL、macOS CGL；
   路径三角化；通用脏矩形损伤跟踪；应用外壳脏区调度；macOS 的 NSWindow
   appearance 接线（`windows_shell` 目前只有 Win32 实现，其他平台是安全空操作）。

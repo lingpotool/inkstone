@@ -65,10 +65,14 @@ def dpi_awareness() -> int:
 def ensure_per_monitor_awareness() -> bool:
     """把进程声明为 per-monitor-v2 DPI 感知。返回最终是否"感知"。
 
-    **必须在创建任何窗口之前调用**（SDL_Init 会建隐藏辅助窗口）。声明之后
-    坐标不再被系统虚拟化：显示器 125% 就是 125% 的物理像素，我们按真实
-    分辨率渲染，文字与圆角都是原生清晰的——Electron / Flutter 的观感来源
-    正是这一条，而不是它们的绘制 API 更高级。
+    **这是兜底，不是首选路径。** 正常流程是让 SDL 用
+    `SDL_WINDOWS_DPI_AWARENESS=permonitorv2` 在建窗前设置；只有老 SDL 不认识
+    那个 hint 时才由这里补。
+
+    为什么不能自己抢先设（实测 SDL 2.32 / Win11）：先调本函数再 `SDL_Init`，
+    **IME 的组合事件会被扣到上屏那一刻才吐出来**——输入法不出候选框，中文
+    打不了；同样的 per-monitor-v2 由 SDL 自己设则正常。所以调用点放在
+    `SDL_Init` 之后，且 SDL 已经设上时这里只是一次纯读取。
 
     已有感知声明（清单/别处设过）时直接返回 True，不重复设置；老系统
     （Win10 1703 之前）没有这个 API，退回 shcore 的 `SetProcessDpiAwareness`。
