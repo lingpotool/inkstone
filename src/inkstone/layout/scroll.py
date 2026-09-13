@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from enum import Enum
 
+from ..backend.base import PointerKind
+from ..events.pointer import DispatchPhase, PointerDispatch
 from .box import RenderBox
 from .protocol import (
     INF,
@@ -51,6 +53,9 @@ class RenderScroll(RenderBox):
     ) -> None:
         super().__init__(**kwargs)  # type: ignore[arg-type]
         self.direction: ScrollDirection = direction
+        #: 滚轮一格滚多少逻辑像素。由元素从主题令牌写进来（L4 不读 L6），
+        #: 默认值与 `tokens.gestures["wheel_step"]` 一致，便于裸用渲染对象。
+        self.wheel_step: float = 48.0
         self._child: RenderBox | None = None
         self._scroll: Offset = Offset(0.0, 0.0)
         self._content_size: Size = Size(0.0, 0.0)
@@ -148,6 +153,41 @@ class RenderScroll(RenderBox):
 
     def scroll_by(self, dx: float = 0.0, dy: float = 0.0) -> None:
         self.scroll_to(self._scroll.dx + dx, self._scroll.dy + dy)
+
+    # ------------------------------------------------------------ 输入
+
+    def handle_pointer_event(self, dispatch: PointerDispatch) -> None:
+        """滚轮滚动（R12）。
+
+        滚轮**不是手势**（没有 DOWN/UP 生命周期，不进竞技场），所以走这条
+        "非手势输入"的分发缝——`RenderBox.handle_pointer_event` 的文档就是
+        为这类输入留的。
+
+        两个关键点：
+
+        1. **只在 TARGET / BUBBLE 阶段处理。** CAPTURE 是根→内，会让最外层
+           容器抢先消费；TARGET/BUBBLE 是内→外，正是"内层先滚"该有的顺序。
+        2. **只有偏移真的变了才叫停传播。** 夹到边界时偏移不动，事件继续冒泡，
+           祖先滚动容器接着处理——**嵌套滚动（内层滚到底、外层接管）因此是
+           结构成立的，不写任何特判**。
+
+        方向约定来自 SDL：`wheel_dy > 0` = 向上滚 = 看更上面的内容 = 偏移减小。
+        """
+        if dispatch.phase is DispatchPhase.CAPTURE:
+            return
+        event = dispatch.event
+        if event.kind is not PointerKind.WHEEL:
+            return
+        dx = -event.wheel_dx * self.wheel_step
+        dy = -event.wheel_dy * self.wheel_step
+        if self.direction is ScrollDirection.VERTICAL:
+            dx = 0.0
+        elif self.direction is ScrollDirection.HORIZONTAL:
+            dy = 0.0
+        before = self._scroll
+        self.scroll_by(dx, dy)
+        if self._scroll != before:
+            dispatch.stop_propagation()
 
     # ------------------------------------------------------------ 绘制
 

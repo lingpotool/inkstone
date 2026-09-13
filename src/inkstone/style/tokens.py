@@ -256,6 +256,10 @@ DEFAULT_RAW = RawTokens(
         # 长按判定时长与双击第二击时窗。
         "long_press_ms": 500.0,
         "double_tap_ms": 300.0,
+        # 鼠标滚轮一格滚多少**逻辑像素**。Windows 默认"一次滚 3 行"，
+        # 正文行高约 16px → 48px。SDK 给的是格数，换算成距离要有统一口径，
+        # 否则各处的滚动速度会各说各话（docs/13 §3）。
+        "wheel_step": 48.0,
     },
     decorations={
         # 光标竖线宽度（1px 是文本输入的通用观感）

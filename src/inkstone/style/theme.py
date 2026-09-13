@@ -136,10 +136,11 @@ class Theme:
         return _lookup("easings", name, self.raw.easings)
 
     def gesture(self, name: str) -> float:
-        """手势参数。`"tap_slop"=8 / "long_press_ms"=500 / "double_tap_ms"=300`。
+        """交互参数。`"tap_slop"=8 / "long_press_ms"=500 / "double_tap_ms"=300 /
+        "wheel_step"=48`。
 
-        识别器住在 `events/`（L1），读不到主题（L6）——所以由组件在构造
-        识别器时把令牌值传进去，识别器本身不含字面量。
+        识别器住在 `events/`（L1）、滚动容器住在 `layout/`（L4），都读不到
+        主题（L6）——所以由组件在构造时把令牌值传进去，它们自己不含字面量。
         """
         return _lookup("gestures", name, self.raw.gestures)
 

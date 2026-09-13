@@ -249,6 +249,8 @@ class _ScrollElement(RenderObjectElement):
             self._drag.vertical = vertical
         # 识别器由元素写进渲染对象（RenderObject 拿不到主题令牌，R7.2）
         scroll.recognizers = [self._drag]
+        # 滚轮步长同理：布局层不读主题，令牌值由元素送进去（R12）
+        scroll.wheel_step = theme.gesture("wheel_step")
 
     def _sync_child(self) -> None:
         widget = self.widget

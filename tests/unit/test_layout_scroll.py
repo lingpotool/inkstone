@@ -9,6 +9,8 @@
 
 import pytest
 
+from inkstone.backend.base import PointerEvent, PointerKind
+from inkstone.events.pointer import HitTestResult, PointerRouter
 from inkstone.gfx import (
     DisplayList,
     DisplayListRecorder,
@@ -29,7 +31,7 @@ from inkstone.layout import (
     ScrollDirection,
     Sizing,
 )
-from inkstone.layout.types import Rect, Size
+from inkstone.layout.types import Offset, Rect, Size
 
 
 def tall_list(count: int = 5, item_height: float = 40.0) -> RenderColumn:
@@ -323,3 +325,106 @@ class TestViewportClipping:
         ops = list(resolve_state_ops(dl.ops))
         assert len(ops) == 6, "视口内的内容不许被裁掉"
         assert all(op.clip == Rect(0.0, 0.0, 120.0, 100.0) for op in ops)
+
+
+class TestWheelScrolling:
+    """鼠标滚轮（R12）——Phase 1 DoD 的「能滚」在桌面上就是它。
+
+    滚轮不是手势（没有 DOWN/UP），所以不进竞技场，走 `handle_pointer_event`
+    这条非手势输入的分发缝。这里既测渲染对象本身，也测**嵌套冒泡**：
+    内层滚到底之后外层接管——这条不写特判，靠"偏移没变就不叫停传播"成立。
+    """
+
+    @staticmethod
+    def _wheel(dy: float, dx: float = 0.0) -> PointerEvent:
+        return PointerEvent(kind=PointerKind.WHEEL, x=10.0, y=10.0, wheel_dx=dx, wheel_dy=dy)
+
+    @staticmethod
+    def _dispatch(scroll: RenderScroll, event: PointerEvent) -> None:
+        result = HitTestResult()
+        scroll.hit_test(Offset(10.0, 10.0), result)
+        PointerRouter().dispatch(result, event)
+
+    def _viewport(self) -> RenderScroll:
+        scroll = RenderScroll(tall_list(5, 40.0), debug_name="Scroll")
+        scroll.layout(BoxConstraints(max_width=120.0, max_height=100.0))
+        return scroll
+
+    def test_wheel_down_scrolls_down(self) -> None:
+        scroll = self._viewport()
+        self._dispatch(scroll, self._wheel(-1.0))
+        assert scroll.scroll_offset.dy == pytest.approx(scroll.wheel_step)
+
+    def test_wheel_up_scrolls_back(self) -> None:
+        scroll = self._viewport()
+        self._dispatch(scroll, self._wheel(-2.0))
+        self._dispatch(scroll, self._wheel(1.0))
+        assert scroll.scroll_offset.dy == pytest.approx(scroll.wheel_step)
+
+    def test_wheel_is_clamped_to_max_scroll(self) -> None:
+        scroll = self._viewport()
+        self._dispatch(scroll, self._wheel(-100.0))
+        assert scroll.scroll_offset.dy == pytest.approx(scroll.max_scroll.dy)
+
+    def test_horizontal_wheel_ignores_vertical_scroller(self) -> None:
+        """纵向滚动容器不吃横向滚轮——否则触控板横滑会把列表带偏。"""
+        scroll = self._viewport()
+        self._dispatch(scroll, self._wheel(0.0, dx=1.0))
+        assert scroll.scroll_offset.dx == 0.0
+
+    def test_horizontal_scroller_follows_horizontal_wheel(self) -> None:
+        scroll = RenderScroll(
+            wide_content(300.0, 40.0), direction=ScrollDirection.HORIZONTAL, debug_name="H"
+        )
+        scroll.layout(BoxConstraints(max_width=120.0, max_height=100.0))
+        self._dispatch(scroll, self._wheel(0.0, dx=-1.0))
+        assert scroll.scroll_offset.dx == pytest.approx(scroll.wheel_step)
+
+    def test_exhausted_scroller_lets_the_ancestor_take_over(self) -> None:
+        """嵌套滚动：内层到底后再滚，外层接管——结构成立，不写特判。"""
+        inner = RenderScroll(tall_list(5, 40.0), debug_name="Inner")
+        wrapper = RenderContainer(inner, width=Sizing.fixed(100.0), height=Sizing.fixed(80.0))
+        content = RenderColumn(debug_name="OuterContent")
+        content.add(wrapper)
+        content.add(RenderSized(width=Sizing.fixed(100.0), height=Sizing.fixed(100.0)))
+        outer = RenderScroll(content, debug_name="Outer")
+        outer.layout(BoxConstraints(max_width=120.0, max_height=100.0))
+
+        inner.scroll_to(dy=inner.max_scroll.dy)  # 内层先滚到底
+        inner_max = inner.scroll_offset.dy
+        assert inner_max > 0.0, "内层得真的能滚，这条测试才有意义"
+
+        self._dispatch(outer, self._wheel(-1.0))
+
+        assert inner.scroll_offset.dy == pytest.approx(inner_max), "内层已到底，不该再动"
+        assert outer.scroll_offset.dy == pytest.approx(outer.wheel_step), "该由外层接管"
+
+
+class TestScrollViewWheelWiring:
+    """组件层只做一件事：把主题令牌送进渲染对象（布局层不读主题）。
+
+    滚轮步长如果忘了送，渲染对象会用它自己的默认值——行为看起来对，
+    但主题改了不生效。这条测试钉住"令牌真的接上了"。
+    """
+
+    def test_wheel_step_comes_from_the_theme_token(self) -> None:
+        from inkstone.core import BuildOwner
+        from inkstone.style import Theme
+        from inkstone.widgets import Column, ScrollView, Text
+
+        owner = BuildOwner(theme=Theme.light())
+        owner.mount(ScrollView(Column(children=[Text("一"), Text("二")])))
+        owner.begin_frame(BoxConstraints(max_width=200.0, max_height=100.0))
+
+        found: list[RenderScroll] = []
+
+        def walk(node: object) -> None:
+            if isinstance(node, RenderScroll):
+                found.append(node)
+            for child in getattr(node, "children", ()) or ():
+                walk(child)
+
+        walk(owner.root_render_object)
+        assert found, "挂载 ScrollView 之后应该能在渲染树里找到 RenderScroll"
+        expected = Theme.light().gesture("wheel_step")
+        assert found[0].wheel_step == pytest.approx(expected)
