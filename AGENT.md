@@ -38,7 +38,7 @@ Phase 1 · 地基。真实代码覆盖布局、组件树、样式、渲染、**�
 | `examples/notes.py` | ✅ **样板 App「墨记」**：侧栏 + 滚动列表 + 表单 + 明暗主题切换；headless 出黄金图、`--sdl2` 真窗口交互，进 CI 冒烟 |
 | 其余模块（gfx GL+Skia / events 其余 / primitives / app …） | ⬜ 占位桩 |
 
-1009 个无头单测全绿，**黄金图像素级比对**也跑通（12 张基线）。
+1012 个无头单测全绿，**黄金图像素级比对**也跑通（12 张基线）。
 **地基整改 R1（正确性止血，docs/15）、R2（测试求真，docs/16）、
 R3（渲染协议重塑，docs/17）、R4（跨平台文本栈，docs/18）、
 R5（事件与 IME，docs/19）、R6（主题传播与依赖追踪，docs/20）已完成**：
@@ -78,9 +78,9 @@ R7.5 性能基准已完成（`benchmarks/run.py` 三场景出 p50/p95，规则�
 GL 子包 R8.1（驱动接缝 + 后端逻辑层）、R8.2（Windows WGL 真机驱动）、
 R8.3（热路径缓存 + 矩形合批 + 字形图集 + 帧去重）、
 R8.4（显示列表状态指令 + 滚动 repaint boundary + GL 层缓存）已完成，
-测试 → 1009 全绿（覆盖率 89.09%）。**R7.5 验收达成：GL p95 全屏 4.4ms /
+测试 → 1012 全绿（覆盖率 89.09%）。**R7.5 验收达成：GL p95 全屏 4.4ms /
 文本 8.6ms / 滚动 1.0ms，三场景全部 ≤10ms**（软件为事实源，未变）。
-剩余：真窗口 GL present、Linux/macOS GL 驱动、路径三角化、通用脏矩形。
+R8.6 真窗口 GL 上屏完成（SDL 上下文 + FBO blit + 换链，Windows 真机验证）。剩余：Linux/macOS GL 驱动、路径三角化、通用脏矩形、应用外壳脏区调度。
 
 **R7 整包完成，Phase 1 的"交互闭环"闭合**（能点、能滚、能打字的前半程：
 聚焦与 IME 通道、能切主题、能缩放）。Phase 1 剩余 DoD：文本编辑模型
@@ -411,6 +411,7 @@ Phase 1 其余 DoD（文本编辑模型、macOS/Linux 真机字体验证、三�
 | ADR-0018 | **GL 后端先切"驱动接缝"并把逻辑层测透，真机 GL 调用后置；两个光栅后端能力必须对等** | GL 里只有建上下文/传纹理/draw call/读像素属于 GPU，其余（帧状态机、op.clip×脏矩形取交→scissor、半径钳制、文本取掩码与连字规则、资源生命周期、读回校验）都能无显卡测试。`GLDriver` 协议 + `FakeDriver` 记录调用序列，把 R8.1 做成了**可验证**的一步；真机 ctypes 驱动（R8.2）只需照协议填，后端逻辑不改。同时规定：**一个后端会画的指令，另一个也必须会**（路径两后端都抛 `NotImplementedError`），否则差异会拖到黄金图比对时才暴露。取字形规则 `glyph_mask_plan` 抽成两后端共用的唯一副本 |
 | ADR-0019 | **显示列表增加状态指令（变换/裁剪）与层标记；滚动/静态子树作为 repaint boundary 做 RasterCache** | 坐标在录制时被 bake 成绝对值，导致滚动每帧都要把新偏移重新烤进几百条指令、并重排重绘整棵子树——这是滚动做不到专业帧率的根因（Flutter 的答案是 layer + repaint boundary，Skia 是 damage）。落地：`PushTranslateOp`/`PushClipOp`/`PopOp` 作为运行时状态，`resolve_state_ops` 保证与烘焙**逐像素等价**（两个后端共用，黄金图不动）；`PushLayerOp(key, rect)` 标记可缓存层，GL 后端渲染进离屏 FBO 纹理、命中 key 即复用，每帧只画一个四边形。配套两条纪律：**光栅后端不自动清屏**（背景由显示列表的指令负责，否则脏子树重绘会擦掉未变区域）；**层 key 用单调代号而非 `id()`**（对象回收后 id 复用会让旧纹理顶包） |
 | ADR-0020 | **SDL2 二进制走"声明式可选依赖"，不在仓库放二进制；`load_sdl2` 三层优先级** | 平台窗口后端（ADR-0001）需要各平台 SDL2 二进制。专业做法不是往仓库/源码树塞 DLL，而是可选 extra `inkstone[sdl2] = pysdl2 + pysdl2-dll`：`pysdl2-dll` 发布 Windows/macOS/Linux 预编译 wheel（≈4MB，含 SDL2.dll ≈1.5MB），`pysdl2` 按平台定位；我们的 backend 仍 ctypes 直调，只借它"找到库"。加载优先级：`INKSTONE_SDL2` 环境变量（打包/私有部署）> 可选依赖 > 系统库（winget/brew/apt），全失败抛带三条修复指引的 `BackendError`。**核心包保持零依赖**——SDL2 只在开真窗口时需要，测试/CI/黄金图/基准全走无头后端 |
+| ADR-0021 | **真窗口 GL 上屏：上下文归 SDL，GL 只借；离屏 FBO 是唯一绘制目标，`end()` 时 blit 上屏** | 自建窗口（WGL 隐藏窗口）解决不了"显示到窗口"：GL 资源与上下文绑定，纹理跨上下文不可用。做法是 `WindowSpec(opengl=True)` 让 SDL 用 OPENGL 标志建窗，`sdl_gl_driver(backend, window)` 在其上下文上装配同一套驱动（`SDL_GL_CreateContext` + `SDL_GL_GetProcAddress` + `SwapWindow`，`close()` 只解除不销毁）。绘制**始终进离屏 FBO**（层缓存/读回/尺寸口径都建立在它上面），`end()` 把 FBO 纹理 blit 到默认帧缓冲再换链——"窗口"与"离屏"画出来的是同一张图。配套坑：挂载模式下 `begin()` **不得**无条件 `wglMakeCurrent(0,0)`，那会把 SDL 的上下文解绑，之后所有 GL 调用静默失败（实测 FBO 完整性校验返回 0） |
 
 ## 已知待办
 

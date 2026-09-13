@@ -261,6 +261,10 @@ class WindowSpec:
     resizable: bool = True
     min_width: float = 0.0
     min_height: float = 0.0
+    #: 需要 GL 上屏时置真：后端用 OpenGL 标志建窗口，应用再经
+    #: `gl_wgl.sdl_gl_driver` 把光栅器接到这个窗口的上下文上（R8.6）。
+    #: 无头后端忽略此字段（它没有真窗口）。
+    opengl: bool = False
 
 
 @dataclass(frozen=True, slots=True)

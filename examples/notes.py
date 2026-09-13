@@ -33,7 +33,7 @@ from inkstone import __version__
 from inkstone.backend import HeadlessBackend, ImeRect, WindowSpec, hbft_font_engine
 from inkstone.core import BuildOwner, State, StatefulWidget, ThemeScope, Widget
 from inkstone.devtools import render_to_png
-from inkstone.layout import BoxConstraints, CrossAxisAlignment
+from inkstone.layout import BoxConstraints, CrossAxisAlignment, Size
 from inkstone.style import ButtonVariant, Theme
 from inkstone.text import FontWeight, TextEngine
 from inkstone.widgets import Box, Button, Card, Column, Flexible, Input, Row, ScrollView, Text
@@ -282,21 +282,43 @@ def run_headless(*, out: Path, dark: bool, deterministic: bool, dpi: float) -> i
 
 
 def run_window(*, dark: bool, deterministic: bool) -> int:
-    """SDL2 真窗口交互。
+    """SDL2 真窗口交互，**GL 上屏**（R8.6）。
 
-    这一条路径不在 CI 覆盖内（需要平台库与输入设备，与 `backend/sdl2.py`
-    的其它窗口代码同一口径）。它证明的是：事件经 `owner.dispatch_pointer`
-    进竞技场、组件状态经 `set_state` 驱动下一帧——与无头截图走的是同一套机制。
+    链路：`SDL 建 OPENGL 窗口 → sdl_gl_driver 把光栅器挂到它的上下文 →
+    GLRasterBackend 渲染进离屏 FBO → end_frame 时 blit 到默认帧缓冲并换链`。
+    事件仍经 `owner.dispatch_pointer` 进竞技场——与无头截图同一套机制。
+
+    每帧**整树重绘**（`force_repaint=True`）：应用外壳的脏区调度还没落地，
+    而 GL 下全屏重绘实测 ~4ms，正确性优先。（真窗口路径不在 CI 覆盖内。）
     """
     from inkstone.backend.base import PointerEvent, WindowEvent, WindowKind
+    from inkstone.backend.gl_wgl import GLUnavailableError, sdl_gl_driver
     from inkstone.backend.sdl2 import SDL2Backend
-    from inkstone.gfx import DisplayListRecorder, SoftwareRasterizer
-    from inkstone.gfx.raster import RasterFrameRenderer
+    from inkstone.gfx import DisplayListRecorder, GLRasterBackend
     from inkstone.layout.types import Rect
 
     metrics = None if deterministic else hbft_font_engine()
-    raster = SoftwareRasterizer(glyph_provider=metrics)  # type: ignore[arg-type]
-    backend = SDL2Backend(renderer=RasterFrameRenderer(raster))
+    backend = SDL2Backend()
+    backend.initialize()
+    window = backend.create_window(
+        WindowSpec(
+            title="墨记 · inkstone",
+            width=WIDTH,
+            height=HEIGHT,
+            resizable=False,  # 视口尺寸暂时固定：窗口缩放接线属应用外壳工作
+            opengl=True,
+        )
+    )
+    try:
+        driver = sdl_gl_driver(backend, window)
+    except GLUnavailableError as error:
+        backend.destroy_window(window)
+        backend.shutdown()
+        print(f"GL 上屏不可用：{error}", file=sys.stderr)
+        print('安装后端：pip install "inkstone[sdl2]"；或改用无头出图模式。', file=sys.stderr)
+        return 1
+    raster = GLRasterBackend(driver, glyph_provider=metrics)  # type: ignore[arg-type]
+
     owner = BuildOwner(
         theme=Theme.dark() if dark else Theme.light(),
         text_engine=TextEngine(metrics if metrics is not None else HeadlessBackend()),
@@ -308,9 +330,6 @@ def run_window(*, dark: bool, deterministic: bool) -> int:
     owner.on_ime_rect = lambda rect: backend.set_ime_rect(
         window, ImeRect(rect.left, rect.top, rect.width, rect.height)
     )
-
-    backend.initialize()
-    window = backend.create_window(WindowSpec(title="墨记 · inkstone", width=WIDTH, height=HEIGHT))
     constraints = BoxConstraints(max_width=WIDTH, max_height=HEIGHT)
 
     running = True
@@ -328,11 +347,19 @@ def run_window(*, dark: bool, deterministic: bool) -> int:
         height = math.ceil(HEIGHT * scale)
         recorder = DisplayListRecorder()
         recorder.fill_rect(Rect(0.0, 0.0, float(width), float(height)), owner.theme.color("bg"))
-        backend.begin_frame(window)
-        owner.begin_frame(constraints, recorder, now_ms=backend.now_ms(), dpi_scale=scale)
+        raster.begin_frame(Size(WIDTH, HEIGHT), scale)
+        owner.begin_frame(
+            constraints,
+            recorder,
+            now_ms=backend.now_ms(),
+            dpi_scale=scale,
+            force_repaint=True,
+        )
         raster.execute(recorder.finish(width, height))
-        backend.end_frame(window, present=True)
+        raster.end_frame()  # 离屏 FBO → 默认帧缓冲 → SwapWindow
 
+    driver.close()
+    backend.destroy_window(window)
     backend.shutdown()
     return 0
 

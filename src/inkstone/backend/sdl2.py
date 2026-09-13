@@ -59,7 +59,16 @@ __all__ = [
 _SDL_INIT_VIDEO = 0x00000020
 
 _SDL_WINDOW_RESIZABLE = 0x00000020
+_SDL_WINDOW_OPENGL = 0x00000002
 _SDL_WINDOW_ALLOW_HIGHDPI = 0x00002000
+
+# SDL_GL_SetAttribute 的属性号
+_SDL_GL_DOUBLEBUFFER = 5
+_SDL_GL_RED_SIZE = 0
+_SDL_GL_GREEN_SIZE = 1
+_SDL_GL_BLUE_SIZE = 2
+_SDL_GL_ALPHA_SIZE = 3
+_SDL_GL_DEPTH_SIZE = 6
 
 #: SDL_WINDOWPOS_CENTERED 是带掩码的特值（0x2FFF0000），不是 -1。
 #: -1 恰好在数值上等于 SDL_WINDOWPOS_UNDEFINED——"能跑"纯属巧合。
@@ -524,6 +533,16 @@ class SDL2Backend:
     def name(self) -> str:
         return "sdl2"
 
+    @property
+    def library(self) -> Any:
+        """已加载的 SDL2 动态库（GL 上下文集成需要它，见 `gl_wgl.sdl_gl_driver`）。"""
+        return self._lib
+
+    def native_window(self, window_id: int) -> Any:
+        """窗口的 SDL 句柄。给 GL 上下文创建用——平台句柄只该在 L0 流动。"""
+        self._require_initialized()
+        return self._handle(window_id)
+
     # ------------------------------------------------------------ 生命周期
 
     def initialize(self) -> None:
@@ -560,6 +579,15 @@ class SDL2Backend:
             ("SDL_GetWindowDisplayScale", c.c_float, [c.c_void_p]),
             ("SDL_GetWindowDisplayIndex", c.c_int, [c.c_void_p]),
             ("SDL_GetDisplayDPI", c.c_int, [c.c_int, p(c.c_float), p(c.c_float), p(c.c_float)]),
+            # GL 上屏（R8.6）：上下文创建/切换/换链 + 取函数地址。
+            # SDL_GL_GetProcAddress 返回函数指针——同样是**必须声明 restype**
+            # 的那类（默认 c_int 会在 64 位截断）。
+            ("SDL_GL_SetAttribute", c.c_int, [c.c_int, c.c_int]),
+            ("SDL_GL_CreateContext", c.c_void_p, [c.c_void_p]),
+            ("SDL_GL_MakeCurrent", c.c_int, [c.c_void_p, c.c_void_p]),
+            ("SDL_GL_GetProcAddress", c.c_void_p, [c.c_char_p]),
+            ("SDL_GL_SwapWindow", None, [c.c_void_p]),
+            ("SDL_GL_DeleteContext", None, [c.c_void_p]),
         ):
             function = getattr(lib, name, None)
             if function is None:
@@ -609,6 +637,19 @@ class SDL2Backend:
         flags = _SDL_WINDOW_ALLOW_HIGHDPI
         if spec.resizable:
             flags |= _SDL_WINDOW_RESIZABLE
+        if spec.opengl:
+            # GL 上屏：先声明想要的像素格式（8/8/8/8 + 双缓冲），再带 OPENGL 建窗。
+            # 属性要在建窗**之前**设，否则 SDL 会用默认格式建好上下文。
+            for attribute, value in (
+                (_SDL_GL_RED_SIZE, 8),
+                (_SDL_GL_GREEN_SIZE, 8),
+                (_SDL_GL_BLUE_SIZE, 8),
+                (_SDL_GL_ALPHA_SIZE, 8),
+                (_SDL_GL_DEPTH_SIZE, 0),
+                (_SDL_GL_DOUBLEBUFFER, 1),
+            ):
+                self._lib.SDL_GL_SetAttribute(attribute, value)
+            flags |= _SDL_WINDOW_OPENGL
         handle = self._lib.SDL_CreateWindow(
             spec.title.encode("utf-8"),
             _SDL_WINDOWPOS_CENTERED,

@@ -29,7 +29,12 @@ import ctypes
 import sys
 from typing import Any
 
-__all__ = ["GLUnavailableError", "WglGLDriver", "windows_gl_driver"]
+__all__ = [
+    "GLUnavailableError",
+    "WglGLDriver",
+    "sdl_gl_driver",
+    "windows_gl_driver",
+]
 
 _VENDOR = 0x1F00
 _RENDERER = 0x1F01
@@ -194,7 +199,13 @@ class _GL:
     会在第一次 draw 时以访问违例的形式炸掉，比报错难查得多。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, get_proc: Any = None) -> None:
+        """`get_proc(name: bytes) -> int | None` 是"取 GL 入口地址"的策略。
+
+        默认用 `wglGetProcAddress`（自建 WGL 上下文）；挂到 SDL 上下文时传
+        `SDL_GL_GetProcAddress`——**换的是取地址的方式，不是整套绑定**。
+        核心 1.1 函数始终从 `opengl32.dll` 取（它在 WGL 上下文下始终有效）。
+        """
         if sys.platform != "win32":
             raise GLUnavailableError("WGL 驱动只在 Windows 上可用")
         try:
@@ -203,9 +214,10 @@ class _GL:
             self.user32 = ctypes.WinDLL("user32")
         except OSError as exc:  # pragma: no cover - 取决于机器
             raise GLUnavailableError(f"加载 opengl32 失败：{exc}") from exc
+        self._get_proc = get_proc
         self._load_core()
-        # 1.2+ 的入口要等上下文 current 之后才能取（wglGetProcAddress 依赖当前上下文），
-        # 所以扩展入口由驱动在建好上下文后调用 `load_extensions()` 加载。
+        # 1.2+ 的入口要等上下文 current 之后才能取，所以扩展入口由驱动在建好
+        # 上下文后调用 `load_extensions()` 加载。
 
     # -------------------------------------------------------- 加载
 
@@ -216,9 +228,12 @@ class _GL:
         return fn
 
     def _ext(self, name: str, res: Any, *args: Any) -> Any:
-        self.opengl32.wglGetProcAddress.restype = ctypes.c_void_p
-        self.opengl32.wglGetProcAddress.argtypes = [ctypes.c_char_p]
-        addr = self.opengl32.wglGetProcAddress(name.encode())
+        if self._get_proc is not None:
+            addr = self._get_proc(name.encode())
+        else:
+            self.opengl32.wglGetProcAddress.restype = ctypes.c_void_p
+            self.opengl32.wglGetProcAddress.argtypes = [ctypes.c_char_p]
+            addr = self.opengl32.wglGetProcAddress(name.encode())
         if not addr:
             raise GLUnavailableError(f"驱动没有提供 {name}")
         fn = ctypes.CFUNCTYPE(res, *args)(addr)
@@ -413,10 +428,34 @@ class _Program:
 
 
 class WglGLDriver:
-    """Windows 上的离屏 GL 驱动：隐藏窗口 + WGL 上下文 + FBO。"""
+    """Windows 上的 GL 驱动：离屏（隐藏窗口 + WGL + FBO）或挂到已有 SDL 上下文。"""
 
-    def __init__(self) -> None:
+    _gl: _GL
+
+    def __init__(self, *, attach: tuple[Any, Any, Any] | None = None) -> None:
+        """两种构造方式。
+
+        - 默认：自建**隐藏窗口 + WGL 上下文**，离屏渲染（截图/黄金图/基准）；
+        - `attach=(gl, present, make_current)`：挂到**调用方已有的 GL 上下文**
+          （SDL 窗口，`sdl_gl_driver` 用）。`present` 换链、`make_current`
+          在释放资源前恢复当前上下文。
+        两条路共用同一套绘制/缓存逻辑——上下文怎么来不该影响画法。
+        """
+        if attach is not None:
+            gl, present, make_current = attach
+            self._init_fields()
+            self._finish_setup(gl, present, make_current)
+            return
+        self._init_fields()
         self._gl = _GL()
+        self._create_context()
+        self._finish_setup(self._gl, None)
+
+    def _init_fields(self) -> None:
+        self._present_cb: Any = None
+        self._make_current_cb: Any = None
+        self._detach_cb: Any = None
+        self._attached = False
         self._hwnd = 0
         self._hdc = 0
         self._context = 0
@@ -445,12 +484,19 @@ class WglGLDriver:
         self._layer_active: tuple[int, int, int, int] | None = None
         #: 层渲染时的坐标原点偏移（层内坐标 = 绝对坐标 - origin）
         self._origin = (0.0, 0.0)
-        self._create_context()
-        self._gl.load_extensions()
-        self._sdf = _Program(self._gl, _SDF_VERTEX, _SDF_FRAGMENT)
-        self._glyph = _Program(self._gl, _GLYPH_VERTEX, _GLYPH_FRAGMENT)
-        self._layer_program = _Program(self._gl, _LAYER_VERTEX, _LAYER_FRAGMENT)
+
+    def _finish_setup(self, gl: _GL, present: Any, make_current: Any = None) -> None:
+        """上下文就绪之后的所有 GL 装配（两条构造路径共用）。"""
+        self._gl = gl
+        gl.load_extensions()
+        self._sdf = _Program(gl, _SDF_VERTEX, _SDF_FRAGMENT)
+        self._glyph = _Program(gl, _GLYPH_VERTEX, _GLYPH_FRAGMENT)
+        self._layer_program = _Program(gl, _LAYER_VERTEX, _LAYER_FRAGMENT)
         self._create_quad_buffer()
+        if present is not None:
+            self._present_cb = present
+            self._make_current_cb = make_current
+            self._attached = True
 
     # ------------------------------------------------------------ 可用性
 
@@ -621,7 +667,12 @@ class WglGLDriver:
 
     def begin(self, width_px: int, height_px: int, scale: float) -> None:
         del scale
-        self._gl.opengl32.wglMakeCurrent(self._hdc, self._context)
+        if self._context:
+            self._gl.opengl32.wglMakeCurrent(self._hdc, self._context)
+        elif self._make_current_cb is not None:
+            # 挂载模式：上下文归 SDL，确保它在本线程 current
+            # （直接调 wglMakeCurrent(0,0) 会把它解绑，之后所有 GL 调用静默失败）
+            self._make_current_cb()
         self._ensure_target(width_px, height_px)
         self._gl.glViewport(0, 0, width_px, height_px)
         self._gl.glDisable(_SCISSOR_TEST)
@@ -758,9 +809,73 @@ class WglGLDriver:
         return self._width, self._height
 
     def end(self) -> None:
-        # 离屏：冲掉最后两批，不做 unbind（读回还要用它）；上屏（swap）属 R8.4
+        """冲批并结束一帧。挂了窗口（`_present_cb`）时把帧内容 blit 上屏并换链。"""
         self._flush_rects()
         self._flush_glyphs()
+        if self._present_cb is not None:
+            self._present()
+            self._present_cb()
+
+    def _present(self) -> None:
+        """把离屏 FBO 的内容画到窗口默认帧缓冲（R8.6）。
+
+        为什么绕这一道而不是直接画进默认帧缓冲：层缓存、读回、尺寸口径都建立在
+        FBO 上；上屏只是最后一步 blit——这样"窗口"与"离屏"两条路画出来的是同一张图。
+        纹理行序沿用渲染时的 y 翻转约定，所以采样要翻 v（与 `draw_layer` 一致）。
+        """
+        gl = self._gl
+        gl.glBindFramebuffer(_FRAMEBUFFER, 0)
+        gl.glViewport(0, 0, self._width, self._height)
+        gl.glDisable(_SCISSOR_TEST)
+        program = self._layer_program
+        gl.glUseProgram(program.id)
+        gl.glUniform2f(program.uniform(b"u_viewport"), float(self._width), float(self._height))
+        gl.glUniform1i(program.uniform(b"u_texture"), 0)
+        gl.glActiveTexture(_TEXTURE0)
+        gl.glBindTexture(_TEXTURE_2D, self._color_texture)
+        x0, y0, x1, y1 = 0.0, 0.0, float(self._width), float(self._height)
+        vertices = (
+            x0,
+            y0,
+            0.0,
+            1.0,
+            x1,
+            y0,
+            1.0,
+            1.0,
+            x1,
+            y1,
+            1.0,
+            0.0,
+            x0,
+            y0,
+            0.0,
+            1.0,
+            x1,
+            y1,
+            1.0,
+            0.0,
+            x0,
+            y1,
+            0.0,
+            0.0,
+        )
+        gl.glBindBuffer(_ARRAY_BUFFER, self._vbo)
+        array = (ctypes.c_float * len(vertices))(*vertices)
+        gl.glBufferData(_ARRAY_BUFFER, ctypes.sizeof(array), array, _STREAM_DRAW)
+        stride = 4 * ctypes.sizeof(ctypes.c_float)
+        for name, offset in ((b"a_pos", 0), (b"a_uv", 8)):
+            location = program.attrib(name)
+            if location >= 0:
+                gl.glEnableVertexAttribArray(location)
+                gl.glVertexAttribPointer(location, 2, _FLOAT, 0, stride, ctypes.c_void_p(offset))
+        gl.glDrawArrays(_TRIANGLES, 0, 6)
+        gl.glBindBuffer(_ARRAY_BUFFER, 0)
+        gl.glBindTexture(_TEXTURE_2D, 0)
+        gl.glUseProgram(0)
+        # 回到离屏 FBO：screenshot() 从它读回，换链后默认帧缓冲内容不再保证
+        gl.glBindFramebuffer(_FRAMEBUFFER, self._fb)
+        gl.glViewport(0, 0, self._width, self._height)
 
     def set_scissor(self, rect: Any) -> None:
         if rect == self._scissor:
@@ -1015,6 +1130,9 @@ class WglGLDriver:
     # ------------------------------------------------------------ 内部
 
     def close(self) -> None:
+        # 挂到别人的上下文时，删除 GL 资源前必须让那个上下文 current
+        if self._make_current_cb is not None:
+            self._make_current_cb()
         gl = self._gl
         for buffer_id in (self._vbo, self._rect_vbo):
             if buffer_id:
@@ -1048,6 +1166,48 @@ class WglGLDriver:
             self._gl.user32.ReleaseDC(ctypes.c_void_p(self._hwnd), ctypes.c_void_p(self._hdc))
             self._gl.user32.DestroyWindow(ctypes.c_void_p(self._hwnd))
             self._hdc = self._hwnd = 0
+        if self._detach_cb is not None:
+            # 上下文归调用方（SDL）所有：只解除，不销毁
+            self._detach_cb()
+            self._detach_cb = None
+
+
+def sdl_gl_driver(sdl_backend: Any, window_id: int) -> WglGLDriver:
+    """把 GL 驱动挂到**SDL 创建的窗口上下文**上（R8.6 真窗口上屏）。
+
+    窗口必须以 `WindowSpec(opengl=True)` 创建。上下文归 SDL 所有：这里只创建/
+    绑定/换链，`close()` 时解除而不销毁（SDL 负责窗口生命周期）。
+
+    为什么走 SDL 而不是自己建窗口：窗口、IME、剪贴板、DPI、跨平台事件
+    都已经在 SDL2Backend 里；GL 只借它的上下文与换链，两件事各归其位。
+    """
+    lib = sdl_backend.library
+    window = sdl_backend.native_window(window_id)
+    context = lib.SDL_GL_CreateContext(window)
+    if not context:
+        raise GLUnavailableError("SDL_GL_CreateContext 失败（窗口是否用 opengl=True 创建？）")
+    if lib.SDL_GL_MakeCurrent(window, context) != 0:
+        lib.SDL_GL_DeleteContext(context)
+        raise GLUnavailableError("SDL_GL_MakeCurrent 失败")
+
+    def get_proc(name: bytes) -> int | None:
+        address = lib.SDL_GL_GetProcAddress(name)
+        return None if not address else int(address)
+
+    def make_current() -> None:
+        lib.SDL_GL_MakeCurrent(window, context)
+
+    def present() -> None:
+        lib.SDL_GL_SwapWindow(window)
+
+    driver = WglGLDriver(attach=(_GL(get_proc=get_proc), present, make_current))
+
+    def detach() -> None:
+        lib.SDL_GL_MakeCurrent(window, None)
+        lib.SDL_GL_DeleteContext(context)
+
+    driver._detach_cb = detach
+    return driver
 
 
 def windows_gl_driver() -> WglGLDriver | None:
