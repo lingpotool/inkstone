@@ -691,6 +691,13 @@ class SDL2Backend:
             self._lib.SDL_SetHint(b"SDL_WINDOWS_DPI_AWARENESS", b"permonitorv2")
             # 我们自己按 dpi_scale 缩放坐标（ADR-0015），不要 SDL 再缩一遍。
             self._lib.SDL_SetHint(b"SDL_WINDOWS_DPI_SCALING", b"0")
+            # **放行原生 IME 界面**。SDL 默认走"UI-less"模式：把
+            # WM_IME_SETCONTEXT 的 lParam 清 0，由应用自己画组合串——
+            # 微软拼音自带独立候选窗所以看不出问题，但搜狗/QQ/百度这类把
+            # 预选界面画在 IME 窗口里的输入法就**什么都不显示**，用户无从选字
+            # （实测：中文打得出、候选框不出）。设为 1 后 SDL 保留系统 IME UI。
+            # 必须在第一次 start_text_input 之前设（SDL 在 IME_Init 里读一次）。
+            self._lib.SDL_SetHint(b"SDL_IME_SHOW_UI", b"1")
         if self._lib.SDL_Init(_SDL_INIT_VIDEO) != 0:
             raise BackendError(f"SDL_Init 失败：{self._last_error()}")
         # 老 SDL 不认识上面那个 hint 时兜底（对 IME 有副作用，所以只在真没设上

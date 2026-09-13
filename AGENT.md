@@ -423,6 +423,8 @@ Phase 1 其余 DoD（文本编辑模型、macOS/Linux 真机字体验证、三�
 | ADR-0023 | **进程必须声明 per-monitor-v2 DPI 感知；逻辑像素是唯一对外口径，换算全部收在后端** | 症状：125% 屏上整个界面发虚，不如 Electron 清晰。根因不是光栅器或抗锯齿——**进程 DPI 不感知**时 Windows 把整窗位图拉伸 1.25×（实测：物理 1920×1080 的屏，进程只看到 1536×864 的虚拟桌面），我们渲染的 760×520 被系统放大成 950×650。修法：`SDL_Init` **之前**设 `SDL_WINDOWS_DPI_AWARENESS=permonitorv2` + `SDL_WINDOWS_DPI_SCALING=0`（自己缩，不要 SDL 再缩一遍），让 **SDL 自己**声明感知。**不要先调 Win32 的 `SetProcessDpiAwarenessContext`**：实测（SDL 2.32/Win11）先调它再 `SDL_Init`，IME 组合事件会被扣到上屏才一次性吐出——输入法不出候选框、拼音不可见，中文等于废掉（同样的 per-monitor-v2 由 SDL 的 hint 设置则一切正常；A/B 实测）。Win32 那条只留作老 SDL 的兜底，且在 `SDL_Init` 之后调。配套口径（**物理单位不许漏进逻辑层**）：`Backend.window_size()` 返回逻辑尺寸；`_to_logical()` 把 `PointerEvent.x/y` 与 `WINDOWEVENT_RESIZED` 的宽高从物理换算回逻辑（漏了就是"点按钮位置偏 25%"，用户实测）；`create_window`/`set_min_size`/`set_ime_rect` 反向乘缩放；`RasterFrameRenderer.begin_frame` 收逻辑尺寸（给物理值会被放大两次）。macOS/X11 的 SDL 坐标本就是逻辑单位，系数 1.0（`_window_unit_scale` 收口）。**Electron 的精致感来自这条声明，不是它的绘制 API 更高级** |
 
 
+| ADR-0024 | **放行原生 IME 界面（`SDL_IME_SHOW_UI=1`），中文输入以系统输入法的候选窗为准** | 用户实测：中文能上屏，但**搜狗输入法的预选/候选窗不出现**，无法选字。查 SDL 源码（`SDL_windowskeyboard.c`）：SDL 默认走 "UI-less" 模式——`IME_Init` 里 `UILess_SetupSinks` + `WM_IME_SETCONTEXT` 把 `*lParam = 0`，即**主动关掉 IME 自己的窗口**，要求应用自绘组合串。微软拼音自带独立候选窗所以看不出问题，搜狗/QQ/百度把预选界面画在 IME 窗口里 → 什么都不显示。修法：初始化时设 `SDL_IME_SHOW_UI=1`（必须在第一次 `start_text_input` 之前，`IME_Init` 只读一次），SDL 保留系统 IME UI。我们仍自绘组合串与下划线（与 Chromium 一致：行内组合 + 系统候选窗并存）。**"能上屏"不等于"能输入"——中文输入的可验收标准是候选窗能出来、能选字** |
+
 ## 已知待办
 
 - **颜色 emoji 目前是灰度轮廓**：FreeType 的 `FT_LOAD_RENDER` 走灰度抗锯齿，

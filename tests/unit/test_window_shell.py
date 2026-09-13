@@ -188,6 +188,17 @@ class TestSDL2WindowCapabilities:
         """界面发虚的根因是进程不感知（Windows 拉伸整窗）——初始化后必须已感知。"""
         assert dpi_awareness() == 2
 
+    @pytest.mark.skipif(sys.platform != "win32", reason="原生 IME UI 是 Windows/SDL 的选择")
+    def test_native_ime_candidate_ui_is_enabled(self, backend) -> None:
+        """SDL 默认走 UI-less 模式（把 IME 自己的窗口关掉）——搜狗/QQ 这类把预选
+        界面画在 IME 窗口里的输入法就什么都不显示，用户无从选字。必须放行原生 UI。"""
+        import ctypes
+
+        lib = backend._lib
+        lib.SDL_GetHint.restype = ctypes.c_char_p
+        lib.SDL_GetHint.argtypes = [ctypes.c_char_p]
+        assert lib.SDL_GetHint(b"SDL_IME_SHOW_UI") == b"1"
+
     def test_window_capability_calls_do_not_raise(self, backend) -> None:
         window = backend.create_window(WindowSpec(title="inkstone test", width=200, height=160))
         try:
